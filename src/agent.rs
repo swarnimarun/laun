@@ -37,8 +37,8 @@ impl CliAgent {
             ));
         }
         cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
 
         let output = cmd.output().with_context(|| {
             format!(

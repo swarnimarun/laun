@@ -67,6 +67,7 @@ impl LoopRunner {
 
         for step in 1..=max_iterations {
             let prd = PrdDocument::load(&prd_path)?;
+            println!("PRD loaded! Items found: {}", prd.items.len());
             let unchecked = prd.unchecked_items();
             if unchecked.is_empty() {
                 println!("PRD is complete. Stopping.");
