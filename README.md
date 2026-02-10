@@ -1,3 +1,7 @@
+> 🚧 **Warning**
+>
+> This project is experimental and **not production-ready**. Expect breaking changes and incomplete features. AND all your data and code to be compromised.
+
 # laun
 
 `laun` is a Rust CLI that orchestrates a two-agent implementation loop against a PRD checklist.
