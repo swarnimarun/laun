@@ -1,6 +1,6 @@
 > 🚧 **Warning**
 >
-> This project is experimental and **not production-ready**. Expect breaking changes and incomplete features. AND all your data and code to be compromised.
+> This project is experimental and **not production-ready**. Expect breaking changes and incomplete features. AND all your data and code to be compromised, if you don't know what you are doing, pls avoid for now.
 
 # laun
 
