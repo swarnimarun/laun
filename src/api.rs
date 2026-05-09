@@ -50,56 +50,6 @@ impl ApiClient {
         format!("Bearer {}", self.config.api_key)
     }
 
-    #[allow(dead_code)]
-    pub async fn chat(
-        &self,
-        messages: &[ChatMessage],
-        tools: &[Tool],
-    ) -> Result<ChatResponse> {
-        let body = serde_json::json!({
-            "model": self.config.model,
-            "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
-            "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens,
-            "stream": false,
-        });
-
-        let resp = self
-            .client
-            .post(self.chat_url())
-            .header("Authorization", self.auth_header())
-            .json(&body)
-            .send()
-            .await
-            .context("API call failed")?;
-
-        let status = resp.status();
-        let text = resp.text().await.context("failed to read response body")?;
-
-        if !status.is_success() {
-            anyhow::bail!("API error ({status}): {}", truncate(&text, 500));
-        }
-
-        let parsed: Value =
-            serde_json::from_str(&text).context("failed to parse API response")?;
-
-        let choice = parsed["choices"]
-            .as_array()
-            .and_then(|arr| arr.first())
-            .context("no choices in response")?;
-
-        let message = &choice["message"];
-        let content = message["content"].as_str().map(|s| s.to_string());
-        let tool_calls = parse_tool_calls(message);
-
-        Ok(ChatResponse {
-            content: content.filter(|s| !s.is_empty()),
-            tool_calls,
-        })
-    }
-
     pub async fn chat_stream(
         &self,
         messages: &[ChatMessage],
@@ -220,29 +170,6 @@ impl ToolCallBuilder {
             function: ToolFunction { name, arguments },
         })
     }
-}
-
-#[allow(dead_code)]
-fn parse_tool_calls(message: &Value) -> Vec<ToolCall> {
-    let Some(tc_array) = message["tool_calls"].as_array() else {
-        return Vec::new();
-    };
-    tc_array
-        .iter()
-        .filter_map(|tc| {
-            Some(ToolCall {
-                id: tc["id"].as_str()?.to_string(),
-                call_type: tc["type"].as_str().unwrap_or("function").to_string(),
-                function: ToolFunction {
-                    name: tc["function"]["name"].as_str()?.to_string(),
-                    arguments: tc["function"]["arguments"]
-                        .as_str()
-                        .unwrap_or("{}")
-                        .to_string(),
-                },
-            })
-        })
-        .collect()
 }
 
 fn truncate(s: &str, max: usize) -> String {
