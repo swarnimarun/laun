@@ -4,139 +4,116 @@
 
 # laun
 
-`laun` is a Rust CLI that orchestrates a two-agent implementation loop against a PRD checklist.
+`laun` is a goal-driven autonomous coding agent. Pass it a goal, and it uses an LLM (via any OpenAI-compatible API) to read your codebase, make changes, run validation commands, and iterate until the goal is achieved.
 
-- `loop_agent` (fast, cheaper): chooses the next PRD item and writes scoped instructions.
-- `worker_agent` (slower, stronger): makes code changes for that item.
-- Orchestrator: runs tests, retries fixes when tests fail, commits on success, and marks PRD items complete.
+The agent has access to tools for reading/writing files, running shell commands, and searching code — it works across multiple turns with automatic validation after each turn.
 
-## Why this exists
+## How it works
 
-This pattern separates planning cadence from implementation quality:
-
-- Fast model keeps momentum and task ordering.
-- Strong model handles code-heavy tasks.
-- Each agent can have different visible file/test scope in prompts.
-
-## Current capabilities
-
-- Config-driven agent commands (works with OpenCode, Codex, or custom wrappers).
-- PRD markdown checkbox parsing (`- [ ]` / `- [x]`).
-- Test gate after each worker run.
-- Retry loop with failure feedback to the worker.
-- Optional auto-commit (`git add -A && git commit`).
-- Optional auto-mark PRD item as done.
+1. You provide a goal and a config file with your API credentials.
+2. `laun` starts a terminal UI showing progress in real time.
+3. Each turn, the agent receives context about the current state (progress checkpoints, last validation results) and decides which tool to call next.
+4. After each turn, its changes are validated against your configured commands (e.g. `cargo test`, `cargo build`).
+5. `laun` writes a `PROGRESS.md` checkpoint log as it goes.
+6. The loop continues until the agent calls `finish()`, validation fails with no recovery, or max iterations are reached.
 
 ## Installation
-
-### Run from source
-
-```bash
-cargo run -- --help
-```
-
-### Build binary
 
 ```bash
 cargo build --release
 ./target/release/laun --help
 ```
 
+Or run directly:
+
+```bash
+cargo run -- "your goal here"
+```
+
 ## Quick start
 
-1. Initialize config and PRD files:
+1. Create a config file:
 
 ```bash
-laun init
+# laun.toml
+[api]
+base_url = "https://api.openai.com/v1"
+api_key = "sk-..."
+model = "gpt-4o"
 ```
 
-2. Edit `laun.toml`:
-- Set your agent command + args for your local CLI setup.
-- Set models for loop/worker.
-- Set test commands in `workflow.execution_tests`.
+(You can use any OpenAI-compatible API — OpenRouter, Groq, local LLM servers, etc.)
 
-3. Edit `PRD.md` with checklist items:
-
-```md
-- [ ] Implement feature A
-- [ ] Add tests for feature A
-- [ ] Ship docs
-```
-
-4. Validate config:
+2. Run with a goal:
 
 ```bash
-laun validate
+laun "Refactor the auth module to use async/await. Stop when cargo test passes."
 ```
 
-5. Run a dry simulation first:
+3. Watch the TUI: `q` to quit, `p`/`space` to pause/resume, `j`/`k` to scroll.
 
-```bash
-laun run --dry-run --max-iterations 1
-```
+## Config reference
 
-6. Run for real:
-
-```bash
-laun run
-```
-
-## How the loop works
-
-For each iteration:
-
-1. Load unchecked PRD items.
-2. Ask `loop_agent` for next action (JSON contract).
-3. Ask `worker_agent` to implement selected item.
-4. Run `workflow.execution_tests`.
-5. If tests fail, retry worker with failing output (`max_fix_attempts`).
-6. If tests pass:
-- optional commit (`workflow.auto_commit`)
-- optional PRD item check-off (`prd.auto_mark_completed`)
-
-## Config overview
-
-Generated defaults currently target OpenCode CLI. You can switch either agent to Codex or any custom command.
+See `laun.toml`:
 
 ```toml
-[prd]
-file = "PRD.md"
-auto_mark_completed = true
+[api]
+base_url = "https://api.openai.com/v1"   # OpenAI-compatible endpoint
+api_key = "sk-..."                         # or ${ENV_VAR} to read from env
+model = "gpt-4o"
+max_tokens = 4096
+temperature = 0.2
 
-[workflow]
-max_iterations = 12
-max_fix_attempts = 2
-auto_commit = true
-execution_tests = ["cargo test"]
+[goal]
+max_iterations = 50
+validation_commands = ["cargo test", "cargo clippy"]
+visible_files = ["src/", "Cargo.toml"]
+system_prompt = "You are a coding agent..."
 
-[loop_agent]
-provider = "opencode"
-command = "opencode"
-args = ["run", "--model", "{model}", "--thinking", "{prompt}"]
-model = "google/gemini-3-flash-preview"
-
-[worker_agent]
-provider = "opencode"
-command = "opencode"
-args = ["run", "--model", "{model}", "--thinking", "{prompt}"]
-model = "google/gemini-3-pro-preview"
+[progress]
+log_file = "PROGRESS.md"
 ```
 
-Template placeholders supported in `args`:
+### File checks
 
-- `{model}`
-- `{prompt}`
-- `{prompt_file}` (absolute temp file path containing the prompt)
+You can also configure static file existence/content checks per turn:
+
+```toml
+[[goal.file_checks]]
+path = "src/lib.rs"
+exists = true
+
+[[goal.file_checks]]
+path = "src/lib.rs"
+exists = true
+contains = "pub fn"
+```
+
+## Agent tools
+
+The agent has access to these tools:
+
+| Tool | Description |
+|------|-------------|
+| `read_file` | Read a file's contents |
+| `write_file` | Create or overwrite a file |
+| `run_command` | Run a shell command |
+| `search` | Search for a pattern in files (uses `rg`) |
+| `finish` | Declare the goal complete |
 
 ## Safety notes
 
-- `workflow.auto_commit = true` stages and commits all current workspace changes.
-- Run with `--dry-run` first to inspect flow without calling agents/tests/commits.
-- Start with a dedicated git branch.
+- The agent can run arbitrary shell commands and write arbitrary files. Run in a dedicated directory or git branch.
+- Start with a small, well-scoped goal and low `max_iterations` to test your setup.
+- Use `${ENV_VAR}` syntax in `laun.toml` to avoid hardcoding your API key: `api_key = "${OPENAI_API_KEY}"`
 
-## Usage docs
+## TUI keyboard controls
 
-Detailed command reference and advanced examples:
-
-- `docs/USAGE.md`
-
+| Key | Action |
+|-----|--------|
+| `q` | Quit (marks goal as failed) |
+| `p` / `space` | Pause / resume |
+| `j` / `↓` | Scroll agent stream down |
+| `k` / `↑` | Scroll agent stream up |
+| `g` | Jump to top of stream |
+| `G` | Jump to bottom of stream |
