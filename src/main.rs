@@ -1,11 +1,14 @@
+mod api;
 mod agent;
 mod cli;
 mod config;
-mod prd;
-mod runner;
+mod goal;
+mod tools;
+mod tui;
 
-fn main() {
-    if let Err(err) = cli::run() {
+#[tokio::main]
+async fn main() {
+    if let Err(err) = cli::run().await {
         eprintln!("error: {err:#}");
         std::process::exit(1);
     }
