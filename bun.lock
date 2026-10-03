@@ -10,6 +10,16 @@
         "typescript": "^5.9.3",
       },
     },
+    "apps/cli": {
+      "name": "cloudbear-cli",
+      "version": "0.1.0",
+      "bin": {
+        "cloudbear": "./src/index.ts",
+      },
+      "dependencies": {
+        "@cloudbear/protocol": "workspace:*",
+      },
+    },
     "apps/executor": {
       "name": "cloudbear-executor",
       "version": "0.1.0",
@@ -54,6 +64,8 @@
     "abort-controller": ["abort-controller@3.0.0", "", { "dependencies": { "event-target-shim": "^5.0.0" } }, "sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg=="],
 
     "bun-types": ["bun-types@1.4.2", "", { "dependencies": { "@types/node": "*" } }, "sha512-bxV1FgK7yBIzjRe5zBozIM4Bem11ZJcCXSrjWRG3YWLt8yFDePu4cLjpebO8OvPeIE9trbyPF4fuj3Cia4Fj3w=="],
+
+    "cloudbear-cli": ["cloudbear-cli@workspace:apps/cli"],
 
     "cloudbear-executor": ["cloudbear-executor@workspace:apps/executor"],
 

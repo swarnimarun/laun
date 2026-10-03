@@ -13,4 +13,6 @@ jobs:
           bun-version: latest
       - run: bun install --frozen-lockfile
       - run: bun run build
-      - run: bun test
+      # Use the scoped script: a bare `bun test` also picks up compiled dist/
+      # copies and runs the whole suite twice.
+      - run: bun run test
