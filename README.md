@@ -73,3 +73,6 @@ Executor on `:8081`: `POST /run` (gateway only, same bearer token).
 * Gateway bearer token shared by bridge + executor. Rotate in `.env`.
 * Pi never sees provider keys directly when OpenShell is on — keys live on gateway/host, injected only for approved endpoints.
 * Policy escalations surface as approval events; default deny on timeout.
+* Durability: pi session files + gateway `index.json` + per-session `events-<id>.jsonl`
+  all live under `/data` (persisted volume). A gateway restart replays logs and
+  marks interrupted runs `error` so nothing stays `running` forever.
