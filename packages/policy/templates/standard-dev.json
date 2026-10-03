@@ -1,0 +1,31 @@
+{
+  "$comment": "Standard dev: restrictive + git forges, npm/pypi registries. Use per-repo after reviewing advisor output.",
+  "name": "standard-dev",
+  "description": "Workdir filesystem plus read-only home dotfiles deny; network adds github, npm, pypi, model hosts.",
+  "filesystem": {
+    "read": ["${WORKDIR}", "${WORKDIR}/**"],
+    "write": ["${WORKDIR}", "${WORKDIR}/**"],
+    "deny": ["~/.ssh", "~/.gnupg", "~/.pi", "/etc", "/root"]
+  },
+  "network": {
+    "allowHosts": [
+      "${MODEL_HOST}",
+      "github.com",
+      "api.github.com",
+      "objects.githubusercontent.com",
+      "registry.npmjs.org",
+      "registry.yarnpkg.com",
+      "pypi.org",
+      "files.pythonhosted.org"
+    ],
+    "denyHosts": ["169.254.169.254", "metadata.google.internal"]
+  },
+  "processes": {
+    "allow": ["node", "bun", "npm", "npx", "python3", "pip", "uv", "git", "rg", "fd", "pi", "make"],
+    "deny": ["sudo", "su", "ssh", "docker"]
+  },
+  "credentials": {
+    "comment": "GitHub token (if any) usable only at api.github.com / github.com via OpenShell provider binding.",
+    "passthrough": []
+  }
+}

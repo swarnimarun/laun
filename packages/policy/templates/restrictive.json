@@ -1,0 +1,22 @@
+{
+  "$comment": "Default policy: agent sees only its workdir, talks only to model endpoints. Start here.",
+  "name": "restrictive",
+  "description": "Workdir-only filesystem, model-endpoints-only network, no ambient credentials.",
+  "filesystem": {
+    "read": ["${WORKDIR}", "${WORKDIR}/**"],
+    "write": ["${WORKDIR}", "${WORKDIR}/**"],
+    "deny": ["~/.ssh", "~/.gnupg", "~/.pi", "~/.config", "/etc", "/root"]
+  },
+  "network": {
+    "allowHosts": ["${MODEL_HOST}"],
+    "denyHosts": ["169.254.169.254", "metadata.google.internal"]
+  },
+  "processes": {
+    "allow": ["node", "bun", "python3", "git", "rg", "fd", "pi"],
+    "deny": ["sudo", "su", "ssh", "docker"]
+  },
+  "credentials": {
+    "comment": "Keys live on the host/gateway; sandbox gets none. OpenShell injects per approved endpoint only.",
+    "passthrough": []
+  }
+}
