@@ -1,6 +1,13 @@
 import { spawn } from "node:child_process";
 import type { AgentEvent } from "@cloudbear/protocol";
 
+/** Cap on forwarded tool output — protects gateway memory and Telegram limits. */
+export const MAX_TOOL_OUTPUT = 4000;
+
+function truncate(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max) + "…[truncated]" : s;
+}
+
 export interface PiRunOptions {
   sessionId: string;
   /** Absolute session dir for pi's own session files. */
@@ -15,8 +22,7 @@ export interface PiRunOptions {
   onEvent: (e: AgentEvent) => void;
 }
 
-export function buildPiArgs(o: { sessionId: string; piSessionDir: string; model: string; prompt: string }): string[] {
-  return [
+export function buildPiArgs(o: { sessionId: string; piSessionDir: string; model: string; prompt: string }): string[] {  return [
     "-p",
     "--mode",
     "json",
@@ -33,8 +39,11 @@ export function buildPiArgs(o: { sessionId: string; piSessionDir: string; model:
 
 /**
  * Best-effort mapping of one pi `--mode json` output line to an AgentEvent.
- * pi's JSON schema is version-dependent, so unknown shapes with no
- * message-like string field are ignored (null) instead of forwarded.
+ * Handles pi's real wire events (message_update/text_delta, tool_execution_*,
+ * agent_end/agent_settled) plus generic fallbacks for other harnesses.
+ * Unknown shapes without a message-like string field are ignored (null).
+ * Deliberately drops duplicates: text_end/turn_end repeat text_delta content,
+ * and thinking/toolcall progress is covered by tool_execution_* events.
  */
 export function parsePiJsonLine(line: string, sessionId: string): AgentEvent | null {
   const trimmed = line.trim();
@@ -50,6 +59,61 @@ export function parsePiJsonLine(line: string, sessionId: string): AgentEvent | n
   const rec = obj as Record<string, unknown>;
   const t = typeof rec["type"] === "string" ? (rec["type"] as string) : "";
   const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+
+  // pi wire events (verified against pi 1.0 --mode json output).
+  if (t === "message_update") {
+    const ev = rec["assistantMessageEvent"];
+    if (ev === null || typeof ev !== "object") return null;
+    const inner = ev as Record<string, unknown>;
+    if (inner["type"] === "text_delta") {
+      const delta = str(inner["delta"]);
+      return delta ? { type: "text", sessionId, delta } : null;
+    }
+    return null;
+  }
+  if (t === "tool_execution_start") {
+    return {
+      type: "tool_call",
+      sessionId,
+      name: str(rec["toolName"]) ?? "unknown",
+      args: rec["args"],
+    };
+  }
+  if (t === "tool_execution_end") {
+    const result = rec["result"];
+    let output: string | undefined;
+    if (result !== null && typeof result === "object") {
+      const content = (result as Record<string, unknown>)["content"];
+      if (Array.isArray(content)) {
+        const texts = content
+          .filter((b): b is Record<string, unknown> => typeof b === "object" && b !== null)
+          .map((b) => str(b["text"]))
+          .filter((s): s is string => s !== undefined);
+        if (texts.length > 0) output = truncate(texts.join("\n"), MAX_TOOL_OUTPUT);
+      }
+    }
+    return {
+      type: "tool_result",
+      sessionId,
+      name: str(rec["toolName"]) ?? "unknown",
+      ok: rec["isError"] !== true,
+      output,
+    };
+  }
+  if (t === "agent_end" || t === "agent_settled") {
+    return { type: "done", sessionId };
+  }
+  if (
+    t === "session" ||
+    t === "agent_start" ||
+    t === "turn_start" ||
+    t === "message_start" ||
+    t === "message_end" ||
+    t === "turn_end" ||
+    t === "tool_execution_update"
+  ) {
+    return null;
+  }
 
   if (t === "text" || t === "message" || t === "delta") {
     const delta = str(rec["delta"]) ?? str(rec["text"]) ?? str(rec["message"]) ?? str(rec["content"]);

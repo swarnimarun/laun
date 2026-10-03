@@ -39,7 +39,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ExecutorConfig
     gatewayToken,
     sessionDir: env["SESSION_DIR"] ?? "./data/sessions",
     piBin: env["PI_BIN"] ?? "pi",
-    defaultModel: env["MODEL"] ?? "x-ai/grok-4.6",
+    defaultModel: env["MODEL"] ?? "opencode-go/muse-spark-1.3-contributor",
     openshellEnabled,
     openshellPrefix,
     defaultTimeoutMs,

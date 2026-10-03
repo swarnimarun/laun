@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { AgentEvent } from "@cloudbear/protocol";
 import { loadConfig } from "./config.js";
 import { assertValidPrompt, assertValidSessionId, clampTimeout, resolveWorkdir } from "./paths.js";
-import { buildPiArgs, parsePiJsonLine, runPiStreaming } from "./pi.js";
+import { buildPiArgs, MAX_TOOL_OUTPUT, parsePiJsonLine, runPiStreaming } from "./pi.js";
 
 describe("executor config", () => {
   test("requires GATEWAY_TOKEN", () => {
@@ -53,7 +53,7 @@ describe("paths", () => {
 
 describe("pi", () => {
   test("buildPiArgs uses print+json+session flags", () => {
-    const args = buildPiArgs({ sessionId: "s1", piSessionDir: "/d/s1", model: "x-ai/grok-4.6", prompt: "hi" });
+    const args = buildPiArgs({ sessionId: "s1", piSessionDir: "/d/s1", model: "opencode-go/muse-spark-1.3-contributor", prompt: "hi" });
     expect(args).toEqual([
       "-p",
       "--mode",
@@ -63,13 +63,13 @@ describe("pi", () => {
       "--session-dir",
       "/d/s1",
       "--model",
-      "x-ai/grok-4.6",
+      "opencode-go/muse-spark-1.3-contributor",
       "--",
       "hi",
     ]);
   });
 
-  test("parsePiJsonLine maps shapes", () => {
+  test("parsePiJsonLine maps generic shapes", () => {
     const sid = "s1";
     expect(parsePiJsonLine(`{"type":"text","text":"hello"}`, sid)).toEqual({ type: "text", sessionId: sid, delta: "hello" });
     expect(parsePiJsonLine(`{"type":"tool_call","name":"bash","args":{"cmd":"ls"}}`, sid)).toEqual({
@@ -81,6 +81,53 @@ describe("pi", () => {
     expect(parsePiJsonLine(`{"type":"mystery","n":1}`, sid)).toBeNull();
     expect(parsePiJsonLine(`plain log line`, sid)).toEqual({ type: "text", sessionId: sid, delta: "plain log line" });
     expect(parsePiJsonLine(`   `, sid)).toBeNull();
+  });
+
+  test("parsePiJsonLine maps real pi wire events", () => {
+    const sid = "s1";
+    // streaming text
+    expect(
+      parsePiJsonLine(`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"hi"}}`, sid),
+    ).toEqual({ type: "text", sessionId: sid, delta: "hi" });
+    // thinking + text_end + turn_end are deduped away (covered by deltas / ignored)
+    expect(parsePiJsonLine(`{"type":"message_update","assistantMessageEvent":{"type":"thinking_start","contentIndex":0}}`, sid)).toBeNull();
+    expect(parsePiJsonLine(`{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":1,"content":"hi"}}`, sid)).toBeNull();
+    expect(parsePiJsonLine(`{"type":"turn_end","message":{"role":"assistant","content":[]}}`, sid)).toBeNull();
+    // lifecycle noise
+    for (const t of ["session", "agent_start", "turn_start", "message_start", "message_end", "tool_execution_update"]) {
+      expect(parsePiJsonLine(`{"type":"${t}"}`, sid)).toBeNull();
+    }
+    // tool calls with args + results
+    expect(
+      parsePiJsonLine(`{"type":"tool_execution_start","toolCallId":"c1","toolName":"read","args":{"path":"a.txt"}}`, sid),
+    ).toEqual({ type: "tool_call", sessionId: sid, name: "read", args: { path: "a.txt" } });
+    expect(
+      parsePiJsonLine(
+        `{"type":"tool_execution_end","toolCallId":"c1","toolName":"read","result":{"content":[{"type":"text","text":"hello"}]},"isError":false}`,
+        sid,
+      ),
+    ).toEqual({ type: "tool_result", sessionId: sid, name: "read", ok: true, output: "hello" });
+    const errRes = parsePiJsonLine(
+      `{"type":"tool_execution_end","toolCallId":"c1","toolName":"read","result":{"content":[{"type":"text","text":"nope"}]},"isError":true}`,
+      sid,
+    );
+    expect(errRes?.type).toBe("tool_result");
+    if (errRes?.type === "tool_result") expect(errRes.ok).toBe(false);
+    // completion markers terminate Telegram polling
+    expect(parsePiJsonLine(`{"type":"agent_end","messages":[]}`, sid)).toEqual({ type: "done", sessionId: sid });
+    expect(parsePiJsonLine(`{"type":"agent_settled"}`, sid)).toEqual({ type: "done", sessionId: sid });
+  });
+
+  test("parsePiJsonLine truncates huge tool output", () => {
+    const big = "x".repeat(MAX_TOOL_OUTPUT + 100);
+    const ev = parsePiJsonLine(
+      JSON.stringify({ type: "tool_execution_end", toolCallId: "c", toolName: "bash", result: { content: [{ type: "text", text: big }] } }),
+      "s1",
+    );
+    expect(ev?.type).toBe("tool_result");
+    const out = (ev as { output: string }).output;
+    expect(out.length).toBeLessThanOrEqual(MAX_TOOL_OUTPUT + 20);
+    expect(out.endsWith("…[truncated]")).toBe(true);
   });
 });
 
