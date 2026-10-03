@@ -25,10 +25,10 @@ Useful:
 ```bash
 docker compose -f deploy/docker-compose.yml --env-file .env logs -f
 curl localhost:8080/health && curl localhost:8081/health
-WORKDIR=/data/sessions/<id>/work MODEL_HOST=openrouter.ai bun packages/policy/src/render.ts restrictive
+WORKDIR=/data/sessions/<id>/work MODEL_HOST=YOUR_MODEL_HOST bun packages/policy/src/render.ts restrictive
 ```
 
-Model setup (Grok via xAI key, OpenRouter, or pi subscription): see `examples/grok.md`.
+Model setup (Muse via opencode-go): see `examples/models.md`.
 OpenShell policy mapping: see `examples/openshell-policy-notes.md`.
 
 ## Local dev (Bun-only)
@@ -55,7 +55,7 @@ bun run dev:bridge     # long-polling Telegram
 * `apps/gateway` — tiny HTTP API + SSE. Auth: `Authorization: Bearer $GATEWAY_TOKEN`. Keeps session index.
 * `apps/telegram-bridge` — grammY long-polling bot, allowlisted user IDs only.
 * `deploy/` — compose, env example, install script, systemd unit.
-* `examples/` — Grok provider config, pi extension wiring.
+* `examples/` — model setup (Muse via opencode-go), OpenShell policy notes.
 
 ## API (gateway :8080)
 

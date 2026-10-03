@@ -10,7 +10,7 @@ describe("protocol", () => {
   test("normalizeCreateSession applies defaults", () => {
     const s = normalizeCreateSession({ goal: "  fix tests  " });
     expect(s.goal).toBe("fix tests");
-    expect(s.model).toBe("x-ai/grok-4.6");
+    expect(s.model).toBe("opencode-go/muse-spark-1.3-contributor");
     expect(s.runtime).toBe("pi");
   });
 

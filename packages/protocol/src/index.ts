@@ -15,7 +15,7 @@ export interface CreateSessionRequest {
   goal: string;
   /** Optional repo path or URL checked out inside the executor workdir. */
   repo?: string;
-  /** Pi-style model ref, e.g. "x-ai/grok-4.6" or "openrouter/x-ai/grok-4.6". */
+  /** Pi-style model ref, e.g. "opencode-go/muse-spark-1.3-contributor". */
   model?: string;
   runtime?: RuntimeKind;
 }
@@ -61,7 +61,7 @@ export interface SessionRecord {
   updatedAt: string;
 }
 
-export const DEFAULT_MODEL = "x-ai/grok-4.6";
+export const DEFAULT_MODEL = "opencode-go/muse-spark-1.3-contributor";
 export const DEFAULT_RUNTIME: RuntimeKind = "pi";
 export const GATEWAY_PORT = 8080;
 export const EXECUTOR_PORT = 8081;

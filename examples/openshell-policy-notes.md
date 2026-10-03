@@ -8,7 +8,7 @@
 ## Render a template for a session
 
 ```bash
-WORKDIR=/data/sessions/<id>/work MODEL_HOST=openrouter.ai \
+WORKDIR=/data/sessions/<id>/work MODEL_HOST=YOUR_MODEL_HOST \
   bun packages/policy/src/render.ts restrictive
 ```
 
@@ -28,7 +28,8 @@ WORKDIR=/data/sessions/<id>/work MODEL_HOST=openrouter.ai \
 
 ## Rules of thumb
 
-* Keys (XAI/OpenRouter/GitHub) live on the host/gateway env, never in the sandbox.
+* Model provider credentials live in the executor host's `~/.pi/agent/auth.json`
+  (mounted read-only into the executor container), never in the sandbox.
 * One sandbox per sensitivity level; don't reuse the dev sandbox for personal data.
 * Telegram approvals in cloudbear v1 are acknowledge-style (logged + broadcast).
   Hard blocking happens here, at the policy layer: deny-by-default + prover review.

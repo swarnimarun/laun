@@ -1,5 +1,5 @@
 // Render a policy template to stdout.
-// Usage: WORKDIR=/data/sessions/<id>/work MODEL_HOST=openrouter.ai bun packages/policy/src/render.ts restrictive
+// Usage: WORKDIR=/data/sessions/<id>/work MODEL_HOST=YOUR_MODEL_HOST bun packages/policy/src/render.ts restrictive
 import { loadTemplate, renderTemplate } from "./index.js";
 
 const name = process.argv[2];

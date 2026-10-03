@@ -35,7 +35,8 @@ bun install
 if [ ! -f .env ]; then
   echo "==> Creating .env from deploy/.env.example (EDIT IT NOW)"
   cp deploy/.env.example .env
-  echo "    Fill in GATEWAY_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWLIST_IDS, model keys."
+  echo "    Fill in GATEWAY_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWLIST_IDS."
+  echo "    Model auth comes from this host's pi login (~/.pi/agent/auth.json) — see examples/models.md."
 fi
 
 echo "==> Typecheck + tests"

@@ -25,7 +25,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     allowlist: parseAllowlist(env["TELEGRAM_ALLOWLIST_IDS"]),
     gatewayUrl: (env["GATEWAY_URL"] ?? "http://localhost:8080").replace(/\/$/, ""),
     gatewayToken: required(env, "GATEWAY_TOKEN"),
-    defaultModel: env["MODEL"] ?? "x-ai/grok-4.6",
+    defaultModel: env["MODEL"] ?? "opencode-go/muse-spark-1.3-contributor",
     pollMs,
   };
 }

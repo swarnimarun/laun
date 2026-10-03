@@ -15,7 +15,7 @@ describe("policy", () => {
 
   test("render fills vars, fails closed on missing", () => {
     const tpl = loadTemplate("restrictive");
-    const rendered = renderTemplate(tpl, { WORKDIR: "/data/work/abc", MODEL_HOST: "openrouter.ai" });
+    const rendered = renderTemplate(tpl, { WORKDIR: "/data/work/abc", MODEL_HOST: "model-gateway.example" });
     expect(JSON.stringify(rendered)).not.toContain("${");
     expect(() => renderTemplate(tpl, { WORKDIR: "/x" })).toThrow("MODEL_HOST");
   });

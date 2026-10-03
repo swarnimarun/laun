@@ -12,15 +12,17 @@ services:
       GATEWAY_TOKEN: ${GATEWAY_TOKEN:?set GATEWAY_TOKEN in .env}
       SESSION_DIR: /data/sessions
       PI_BIN: ${PI_BIN:-pi}
-      MODEL: ${MODEL:-x-ai/grok-4.6}
+      MODEL: ${MODEL:-opencode-go/muse-spark-1.3-contributor}
       RUN_TIMEOUT_MS: ${RUN_TIMEOUT_MS:-600000}
       OPENSHELL_ENABLED: ${OPENSHELL_ENABLED:-false}
       OPENSHELL_PREFIX: ${OPENSHELL_PREFIX:-}
-      # Model provider keys (optional — pick per examples/grok.md; empty is fine).
-      XAI_API_KEY: ${XAI_API_KEY:-}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      # No model keys here on purpose: pi authenticates from the executor host's
+      # ~/.pi/agent/auth.json (see examples/models.md). Never bake keys into images.
     volumes:
       - cloudbear-data:/data
+      # pi auth lives here (host login, e.g. opencode-go). The executor reads it;
+      # the agent itself stays confined by OpenShell policy. See examples/models.md.
+      - ${HOME}/.pi:/root/.pi:ro
       # Give the agent a workspace that survives restarts. Mount your repos here:
       # - /srv/repos:/repos:ro
     restart: unless-stopped
@@ -66,7 +68,7 @@ services:
       TELEGRAM_ALLOWLIST_IDS: ${TELEGRAM_ALLOWLIST_IDS:?set TELEGRAM_ALLOWLIST_IDS in .env}
       GATEWAY_URL: http://gateway:8080
       GATEWAY_TOKEN: ${GATEWAY_TOKEN:?set GATEWAY_TOKEN in .env}
-      MODEL: ${MODEL:-x-ai/grok-4.6}
+      MODEL: ${MODEL:-opencode-go/muse-spark-1.3-contributor}
       BRIDGE_POLL_MS: ${BRIDGE_POLL_MS:-2000}
     depends_on:
       gateway:
