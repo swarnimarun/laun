@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "references": [
+    { "path": "./packages/protocol" },
+    { "path": "./packages/policy" },
+    { "path": "./apps/executor" },
+    { "path": "./apps/gateway" },
+    { "path": "./apps/telegram-bridge" }
+  ]
+}

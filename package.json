@@ -1,0 +1,26 @@
+{
+  "name": "cloudbear",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted remote agent executor: Pi-first, OpenShell policy sandbox, Telegram bridge. Single VPS, 24/7.",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "npm run test --workspaces --if-present",
+    "dev:gateway": "npm run dev --workspace apps/gateway",
+    "dev:executor": "npm run dev --workspace apps/executor",
+    "dev:bridge": "npm run dev --workspace apps/telegram-bridge"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "@types/node": "^22.19.0"
+  }
+}
