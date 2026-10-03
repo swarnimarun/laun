@@ -103,3 +103,39 @@ export function checkBearer(authHeader: string | null | undefined, expectedToken
   for (let i = 0; i < got.length; i++) diff |= got.charCodeAt(i) ^ expectedToken.charCodeAt(i);
   return diff === 0;
 }
+
+// ---------------------------------------------------------------------------
+// Agent keys: the human-facing credential minted by `cloudbear setup` and used
+// by the CLI and web UI. Distinct from GATEWAY_TOKEN, which stays service-only.
+// Wire form: cb_<id>_<secret>. Only the sha256 of <secret> is ever stored.
+// ---------------------------------------------------------------------------
+
+export const AGENT_KEY_PREFIX = "cb";
+const AGENT_KEY_RE = /^cb_([0-9a-f]{8,32})_([A-Za-z0-9_-]{20,128})$/;
+const KEY_ID_RE = /^[0-9a-f]{8,32}$/;
+
+export interface AgentKeyParts {
+  id: string;
+  secret: string;
+}
+
+export function formatAgentKey(id: string, secret: string): string {
+  if (!KEY_ID_RE.test(id)) throw new Error("invalid agent key id");
+  if (!AGENT_KEY_RE.test(`${AGENT_KEY_PREFIX}_${id}_${secret}`)) throw new Error("invalid agent key secret");
+  return `${AGENT_KEY_PREFIX}_${id}_${secret}`;
+}
+
+/** Strict parse. Returns null for anything that is not a well-formed agent key. */
+export function parseAgentKey(raw: string | null | undefined): AgentKeyParts | null {
+  if (!raw) return null;
+  const m = raw.trim().match(AGENT_KEY_RE);
+  if (!m) return null;
+  return { id: m[1], secret: m[2] };
+}
+
+/** Extract a bearer token from an authorization header, if present. */
+export function bearerToken(authHeader: string | null | undefined): string | null {
+  if (!authHeader) return null;
+  const m = authHeader.match(/^Bearer\s+(.+)$/i);
+  return m ? m[1].trim() : null;
+}
