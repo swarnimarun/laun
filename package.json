@@ -9,18 +9,20 @@
     "packages/*"
   ],
   "engines": {
-    "node": ">=22"
+    "bun": ">=1.2"
   },
+  "packageManager": "bun@1.4.2",
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "npm run test --workspaces --if-present",
-    "dev:gateway": "npm run dev --workspace apps/gateway",
-    "dev:executor": "npm run dev --workspace apps/executor",
-    "dev:bridge": "npm run dev --workspace apps/telegram-bridge"
+    "build": "bun x tsc -b",
+    "typecheck": "bun x tsc --noEmit -p tsconfig.json",
+    "test": "bun test",
+    "dev:gateway": "bun --hot apps/gateway/src/index.ts",
+    "dev:executor": "bun --hot apps/executor/src/index.ts",
+    "dev:bridge": "bun --hot apps/telegram-bridge/src/index.ts"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
-    "@types/node": "^22.19.0"
+    "@types/node": "^22.19.0",
+    "bun-types": "latest"
   }
 }

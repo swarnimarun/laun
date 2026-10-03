@@ -18,20 +18,20 @@ docker compose -f deploy/docker-compose.yml logs -f
 
 Single VPS only for v1. No K8s. Sessions live in `./data/sessions` (mount this to a volume).
 
-## Local dev
+## Local dev (Bun-only)
 
 ```bash
-npm install
-npm run build
-npm run test
+bun install
+bun run build
+bun test
 ```
 
 Run each service locally (needs `pi` on PATH + `.env`):
 
 ```bash
-npm run dev:executor   # :8081
-npm run dev:gateway    # :8080
-npm run dev:bridge     # long-polling Telegram
+bun run dev:executor   # :8081
+bun run dev:gateway    # :8080
+bun run dev:bridge     # long-polling Telegram
 ```
 
 ## Layout
