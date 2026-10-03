@@ -1,3 +1,5 @@
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type {
   AgentEvent,
   ApprovalDecision,
@@ -18,15 +20,51 @@ interface SessionBus {
   pendingApprovals: Map<string, AgentEvent & { type: "approval_request" }>;
 }
 
+const safeFile = (id: string) => `events-${id.replace(/[^A-Za-z0-9_-]/g, "_")}.jsonl`;
+
 export function createGateway(cfg: GatewayConfig, store?: SessionStore) {
   const sessions = store ?? new SessionStore(cfg.dataDir);
   const buses = new Map<string, SessionBus>();
   const running = new Set<string>();
 
+  const eventsFile = (id: string): string => join(cfg.dataDir, safeFile(id));
+
+  /** Rebuild in-memory bus from the persisted JSONL log (survives restarts). */
+  function replay(id: string): Pick<SessionBus, "events" | "pendingApprovals"> {
+    const events: AgentEvent[] = [];
+    try {
+      if (!existsSync(eventsFile(id))) return { events, pendingApprovals: new Map() };
+      const lines = readFileSync(eventsFile(id), "utf8").split("\n").filter(Boolean);
+      for (const line of lines.slice(-MAX_EVENTS_PER_SESSION)) {
+        try {
+          const e = JSON.parse(line) as AgentEvent;
+          if (e && typeof e === "object" && typeof e.type === "string") events.push(e);
+        } catch {
+          // skip corrupt line
+        }
+      }
+    } catch {
+      return { events, pendingApprovals: new Map() };
+    }
+    const decided = new Set<string>();
+    for (const e of events) {
+      if (e.type === "status" && e.message) {
+        const m = e.message.match(/^approval (\S+) (approve|deny)/);
+        if (m) decided.add(m[1]);
+      }
+    }
+    const pendingApprovals = new Map<string, AgentEvent & { type: "approval_request" }>();
+    for (const e of events) {
+      if (e.type === "approval_request" && !decided.has(e.requestId)) pendingApprovals.set(e.requestId, e);
+    }
+    return { events, pendingApprovals };
+  }
+
   const busFor = (id: string): SessionBus => {
     let b = buses.get(id);
     if (!b) {
-      b = { events: [], subs: new Set(), pendingApprovals: new Map() };
+      const restored = replay(id);
+      b = { events: restored.events, subs: new Set(), pendingApprovals: restored.pendingApprovals };
       buses.set(id, b);
     }
     return b;
@@ -36,6 +74,11 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore) {
     const b = busFor(sessionId);
     b.events.push(e);
     if (b.events.length > MAX_EVENTS_PER_SESSION) b.events.splice(0, b.events.length - MAX_EVENTS_PER_SESSION);
+    try {
+      appendFileSync(eventsFile(sessionId), JSON.stringify(e) + "\n");
+    } catch (err) {
+      console.error(`[gateway] failed to persist event for ${sessionId}: ${(err as Error).message}`);
+    }
     if (e.type === "approval_request") {
       b.pendingApprovals.set(e.requestId, e);
       sessions.setStatus(sessionId, "waiting_approval");
@@ -73,6 +116,18 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore) {
       setStatus(sessionId, "error");
     } finally {
       running.delete(sessionId);
+    }
+  }
+
+  // Boot recovery: runs interrupted by a restart must not stay "running" forever.
+  for (const rec of sessions.list()) {
+    if (rec.status === "running" || rec.status === "waiting_approval") {
+      sessions.setStatus(rec.id, "error");
+      publish(rec.id, {
+        type: "error",
+        sessionId: rec.id,
+        message: "gateway restarted during run — send a new message to retry",
+      });
     }
   }
 

@@ -62,3 +62,45 @@ describe("gateway logic (no executor calls)", () => {
     expect(() => gw.sendMessage(rec.id, { text: "   " })).toThrow("text is required");
   });
 });
+
+describe("event persistence + boot recovery", () => {
+  function gwAt(dir: string) {
+    return createGateway(
+      { port: 8080, gatewayToken: "t", executorUrl: "http://localhost:9", dataDir: dir },
+      new SessionStore(dir),
+    );
+  }
+
+  test("events survive a restart via JSONL replay", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-persist-"));
+    const gw1 = gwAt(dir);
+    const rec = gw1.sessions.create({ goal: "g", model: "m", runtime: "pi" });
+    gw1.publish(rec.id, { type: "text", sessionId: rec.id, delta: "hello" });
+    gw1.publish(rec.id, { type: "approval_request", sessionId: rec.id, requestId: "r1", reason: "need x" });
+
+    const gw2 = gwAt(dir);
+    // boot recovery marked the waiting_approval session errored (its run died with gw1),
+    // but the approval request itself still replays as pending.
+    expect(gw2.sessions.get(rec.id)?.status).toBe("error");
+    const log = gw2.log(rec.id, 0);
+    expect(log.events.length).toBe(3);
+    expect(gw2.pendingApprovals(rec.id).map((a) => a.requestId)).toEqual(["r1"]);
+    // decided approvals are not resurrected
+    gw2.decideApproval(rec.id, { requestId: "r1", decision: "approve" });
+    const gw3 = gwAt(dir);
+    expect(gw3.pendingApprovals(rec.id)).toEqual([]);
+  });
+
+  test("stale running sessions become errors on boot", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-stale-"));
+    const gw1 = gwAt(dir);
+    const rec = gw1.sessions.create({ goal: "g", model: "m", runtime: "pi" });
+    gw1.sessions.setStatus(rec.id, "running");
+
+    const gw2 = gwAt(dir);
+    expect(gw2.sessions.get(rec.id)?.status).toBe("error");
+    expect(
+      gw2.log(rec.id, 0).events.some((e) => e.type === "error" && e.message.includes("restarted")),
+    ).toBe(true);
+  });
+});
