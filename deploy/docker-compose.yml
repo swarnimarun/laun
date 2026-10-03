@@ -16,6 +16,9 @@ services:
       RUN_TIMEOUT_MS: ${RUN_TIMEOUT_MS:-600000}
       OPENSHELL_ENABLED: ${OPENSHELL_ENABLED:-false}
       OPENSHELL_PREFIX: ${OPENSHELL_PREFIX:-}
+      # Model provider keys (optional — pick per examples/grok.md; empty is fine).
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
     volumes:
       - cloudbear-data:/data
       # Give the agent a workspace that survives restarts. Mount your repos here:

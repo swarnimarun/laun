@@ -23,5 +23,7 @@ COPY packages ./packages
 COPY apps ./apps
 RUN bun install --frozen-lockfile
 
+# Persist the build arg as a runtime env (ARGs alone don't survive into the container).
+ENV APP=${APP}
 ENV NODE_ENV=production
 CMD ["sh", "-c", "bun ${APP}/src/index.ts"]
