@@ -1,9 +1,54 @@
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { extname, join, resolve, sep } from "node:path";
 import { loadConfig } from "./config.js";
 import { createGateway } from "./server.js";
 import { SessionStore } from "./store.js";
 
 const cfg = loadConfig();
 const gw = createGateway(cfg, new SessionStore(cfg.dataDir));
+
+const CONTENT_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+  ".txt": "text/plain; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
+};
+
+/**
+ * Serve the browser UI from apps/gateway/public. Public by design: the assets
+ * carry no secrets, and every API call behind them requires a bearer token.
+ * Returns null when the path escapes publicDir or the file does not exist.
+ */
+function serveStatic(pathname: string): Response | null {
+  const rel =
+    pathname === "/" || pathname === "/ui" || pathname === "/ui/"
+      ? "index.html"
+      : pathname.startsWith("/ui/")
+        ? pathname.slice("/ui/".length)
+        : null;
+  if (!rel || rel.includes("\0")) return null;
+  const base = resolve(cfg.publicDir);
+  const file = resolve(join(base, rel));
+  if (file !== base && !file.startsWith(base + sep)) return null;
+  try {
+    if (!existsSync(file) || !statSync(file).isFile()) return null;
+    return new Response(readFileSync(file), {
+      headers: {
+        "content-type": CONTENT_TYPES[extname(file).toLowerCase()] ?? "application/octet-stream",
+        "cache-control": "no-cache",
+      },
+    });
+  } catch {
+    return null;
+  }
+}
 
 Bun.serve({
   port: cfg.port,
@@ -14,11 +59,39 @@ Bun.serve({
     if (path === "/health" && req.method === "GET") {
       return Response.json({ ok: true, service: "gateway", executor: cfg.executorUrl });
     }
-    if (!gw.auth(req)) {
-      return Response.json({ error: "unauthorized" }, { status: 401 });
+    if (req.method === "GET" && (path === "/" || path.startsWith("/ui/") || path === "/favicon.ico")) {
+      const asset = serveStatic(path);
+      if (asset) return asset;
+      if (path === "/favicon.ico") return new Response(null, { status: 204 });
+      return err("not found", 404);
     }
 
+    const id = gw.authenticate(req);
+    if (!id) return Response.json({ error: "unauthorized" }, { status: 401 });
+    const serviceOnly = id.kind === "service";
+
     try {
+      // Agent key management: service token only — a leaked agent key must not
+      // be able to mint or revoke keys.
+      if (path === "/keys" && req.method === "POST") {
+        if (!serviceOnly) return err("service token required", 403);
+        const body = await req.json().catch(() => null);
+        const label = body && typeof body === "object" ? (body as { label?: unknown }).label : undefined;
+        if (label !== undefined && (typeof label !== "string" || label.length > 64)) return err("invalid label", 400);
+        const { key, record } = gw.keys.add(typeof label === "string" ? label : "default");
+        // The only place a key is ever returned. Never logged.
+        return Response.json({ key, record }, { status: 201 });
+      }
+      if (path === "/keys" && req.method === "GET") {
+        if (!serviceOnly) return err("service token required", 403);
+        return Response.json({ keys: gw.keys.list() });
+      }
+      const km = path.match(/^\/keys\/([0-9a-f]{8,32})$/);
+      if (km && req.method === "DELETE") {
+        if (!serviceOnly) return err("service token required", 403);
+        return Response.json({ ok: gw.keys.revoke(km![1]) });
+      }
+
       // POST /sessions
       if (path === "/sessions" && req.method === "POST") {
         const body = await req.json().catch(() => null);
@@ -32,26 +105,26 @@ Bun.serve({
       }
       const m = path.match(/^\/sessions\/([A-Za-z0-9_-]{1,64})(\/messages|\/events|\/log|\/approvals)?$/);
       if (m) {
-        const id = m[1];
+        const sessionId = m[1];
         const suffix = m[2] ?? "";
-        const rec = gw.sessions.get(id);
+        const rec = gw.sessions.get(sessionId);
         if (!rec) return err("session not found", 404);
 
         if (suffix === "" && req.method === "GET") {
-          return Response.json({ session: rec, pendingApprovals: gw.pendingApprovals(id) });
+          return Response.json({ session: rec, pendingApprovals: gw.pendingApprovals(sessionId) });
         }
         if (suffix === "/messages" && req.method === "POST") {
           const body = await req.json().catch(() => null);
           if (!body || typeof body !== "object") return err("invalid JSON body", 400);
-          gw.sendMessage(id, body as never);
-          return Response.json({ accepted: true, sessionId: id });
+          gw.sendMessage(sessionId, body as never);
+          return Response.json({ accepted: true, sessionId });
         }
         if (suffix === "/log" && req.method === "GET") {
           const since = Number(url.searchParams.get("since") ?? 0);
-          return Response.json({ sessionId: id, ...gw.log(id, since) });
+          return Response.json({ sessionId, ...gw.log(sessionId, since) });
         }
         if (suffix === "/events" && req.method === "GET") {
-          const bus = gw.busFor(id);
+          const bus = gw.busFor(sessionId);
           const stream = new ReadableStream({
             start(controller) {
               const enc = new TextEncoder();
@@ -74,7 +147,7 @@ Bun.serve({
         if (suffix === "/approvals" && req.method === "POST") {
           const body = await req.json().catch(() => null);
           if (!body || typeof body !== "object") return err("invalid JSON body", 400);
-          gw.decideApproval(id, body as never);
+          gw.decideApproval(sessionId, body as never, id.kind === "agent" ? id.label : "service");
           return Response.json({ ok: true });
         }
       }

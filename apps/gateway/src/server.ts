@@ -7,9 +7,10 @@ import type {
   SendMessageRequest,
   SessionRecord,
 } from "@cloudbear/protocol";
-import { checkBearer, normalizeCreateSession } from "@cloudbear/protocol";
+import { bearerToken, checkBearer, normalizeCreateSession } from "@cloudbear/protocol";
 import type { GatewayConfig } from "./config.js";
 import { streamExecutorRun } from "./executorClient.js";
+import { AgentKeyStore } from "./keys.js";
 import { SessionStore } from "./store.js";
 
 const MAX_EVENTS_PER_SESSION = 2000;
@@ -22,10 +23,26 @@ interface SessionBus {
 
 const safeFile = (id: string) => `events-${id.replace(/[^A-Za-z0-9_-]/g, "_")}.jsonl`;
 
-export function createGateway(cfg: GatewayConfig, store?: SessionStore) {
+/** Who is calling: an internal service, or a human/CLI/web client using an agent key. */
+export type GatewayIdentity =
+  | { kind: "service" }
+  | { kind: "agent"; keyId: string; label: string };
+
+export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore?: AgentKeyStore) {
   const sessions = store ?? new SessionStore(cfg.dataDir);
+  const keys = keyStore ?? new AgentKeyStore(cfg.dataDir);
   const buses = new Map<string, SessionBus>();
   const running = new Set<string>();
+
+  // A key minted before the gateway started (setup writes it into .env).
+  if (cfg.bootstrapKey) {
+    try {
+      const rec = keys.importKey(cfg.bootstrapKey);
+      console.log(`[gateway] agent key ${rec.id} ready (${rec.label})`);
+    } catch (e) {
+      throw new Error(`CLOUDBEAR_KEY invalid: ${(e as Error).message}`);
+    }
+  }
 
   const eventsFile = (id: string): string => join(cfg.dataDir, safeFile(id));
 
@@ -139,9 +156,19 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore) {
     running,
     busFor,
     publish,
+    keys,
+
+    /** Service token (internal) or a valid agent key (humans, CLI, web UI). */
+    authenticate(req: Request): GatewayIdentity | null {
+      const token = bearerToken(req.headers.get("authorization"));
+      if (!token) return null;
+      if (checkBearer(`Bearer ${token}`, cfg.gatewayToken)) return { kind: "service" };
+      const rec = keys.verify(token);
+      return rec ? { kind: "agent", keyId: rec.id, label: rec.label } : null;
+    },
 
     auth(req: Request): boolean {
-      return checkBearer(req.headers.get("authorization"), cfg.gatewayToken);
+      return this.authenticate(req) !== null;
     },
 
     createSession(input: CreateSessionRequest): SessionRecord {

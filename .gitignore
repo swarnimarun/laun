@@ -7,3 +7,4 @@ data/
 events-*.jsonl
 *.log
 .DS_Store
+.pi-subagents/

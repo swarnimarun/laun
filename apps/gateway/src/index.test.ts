@@ -10,7 +10,7 @@ function testGw() {
   const dir = mkdtempSync(join(tmpdir(), "cb-gw-"));
   const store = new SessionStore(dir);
   return createGateway(
-    { port: 8080, gatewayToken: "t", executorUrl: "http://localhost:9", dataDir: dir },
+    { port: 8080, gatewayToken: "t", executorUrl: "http://localhost:9", dataDir: dir, publicDir: dir },
     store,
   );
 }
@@ -66,7 +66,7 @@ describe("gateway logic (no executor calls)", () => {
 describe("event persistence + boot recovery", () => {
   function gwAt(dir: string) {
     return createGateway(
-      { port: 8080, gatewayToken: "t", executorUrl: "http://localhost:9", dataDir: dir },
+      { port: 8080, gatewayToken: "t", executorUrl: "http://localhost:9", dataDir: dir, publicDir: dir },
       new SessionStore(dir),
     );
   }

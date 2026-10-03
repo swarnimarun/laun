@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>cloudbear</title>
+    <link rel="icon" href="data:," />
+    <!-- The page is served by GET /; assets are served by GET /ui/<file>. -->
+    <link rel="stylesheet" href="/ui/style.css" />
+  </head>
+  <body>
+    <!-- Login: shown until the gateway accepts a stored or pasted agent key. -->
+    <section id="login" class="login">
+      <form id="login-form" class="card">
+        <h1>🐻 cloudbear</h1>
+        <p class="muted">Paste the agent key printed by <code>cloudbear setup</code>.</p>
+        <label for="key-input">Agent key</label>
+        <input id="key-input" type="password" placeholder="cb_..." autocomplete="off" spellcheck="false" />
+        <p id="login-error" class="error" role="alert"></p>
+        <button id="login-btn" class="primary" type="submit">Connect</button>
+      </form>
+    </section>
+
+    <div id="app" class="app" hidden>
+      <aside class="sidebar">
+        <header class="sidebar-head">
+          <span class="brand">🐻 cloudbear</span>
+          <span class="head-actions">
+            <button id="new-session-btn" type="button" title="New session">+ New</button>
+            <button id="refresh-btn" type="button" title="Refresh sessions">⟳</button>
+          </span>
+        </header>
+        <!-- New session: goal required, blank model means the server default. -->
+        <form id="new-session-form" class="new-session" hidden>
+          <textarea id="goal-input" rows="3" placeholder="What should the agent do?" required></textarea>
+          <input id="model-input" type="text" placeholder="model (blank = server default)" autocomplete="off" spellcheck="false" />
+          <p id="new-session-error" class="error" role="alert"></p>
+          <span class="row">
+            <button class="primary" type="submit">Start session</button>
+            <button id="new-session-cancel" type="button">Cancel</button>
+          </span>
+        </form>
+        <nav id="session-list" class="session-list" aria-label="Sessions"></nav>
+        <footer class="sidebar-foot">
+          <span id="conn-chip" class="chip">…</span>
+          <button id="disconnect-btn" class="link" type="button">Disconnect</button>
+        </footer>
+      </aside>
+
+      <main class="main">
+        <header id="session-header" class="session-header" hidden>
+          <div class="row">
+            <span id="sh-id" class="mono"></span>
+            <span id="sh-status" class="badge"></span>
+            <span id="sh-model" class="mono muted"></span>
+            <span class="spacer"></span>
+            <span id="follow-chip" class="chip">● live</span>
+          </div>
+          <p id="sh-goal" class="goal"></p>
+        </header>
+        <!-- Pending approvals, fed by GET /sessions/:id and live approval_request events. -->
+        <div id="approvals" class="approvals" hidden></div>
+        <div class="transcript-wrap">
+          <div id="transcript" class="transcript" hidden></div>
+          <div id="empty-state" class="empty muted">Select a session on the left, or start a new one.</div>
+          <button id="jump-btn" class="jump" type="button" hidden>↓ Jump to latest</button>
+        </div>
+        <form id="composer" class="composer" hidden>
+          <div class="composer-row">
+            <textarea id="message-input" rows="2" placeholder="Message the agent… (Enter to send, Shift+Enter for a newline)"></textarea>
+            <button id="send-btn" class="primary" type="submit">Send</button>
+          </div>
+          <p id="composer-note" class="note" role="status"></p>
+        </form>
+      </main>
+    </div>
+
+    <script type="module" src="/ui/app.js"></script>
+  </body>
+</html>
