@@ -83,6 +83,9 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore) {
       b.pendingApprovals.set(e.requestId, e);
       sessions.setStatus(sessionId, "waiting_approval");
     }
+    // An error event is authoritative: never leave a failed run looking alive.
+    if (e.type === "error") sessions.setStatus(sessionId, "error");
+    if (e.type === "done") sessions.setStatus(sessionId, "done");
     for (const sub of b.subs) {
       try {
         sub(e);

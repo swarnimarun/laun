@@ -46,7 +46,7 @@ export function createHandler(cfg: ExecutorConfig) {
           const send = (e: AgentEvent) => controller.enqueue(JSON.stringify(e) + "\n");
           send({ type: "status", sessionId: body.sessionId, status: "running", message: `model ${model}` });
           try {
-            await runPiStreaming({
+            const result = await runPiStreaming({
               sessionId: body.sessionId,
               piSessionDir: resolveSessionDir(cfg.sessionDir, body.sessionId),
               workdir,
@@ -57,7 +57,18 @@ export function createHandler(cfg: ExecutorConfig) {
               timeoutMs,
               onEvent: send,
             });
-            send({ type: "status", sessionId: body.sessionId, status: "done" });
+            // pi --mode json can exit 0 with a failed assistant response, so the
+            // event stream (not the exit code) decides success.
+            if (result.sawError || result.exitCode !== 0) {
+              send({
+                type: "status",
+                sessionId: body.sessionId,
+                status: "error",
+                message: result.exitCode === null ? "run failed (no exit code)" : `run exited ${result.exitCode}`,
+              });
+            } else {
+              send({ type: "status", sessionId: body.sessionId, status: "done" });
+            }
           } catch (e) {
             send({ type: "error", sessionId: body.sessionId, message: (e as Error).message });
           } finally {

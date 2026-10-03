@@ -22,7 +22,8 @@ export interface PiRunOptions {
   onEvent: (e: AgentEvent) => void;
 }
 
-export function buildPiArgs(o: { sessionId: string; piSessionDir: string; model: string; prompt: string }): string[] {  return [
+export function buildPiArgs(o: { sessionId: string; piSessionDir: string; model: string; prompt: string }): string[] {
+  return [
     "-p",
     "--mode",
     "json",
@@ -69,7 +70,30 @@ export function parsePiJsonLine(line: string, sessionId: string): AgentEvent | n
       const delta = str(inner["delta"]);
       return delta ? { type: "text", sessionId, delta } : null;
     }
+    // Provider stream failures arrive here, not as a nonzero exit code.
+    if (inner["type"] === "error") {
+      return {
+        type: "error",
+        sessionId,
+        message: str(inner["error"]) ?? str(inner["reason"]) ?? "provider stream error",
+      };
+    }
     return null;
+  }
+  if (t === "message_end") {
+    // A failed or aborted assistant response does not make pi exit nonzero.
+    const msg = rec["message"];
+    if (msg === null || typeof msg !== "object") return null;
+    const m = msg as Record<string, unknown>;
+    if (m["role"] !== "assistant") return null;
+    const stop = str(m["stopReason"]);
+    if (stop === "error" || stop === "aborted") {
+      return { type: "error", sessionId, message: `assistant response ${stop}` };
+    }
+    return null;
+  }
+  if (t === "extension_error") {
+    return { type: "error", sessionId, message: str(rec["error"]) ?? "extension error" };
   }
   if (t === "tool_execution_start") {
     return {
@@ -100,18 +124,49 @@ export function parsePiJsonLine(line: string, sessionId: string): AgentEvent | n
       output,
     };
   }
-  if (t === "agent_end" || t === "agent_settled") {
+  // agent_settled is the only real completion signal: agent_end can be
+  // followed by retries, overflow recovery, compaction, or queued work.
+  if (t === "agent_settled") {
     return { type: "done", sessionId };
   }
   if (
     t === "session" ||
     t === "agent_start" ||
+    t === "agent_end" ||
     t === "turn_start" ||
     t === "message_start" ||
-    t === "message_end" ||
     t === "turn_end" ||
-    t === "tool_execution_update"
+    t === "tool_execution_update" ||
+    t === "queue_update" ||
+    t === "session_info_changed" ||
+    t === "thinking_level_changed" ||
+    t === "entry_appended"
   ) {
+    return null;
+  }
+  if (t === "compaction_start") {
+    return { type: "status", sessionId, status: "running", message: `compacting (${str(rec["reason"]) ?? "unknown"})` };
+  }
+  if (t === "compaction_end") {
+    if (rec["result"] === undefined) {
+      return { type: "error", sessionId, message: `compaction failed: ${str(rec["errorMessage"]) ?? "unknown"}` };
+    }
+    return { type: "status", sessionId, status: "running", message: "compacted" };
+  }
+  if (t === "auto_retry_start") {
+    const attempt = rec["attempt"] ?? "?";
+    const max = rec["maxAttempts"] ?? "?";
+    return {
+      type: "status",
+      sessionId,
+      status: "running",
+      message: `retrying (${attempt}/${max}): ${str(rec["errorMessage"]) ?? "provider error"}`,
+    };
+  }
+  if (t === "auto_retry_end") {
+    if (rec["success"] === false) {
+      return { type: "error", sessionId, message: `retries exhausted: ${str(rec["finalError"]) ?? "unknown"}` };
+    }
     return null;
   }
 
@@ -148,20 +203,35 @@ export function parsePiJsonLine(line: string, sessionId: string): AgentEvent | n
   return fallback === undefined ? null : { type: "text", sessionId, delta: fallback };
 }
 
-export async function runPiStreaming(opts: PiRunOptions): Promise<{ exitCode: number | null }> {
+export interface PiRunResult {
+  exitCode: number | null;
+  /** An error event reached the caller (provider failure, timeout, bad exit). */
+  sawError: boolean;
+  /** agent_settled arrived — the run finished without automatic work left. */
+  sawDone: boolean;
+}
+
+export async function runPiStreaming(opts: PiRunOptions): Promise<PiRunResult> {
   const argv = [...opts.openshellPrefix, opts.piBin, ...buildPiArgs(opts)];
   const [cmd, ...args] = argv;
   return new Promise((resolve) => {
     let finished = false;
+    let sawError = false;
+    let sawDone = false;
+    const emit = (e: AgentEvent) => {
+      if (e.type === "error") sawError = true;
+      if (e.type === "done") sawDone = true;
+      opts.onEvent(e);
+    };
     const finish = (r: { exitCode: number | null }) => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
-      resolve(r);
+      resolve({ ...r, sawError, sawDone });
     };
     const child = spawn(cmd!, args, { cwd: opts.workdir, env: process.env });
     const timer = setTimeout(() => {
-      opts.onEvent({ type: "error", sessionId: opts.sessionId, message: `run timed out after ${opts.timeoutMs}ms` });
+      emit({ type: "error", sessionId: opts.sessionId, message: `run timed out after ${opts.timeoutMs}ms` });
       child.kill("SIGKILL");
       finish({ exitCode: null });
     }, opts.timeoutMs);
@@ -173,7 +243,7 @@ export async function runPiStreaming(opts: PiRunOptions): Promise<{ exitCode: nu
       stdoutBuf = lines.pop() ?? "";
       for (const line of lines) {
         const ev = parsePiJsonLine(line, opts.sessionId);
-        if (ev) opts.onEvent(ev);
+        if (ev) emit(ev);
       }
     });
 
@@ -182,17 +252,17 @@ export async function runPiStreaming(opts: PiRunOptions): Promise<{ exitCode: nu
       stderrTail = (stderrTail + chunk.toString("utf8")).slice(-4096);
     });
     child.on("error", (err) => {
-      opts.onEvent({ type: "error", sessionId: opts.sessionId, message: `failed to start agent: ${err.message}` });
+      emit({ type: "error", sessionId: opts.sessionId, message: `failed to start agent: ${err.message}` });
       finish({ exitCode: null });
     });
     child.on("close", (code) => {
       if (stdoutBuf.trim()) {
         const ev = parsePiJsonLine(stdoutBuf, opts.sessionId);
-        if (ev) opts.onEvent(ev);
+        if (ev) emit(ev);
       }
       if (code !== 0) {
         const detail = stderrTail.trim().split("\n").slice(-5).join("\n");
-        opts.onEvent({
+        emit({
           type: "error",
           sessionId: opts.sessionId,
           message: `agent exited with code ${code}${detail ? `: ${detail}` : ""}`,

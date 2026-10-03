@@ -6,6 +6,7 @@ import type { AgentEvent } from "@cloudbear/protocol";
 import { loadConfig } from "./config.js";
 import { assertValidPrompt, assertValidSessionId, clampTimeout, resolveWorkdir } from "./paths.js";
 import { buildPiArgs, MAX_TOOL_OUTPUT, parsePiJsonLine, runPiStreaming } from "./pi.js";
+import { createHandler } from "./server.js";
 
 describe("executor config", () => {
   test("requires GATEWAY_TOKEN", () => {
@@ -113,9 +114,56 @@ describe("pi", () => {
     );
     expect(errRes?.type).toBe("tool_result");
     if (errRes?.type === "tool_result") expect(errRes.ok).toBe(false);
-    // completion markers terminate Telegram polling
-    expect(parsePiJsonLine(`{"type":"agent_end","messages":[]}`, sid)).toEqual({ type: "done", sessionId: sid });
+    // agent_end can be followed by retries/compaction, so only agent_settled ends a run
+    expect(parsePiJsonLine(`{"type":"agent_end","messages":[],"willRetry":false}`, sid)).toBeNull();
     expect(parsePiJsonLine(`{"type":"agent_settled"}`, sid)).toEqual({ type: "done", sessionId: sid });
+  });
+
+  test("parsePiJsonLine surfaces failures that exit 0", () => {
+    const sid = "s1";
+    // pi exits 0 for a failed or aborted assistant response.
+    expect(parsePiJsonLine(`{"type":"message_end","message":{"role":"assistant","stopReason":"error"}}`, sid)).toEqual({
+      type: "error",
+      sessionId: sid,
+      message: "assistant response error",
+    });
+    expect(parsePiJsonLine(`{"type":"message_end","message":{"role":"assistant","stopReason":"aborted"}}`, sid)?.type).toBe("error");
+    // normal assistant stop is not an error
+    expect(parsePiJsonLine(`{"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}`, sid)).toBeNull();
+    // user messages are not errors
+    expect(parsePiJsonLine(`{"type":"message_end","message":{"role":"user","stopReason":"error"}}`, sid)).toBeNull();
+    // provider stream error inside message_update
+    expect(
+      parsePiJsonLine(`{"type":"message_update","assistantMessageEvent":{"type":"error","reason":"aborted","error":"upstream 500"}}`, sid),
+    ).toEqual({ type: "error", sessionId: sid, message: "upstream 500" });
+    expect(parsePiJsonLine(`{"type":"extension_error","error":"boom"}`, sid)).toEqual({ type: "error", sessionId: sid, message: "boom" });
+  });
+
+  test("parsePiJsonLine reports compaction and retries as status", () => {
+    const sid = "s1";
+    expect(parsePiJsonLine(`{"type":"compaction_start","reason":"threshold"}`, sid)).toEqual({
+      type: "status",
+      sessionId: sid,
+      status: "running",
+      message: "compacting (threshold)",
+    });
+    expect(parsePiJsonLine(`{"type":"compaction_end","reason":"threshold","result":{"summary":"s"}}`, sid)).toEqual({
+      type: "status",
+      sessionId: sid,
+      status: "running",
+      message: "compacted",
+    });
+    expect(parsePiJsonLine(`{"type":"compaction_end","reason":"threshold","aborted":false,"errorMessage":"nope"}`, sid)).toEqual({
+      type: "error",
+      sessionId: sid,
+      message: "compaction failed: nope",
+    });
+    expect(parsePiJsonLine(`{"type":"auto_retry_end","success":false,"finalError":"529"}`, sid)).toEqual({
+      type: "error",
+      sessionId: sid,
+      message: "retries exhausted: 529",
+    });
+    expect(parsePiJsonLine(`{"type":"auto_retry_end","success":true}`, sid)).toBeNull();
   });
 
   test("parsePiJsonLine truncates huge tool output", () => {
@@ -145,6 +193,8 @@ describe("runPiStreaming (stub binaries, no model needed)", () => {
     const events: AgentEvent[] = [];
     const r = await runPiStreaming({ ...base, piBin: "true", piSessionDir: dir, workdir: dir, onEvent: (e) => events.push(e) });
     expect(r.exitCode).toBe(0);
+    expect(r.sawError).toBe(false);
+    expect(r.sawDone).toBe(false);
     expect(events).toEqual([]);
   });
 
@@ -153,6 +203,7 @@ describe("runPiStreaming (stub binaries, no model needed)", () => {
     const events: AgentEvent[] = [];
     const r = await runPiStreaming({ ...base, piBin: "false", piSessionDir: dir, workdir: dir, onEvent: (e) => events.push(e) });
     expect(r.exitCode).toBe(1);
+    expect(r.sawError).toBe(true);
     expect(events.some((e) => e.type === "error" && e.message.includes("code 1"))).toBe(true);
   });
 
@@ -168,6 +219,62 @@ describe("runPiStreaming (stub binaries, no model needed)", () => {
       onEvent: (e) => events.push(e),
     });
     expect(r.exitCode).toBeNull();
+    expect(r.sawError).toBe(true);
     expect(events.some((e) => e.type === "error" && e.message.includes("failed to start"))).toBe(true);
+  });
+});
+
+describe("POST /run terminal status (stub binaries)", () => {
+  function testHandler(piBin: string) {
+    const dir = mkdtempSync(join(tmpdir(), "cb-run-"));
+    return createHandler({
+      port: 0,
+      gatewayToken: "t",
+      sessionDir: dir,
+      piBin,
+      defaultModel: "m",
+      openshellEnabled: false,
+      openshellPrefix: [],
+      defaultTimeoutMs: 30_000,
+    });
+  }
+
+  async function run(handler: ReturnType<typeof testHandler>): Promise<AgentEvent[]> {
+    const res = await handler.handleRun(
+      new Request("http://x/run", {
+        method: "POST",
+        headers: { authorization: "Bearer t", "content-type": "application/json" },
+        body: JSON.stringify({ sessionId: "s1", prompt: "hi" }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    return (await res.text())
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as AgentEvent);
+  }
+
+  test("failing agent ends with status error, never done", async () => {
+    const events = await run(testHandler("false"));
+    expect(events.some((e) => e.type === "status" && e.status === "error")).toBe(true);
+    expect(events.some((e) => e.type === "status" && e.status === "done")).toBe(false);
+  });
+
+  test("clean agent ends with status done", async () => {
+    const events = await run(testHandler("true"));
+    expect(events.some((e) => e.type === "status" && e.status === "done")).toBe(true);
+    expect(events.some((e) => e.type === "status" && e.status === "error")).toBe(false);
+  });
+
+  test("rejects a bad bearer token before spawning", async () => {
+    const handler = testHandler("true");
+    const res = await handler.handleRun(
+      new Request("http://x/run", {
+        method: "POST",
+        headers: { authorization: "Bearer nope", "content-type": "application/json" },
+        body: JSON.stringify({ sessionId: "s1", prompt: "hi" }),
+      }),
+    );
+    expect(res.status).toBe(401);
   });
 });
