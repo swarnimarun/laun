@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AgentEvent } from "@cloudbear/protocol";
 import { loadConfig } from "./config.js";
 import { assertValidPrompt, assertValidSessionId, clampTimeout, resolveWorkdir } from "./paths.js";
-import { buildPiArgs, parsePiJsonLine } from "./pi.js";
+import { buildPiArgs, parsePiJsonLine, runPiStreaming } from "./pi.js";
 
 describe("executor config", () => {
   test("requires GATEWAY_TOKEN", () => {
@@ -77,5 +81,46 @@ describe("pi", () => {
     expect(parsePiJsonLine(`{"type":"mystery","n":1}`, sid)).toBeNull();
     expect(parsePiJsonLine(`plain log line`, sid)).toEqual({ type: "text", sessionId: sid, delta: "plain log line" });
     expect(parsePiJsonLine(`   `, sid)).toBeNull();
+  });
+});
+
+describe("runPiStreaming (stub binaries, no model needed)", () => {
+  const base = {
+    sessionId: "s1",
+    model: "x",
+    prompt: "hi",
+    openshellPrefix: [] as string[],
+    timeoutMs: 10_000,
+  };
+
+  test("exit 0 resolves cleanly with no events", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-pi-"));
+    const events: AgentEvent[] = [];
+    const r = await runPiStreaming({ ...base, piBin: "true", piSessionDir: dir, workdir: dir, onEvent: (e) => events.push(e) });
+    expect(r.exitCode).toBe(0);
+    expect(events).toEqual([]);
+  });
+
+  test("non-zero exit emits an error event", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-pi-"));
+    const events: AgentEvent[] = [];
+    const r = await runPiStreaming({ ...base, piBin: "false", piSessionDir: dir, workdir: dir, onEvent: (e) => events.push(e) });
+    expect(r.exitCode).toBe(1);
+    expect(events.some((e) => e.type === "error" && e.message.includes("code 1"))).toBe(true);
+  });
+
+  test("missing binary emits a start error, not a hang", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-pi-"));
+    const events: AgentEvent[] = [];
+    const r = await runPiStreaming({
+      ...base,
+      piBin: "cloudbear-definitely-not-a-binary",
+      piSessionDir: dir,
+      workdir: dir,
+      timeoutMs: 5000,
+      onEvent: (e) => events.push(e),
+    });
+    expect(r.exitCode).toBeNull();
+    expect(events.some((e) => e.type === "error" && e.message.includes("failed to start"))).toBe(true);
   });
 });

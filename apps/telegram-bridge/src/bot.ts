@@ -123,7 +123,7 @@ async function startSession(
   }
   active.set(chatId, session.id);
   await ctx.reply(`🚀 started session ${session.id}\n${goal.slice(0, 500)}`);
-  void pollSession(ctx as never, gw, cfg, chatId, session.id);
+  void pollSession(ctx as never, gw, cfg, session.id);
 }
 
 const MAX_POLLS = Math.ceil((30 * 60 * 1000) / 2000); // ~30 min ceiling regardless of pollMs
@@ -132,10 +132,8 @@ async function pollSession(
   ctx: { reply: (t: string, extra?: { reply_markup?: unknown }) => Promise<unknown> },
   gw: GatewayClient,
   cfg: BridgeConfig,
-  chatId: number,
   sessionId: string,
 ): Promise<void> {
-  void chatId;
   let since = 0;
   for (let i = 0; i < MAX_POLLS; i++) {
     await new Promise((r) => setTimeout(r, cfg.pollMs));
