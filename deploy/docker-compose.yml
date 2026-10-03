@@ -1,0 +1,74 @@
+services:
+  executor:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        APP: apps/executor
+    ports:
+      - "${EXECUTOR_PORT:-8081}:8081"
+    environment:
+      EXECUTOR_PORT: 8081
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?set GATEWAY_TOKEN in .env}
+      SESSION_DIR: /data/sessions
+      PI_BIN: ${PI_BIN:-pi}
+      MODEL: ${MODEL:-x-ai/grok-4.6}
+      RUN_TIMEOUT_MS: ${RUN_TIMEOUT_MS:-600000}
+      OPENSHELL_ENABLED: ${OPENSHELL_ENABLED:-false}
+      OPENSHELL_PREFIX: ${OPENSHELL_PREFIX:-}
+    volumes:
+      - cloudbear-data:/data
+      # Give the agent a workspace that survives restarts. Mount your repos here:
+      # - /srv/repos:/repos:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://localhost:8081/health').then(r=>{if(!r.ok)process.exit(1)})"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        APP: apps/gateway
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    environment:
+      GATEWAY_PORT: 8080
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?set GATEWAY_TOKEN in .env}
+      EXECUTOR_URL: http://executor:8081
+      DATA_DIR: /data
+    volumes:
+      - cloudbear-data:/data
+    depends_on:
+      executor:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://localhost:8080/health').then(r=>{if(!r.ok)process.exit(1)})"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  telegram-bridge:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        APP: apps/telegram-bridge
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?set TELEGRAM_BOT_TOKEN in .env}
+      TELEGRAM_ALLOWLIST_IDS: ${TELEGRAM_ALLOWLIST_IDS:?set TELEGRAM_ALLOWLIST_IDS in .env}
+      GATEWAY_URL: http://gateway:8080
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?set GATEWAY_TOKEN in .env}
+      MODEL: ${MODEL:-x-ai/grok-4.6}
+      BRIDGE_POLL_MS: ${BRIDGE_POLL_MS:-2000}
+    depends_on:
+      gateway:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  cloudbear-data:

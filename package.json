@@ -14,11 +14,11 @@
   "packageManager": "bun@1.4.2",
   "scripts": {
     "build": "bun x tsc -b",
-    "typecheck": "bun x tsc --noEmit -p tsconfig.json",
-    "test": "bun test",
-    "dev:gateway": "bun --hot apps/gateway/src/index.ts",
-    "dev:executor": "bun --hot apps/executor/src/index.ts",
-    "dev:bridge": "bun --hot apps/telegram-bridge/src/index.ts"
+    "typecheck": "bun x tsc -b",
+    "test": "bun test ./packages/protocol/src ./packages/policy/src ./apps/executor/src ./apps/gateway/src ./apps/telegram-bridge/src",
+    "dev:gateway": "bun run build && bun --hot apps/gateway/src/index.ts",
+    "dev:executor": "bun run build && bun --hot apps/executor/src/index.ts",
+    "dev:bridge": "bun run build && bun --hot apps/telegram-bridge/src/index.ts"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

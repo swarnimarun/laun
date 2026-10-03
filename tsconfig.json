@@ -3,6 +3,7 @@
   "compilerOptions": {
     "noEmit": true
   },
+  "files": [],
   "references": [
     { "path": "./packages/protocol" },
     { "path": "./packages/policy" },

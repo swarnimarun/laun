@@ -10,13 +10,26 @@ Telegram -> bridge -> gateway -> executor (pi inside OpenShell sandbox) -> your 
 
 ```bash
 git clone <this-repo> cloudbear && cd cloudbear
-cp deploy/.env.example .env   # fill in TELEGRAM_BOT_TOKEN, GATEWAY_TOKEN, model keys
-./deploy/install.sh           # installs node 22, pi, openshell, docker; runs compose
-docker compose -f deploy/docker-compose.yml up -d --build
-docker compose -f deploy/docker-compose.yml logs -f
+cp deploy/.env.example .env   # fill in TELEGRAM_BOT_TOKEN, GATEWAY_TOKEN, allowlist
+chmod +x deploy/install.sh && ./deploy/install.sh
 ```
 
-Single VPS only for v1. No K8s. Sessions live in `./data/sessions` (mount this to a volume).
+`install.sh` installs Bun/Docker/pi/OpenShell (best-effort), then runs
+`docker compose -f deploy/docker-compose.yml --env-file .env up -d --build`.
+Containers restart automatically (`unless-stopped`) — that plus the Docker
+daemon starting at boot is the whole 24/7 story. Sessions live in the
+`cloudbear-data` volume (`/data/sessions` + gateway `index.json`).
+
+Useful:
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file .env logs -f
+curl localhost:8080/health && curl localhost:8081/health
+WORKDIR=/data/sessions/<id>/work MODEL_HOST=openrouter.ai bun packages/policy/src/render.ts restrictive
+```
+
+Model setup (Grok via xAI key, OpenRouter, or pi subscription): see `examples/grok.md`.
+OpenShell policy mapping: see `examples/openshell-policy-notes.md`.
 
 ## Local dev (Bun-only)
 
@@ -29,7 +42,7 @@ bun test
 Run each service locally (needs `pi` on PATH + `.env`):
 
 ```bash
-bun run dev:executor   # :8081
+bun run dev:executor   # :8081 (builds first, then --hot)
 bun run dev:gateway    # :8080
 bun run dev:bridge     # long-polling Telegram
 ```
