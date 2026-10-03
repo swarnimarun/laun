@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Cloudbear remote bootstrap. Invoked over SSH by `cloudbear setup ssh`:
+#
+#   ssh -i <key> -o BatchMode=yes <user>@<host> \
+#     CB_NO_START=false bash -s -- <remote-dir> [repo-url]
+#
+# The caller MUST have written <remote-dir>/.env (mode 600, containing at least
+# GATEWAY_TOKEN and CLOUDBEAR_KEY) before this runs. Idempotent: safe to re-run.
+#
+# Output: progress lines prefixed "==>", then a summary whose LAST line is the
+# agent key so the CLI can read it back:
+#   CLOUDBEAR_DIR=...
+#   CLOUDBEAR_PORT=...
+#   CLOUDBEAR_KEY=...
+# GATEWAY_TOKEN is never printed.
+set -euo pipefail
+
+REMOTE_DIR="${1:-}"
+REPO_URL="${2:-}"
+
+log() { printf '==> %s\n' "$*"; }
+warn() { printf '==> WARNING: %s\n' "$*" >&2; }
+die() {
+  printf '==> ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+[ -n "$REMOTE_DIR" ] || die "usage: bash bootstrap.sh <remote-dir> [repo-url]"
+[ -d "$REMOTE_DIR" ] || die "remote dir does not exist: $REMOTE_DIR (create it and write .env first)"
+REMOTE_DIR="$(cd "$REMOTE_DIR" && pwd)"
+ENV_FILE="$REMOTE_DIR/.env"
+[ -f "$ENV_FILE" ] || die "missing $ENV_FILE — write it before bootstrapping (cloudbear setup ssh does this)"
+
+# The checkout may overwrite .env, so keep the authoritative copy aside.
+ENV_BACKUP="$(mktemp)"
+CLONE_TMP=""
+cleanup() {
+  rm -f "$ENV_BACKUP"
+  [ -n "$CLONE_TMP" ] && rm -rf "$CLONE_TMP"
+  return 0
+}
+trap cleanup EXIT
+cp "$ENV_FILE" "$ENV_BACKUP"
+chmod 600 "$ENV_FILE"
+
+# --- privileges -----------------------------------------------------------------
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  command -v sudo >/dev/null 2>&1 || die "this script needs root or passwordless sudo"
+  SUDO="sudo"
+fi
+
+APT_UPDATED=0
+apt_update_once() {
+  if [ "$APT_UPDATED" -eq 0 ]; then
+    $SUDO apt-get update -y >/dev/null 2>&1 || warn "apt-get update failed"
+    APT_UPDATED=1
+  fi
+}
+
+# --- prerequisites --------------------------------------------------------------
+command -v curl >/dev/null 2>&1 && command -v git >/dev/null 2>&1 || {
+  log "installing prerequisites (curl, ca-certificates, git)"
+  apt_update_once
+  $SUDO apt-get install -y --no-install-recommends curl ca-certificates git >/dev/null \
+    || die "could not install curl/ca-certificates/git"
+}
+
+# --- docker ---------------------------------------------------------------------
+if ! command -v docker >/dev/null 2>&1; then
+  log "installing docker"
+  curl -fsSL https://get.docker.com -o /tmp/cloudbear-get-docker.sh || die "could not download the docker installer"
+  $SUDO sh /tmp/cloudbear-get-docker.sh >/dev/null || die "docker install failed"
+  rm -f /tmp/cloudbear-get-docker.sh
+fi
+if command -v systemctl >/dev/null 2>&1; then
+  $SUDO systemctl enable --now docker >/dev/null 2>&1 || warn "could not enable docker through systemctl"
+elif command -v service >/dev/null 2>&1; then
+  $SUDO service docker start >/dev/null 2>&1 || warn "could not start docker through service"
+fi
+INVOKING_USER="${SUDO_USER:-}"
+if [ -n "$INVOKING_USER" ]; then
+  $SUDO usermod -aG docker "$INVOKING_USER" >/dev/null 2>&1 || true
+fi
+
+# --- bun ------------------------------------------------------------------------
+if ! command -v bun >/dev/null 2>&1 && [ ! -x "$HOME/.bun/bin/bun" ]; then
+  log "installing bun"
+  curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1 || die "bun install failed"
+fi
+export PATH="$HOME/.bun/bin:$PATH"
+
+# --- source tree ----------------------------------------------------------------
+if [ -f "$REMOTE_DIR/package.json" ]; then
+  log "reusing existing checkout at $REMOTE_DIR"
+  if [ -n "$REPO_URL" ] && [ -d "$REMOTE_DIR/.git" ] && command -v git >/dev/null 2>&1; then
+    git -C "$REMOTE_DIR" pull --ff-only >/dev/null 2>&1 || warn "git pull failed — continuing with the local checkout"
+  fi
+else
+  [ -n "$REPO_URL" ] \
+    || die "no checkout at $REMOTE_DIR and no repo url given: rsync the repo there, or re-run with --repo-url <git-url>"
+  log "cloning $REPO_URL"
+  CLONE_TMP="$(mktemp -d)"
+  git clone --depth 1 "$REPO_URL" "$CLONE_TMP/repo" >/dev/null 2>&1 || die "git clone $REPO_URL failed"
+  shopt -s dotglob
+  mv "$CLONE_TMP/repo"/* "$REMOTE_DIR"/ || die "could not move the checkout into $REMOTE_DIR"
+  shopt -u dotglob
+fi
+
+# The pre-written env file wins over anything the checkout brought along.
+cp "$ENV_BACKUP" "$ENV_FILE"
+chmod 600 "$ENV_FILE"
+
+# --- build ----------------------------------------------------------------------
+if [ -x "$REMOTE_DIR/node_modules/.bin/tsc" ] || command -v bun >/dev/null 2>&1; then
+  log "installing dependencies"
+  (cd "$REMOTE_DIR" && bun install --frozen-lockfile) || warn "bun install failed — continuing"
+  log "typechecking"
+  (cd "$REMOTE_DIR" && bun run build) || warn "bun run build failed — continuing"
+fi
+
+# --- start ----------------------------------------------------------------------
+GATEWAY_PORT="$(sed -n 's/^GATEWAY_PORT=\([0-9]*\).*/\1/p' "$ENV_FILE" | tail -1)"
+GATEWAY_PORT="${GATEWAY_PORT:-8080}"
+
+if [ "${CB_NO_START:-false}" = "true" ]; then
+  log "CB_NO_START=true — leaving the stack stopped"
+else
+  log "starting the stack (docker compose up -d --build)"
+  (cd "$REMOTE_DIR" && $SUDO docker compose -f deploy/docker-compose.yml --env-file .env up -d --build) \
+    || die "docker compose up failed — inspect: cd $REMOTE_DIR && docker compose logs"
+  healthy=0
+  for _ in $(seq 1 20); do
+    if curl -fsS "http://localhost:${GATEWAY_PORT}/health" >/dev/null 2>&1; then
+      healthy=1
+      break
+    fi
+    sleep 3
+  done
+  if [ "$healthy" = "1" ]; then
+    log "gateway is healthy on port ${GATEWAY_PORT}"
+  else
+    warn "gateway health check did not pass yet — check: cd $REMOTE_DIR && docker compose logs"
+  fi
+fi
+
+# --- summary (last line is the agent key) ---------------------------------------
+CLOUDBEAR_KEY="$(sed -n 's/^CLOUDBEAR_KEY=\(.*\)$/\1/p' "$ENV_FILE" | tail -1 | tr -d '[:space:]')"
+[ -n "$CLOUDBEAR_KEY" ] || die "no CLOUDBEAR_KEY in $ENV_FILE — run cloudbear setup to generate one"
+
+log "done"
+printf 'CLOUDBEAR_DIR=%s\n' "$REMOTE_DIR"
+printf 'CLOUDBEAR_PORT=%s\n' "$GATEWAY_PORT"
+printf 'CLOUDBEAR_KEY=%s\n' "$CLOUDBEAR_KEY"

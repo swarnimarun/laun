@@ -43,6 +43,9 @@ services:
     environment:
       GATEWAY_PORT: 8080
       GATEWAY_TOKEN: ${GATEWAY_TOKEN:?set GATEWAY_TOKEN in .env}
+      # Human-facing key for the CLI and browser UI. The gateway hashes it on
+      # boot; it never reaches session files or logs.
+      CLOUDBEAR_KEY: ${CLOUDBEAR_KEY:-}
       EXECUTOR_URL: http://executor:8081
       DATA_DIR: /data
     volumes:
