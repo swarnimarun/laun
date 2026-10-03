@@ -1,0 +1,17 @@
+{
+  "name": "cloudbear-telegram-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test src/",
+    "dev": "bun --hot src/index.ts",
+    "start": "bun src/index.ts"
+  },
+  "dependencies": {
+    "@cloudbear/protocol": "workspace:*",
+    "grammy": "^1.37.0"
+  }
+}
