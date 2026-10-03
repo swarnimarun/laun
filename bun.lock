@@ -10,17 +10,33 @@
         "typescript": "^5.9.3",
       },
     },
+    "apps/executor": {
+      "name": "cloudbear-executor",
+      "version": "0.1.0",
+      "dependencies": {
+        "@cloudbear/policy": "workspace:*",
+        "@cloudbear/protocol": "workspace:*",
+      },
+    },
+    "packages/policy": {
+      "name": "@cloudbear/policy",
+      "version": "0.1.0",
+    },
     "packages/protocol": {
       "name": "@cloudbear/protocol",
       "version": "0.1.0",
     },
   },
   "packages": {
+    "@cloudbear/policy": ["@cloudbear/policy@workspace:packages/policy"],
+
     "@cloudbear/protocol": ["@cloudbear/protocol@workspace:packages/protocol"],
 
     "@types/node": ["@types/node@22.20.5", "", { "dependencies": { "undici-types": "~6.21.0" } }, "sha512-U2+DNr+wSjpsTS/wZGYHq7GcwfuSmKiKvoPvK22zwTlRhU91yOniN4qRR5KhIjvif7ysw/dz/hKmfDH0Ris4aA=="],
 
     "bun-types": ["bun-types@1.4.2", "", { "dependencies": { "@types/node": "*" } }, "sha512-bxV1FgK7yBIzjRe5zBozIM4Bem11ZJcCXSrjWRG3YWLt8yFDePu4cLjpebO8OvPeIE9trbyPF4fuj3Cia4Fj3w=="],
+
+    "cloudbear-executor": ["cloudbear-executor@workspace:apps/executor"],
 
     "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
 
