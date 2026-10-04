@@ -135,9 +135,9 @@ These are the gaps that would let something go wrong without anyone noticing.
 creates a per-session sandbox (`laun-<id>`, policy attached, provider-backed
 model key) and runs the agent inside it — proven by a full session completing
 (`watch` → `✅ done`) with its sandbox present, model answering through the
-provider, and the raw key absent (placeholder sha differs). Remaining:
-scoped `--approval-mode auto` live-trial (manual today), idle-reap
-observation, SDK-transport soak.
+provider, and the raw key absent (placeholder sha differs). `OPENSHELL_APPROVAL_MODE=auto`
+is live in production (first sessions completed under it). Remaining:
+idle-reap observation, SDK-transport soak.
 
 `OPENSHELL_ENABLED` is `false` on the live deployment, and the executor only
 supports `OPENSHELL_PREFIX` — a string prepended to `pi`. There is no per-session
@@ -299,6 +299,13 @@ cloud agent that wants to block on a job.
 > Landed + live-proven 2026-10-04: `agent watch <id> [--poll-ms] [--timeout]`
 > exits 0/1/2 (done/error/timeout-or-usage), proven against the VPS over the
 > tunnel (`watch 7031451e` → `✅ done`, exit 0). Needs no new gateway routes.
+
+#### Steer while busy (live-proven 2026-10-04)
+
+`say --steer` on a running sandboxed session redirects its outcome
+(`DONE STEERED`): gateway → executor `/steer` 200, announced in the log.
+(The line appears twice — gateway publish + executor stream announce —
+cosmetic duplication, fix opportunistically.)
 
 ### 8. Follow-ups are rejected while a run is active *(stub — NOW #4 owns this)*
 

@@ -172,6 +172,21 @@ sudo docker exec deploy-gateway-1 grep -c believedRunning /app/apps/gateway/src/
 Session history and workdirs live on the `/data` volume and survive
 redeploys; in-flight runs do not — stop or settle sessions first.
 
+**Stale remote values shadow new defaults.** `setup ssh` writes your local
+`.env` verbatim and `ensureEnv` only *adds* missing keys — it never updates
+values already on the box. So after changing a default (or a default in
+`docker-compose.yml`), check the live values directly, not the files:
+
+```bash
+ssh ubuntu@<vps> 'grep -E "^OPENSHELL_(ENABLED|PROVIDER|APPROVAL_MODE|SDK_GATEWAY)" /opt/laun/.env'
+sudo docker exec deploy-executor-1 printenv OPENSHELL_APPROVAL_MODE
+```
+
+Bitten twice: `OPENSHELL_ENABLED` reverted to `false` (executor fail-closed
+on restart) and `OPENSHELL_SDK_GATEWAY` kept pointing at an unroutable host
+(`getaddrinfo ENOTFOUND` on every sandboxed run). Fix on the box, and keep
+your local `.env` in sync or the next `setup ssh` reverts it again.
+
 ## Backups (the `/data` volume)
 
 Everything durable lives in one Docker volume (`laun-data`: pi session
