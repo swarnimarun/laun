@@ -30,6 +30,7 @@ WORKDIR /app
 COPY package.json bun.lock ./
 COPY packages ./packages
 COPY apps ./apps
+COPY vendor ./vendor
 RUN bun install --frozen-lockfile
 
 # Persist the build arg as a runtime env (ARGs alone don't survive into the container).
