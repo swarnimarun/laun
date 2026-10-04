@@ -72,7 +72,9 @@ WORKDIR=/data/sessions/<id>/work MODEL_HOST=YOUR_MODEL_HOST bun packages/policy/
 
 Model setup (Muse via opencode-go): see `examples/models.md`.
 OpenShell policy mapping: see `examples/openshell-policy-notes.md`.
-Roadmap and verified harness findings: see `PLAN.md`.
+Roadmap and verified harness findings: see `PLAN.md`; the forward-looking
+backlog of **unimplemented features**, each with its evidence and definition of
+done, is in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Local dev (Bun-only)
 

@@ -127,6 +127,11 @@ Keep files as the source of truth; make the *cursor* and the *process* better.
 
 ## Milestones
 
+> The detailed backlog — every feature that is missing or only a stub, with
+> evidence it is missing and a measurable definition of done, ordered P0→P3 —
+> lives in [`docs/roadmap.md`](docs/roadmap.md). This section keeps the
+> narrative; that one is the checklist to work through.
+
 **M1 — correctness and first-run experience (in flight).**
 Real pi wire-event mapping; failure vs success decided by events; agent keys;
 CLI (`setup`, `setup ssh`, `agent`, `keys`); browser UI; remote bootstrap.
@@ -226,6 +231,9 @@ reader — or the next cloud agent — can pick it up without this conversation.
 set`, pushing, or removing any workspace but its own.
 
 ## Gaps that still block hands-off long runs
+
+> Expanded into [`docs/roadmap.md`](docs/roadmap.md) P0/P1, with acceptance
+criteria. Summary only below — that file is the one to keep current.
 
 Observed against a live deployment, beyond M2:
 
