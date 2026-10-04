@@ -111,6 +111,9 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
   };
 
   function publish(sessionId: string, e: AgentEvent): void {
+    // Deleted sessions stay deleted: late stream events from a run that
+    // outlived its delete must not resurrect the bus or the log file.
+    if (!sessions.get(sessionId)) return;
     const b = busFor(sessionId);
     b.events.push(e);
     lastEventAt.set(sessionId, Date.now());
@@ -205,6 +208,10 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
         repo: opts.repo,
         runtime: opts.runtime,
       })) {
+        // The session may have been deleted mid-run: stop consuming instead
+        // of resurrecting it event by event (publish() also guards, this
+        // frees the loop promptly on never-ending streams).
+        if (!sessions.get(sessionId)) return;
         publish(sessionId, e);
         if (e.type === "status" && (e.status === "done" || e.status === "error")) {
           sessions.setStatus(sessionId, e.status);

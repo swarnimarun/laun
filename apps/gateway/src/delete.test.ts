@@ -67,6 +67,26 @@ describe("session delete", () => {
     expect(gw.running.has(id)).toBe(false);
   });
 
+  test("events published after delete are dropped, never resurrected", async () => {
+    // Regression: a run outliving its delete (abort racing completion) used
+    // to recreate the bus + log file event by event via publish().
+    const stub = stubExecutor();
+    const { gw, id, dir } = gwAt(stub.url);
+    gw.publish(id, { type: "text", sessionId: id, delta: "hi" });
+    await gw.deleteSession(id);
+    // Late trailing event, as emitted by a dying stream after the delete.
+    gw.publish(id, { type: "status", sessionId: id, status: "error", message: "run aborted" });
+    expect(existsSync(join(dir, `events-${id}.jsonl`))).toBe(false);
+    expect(gw.sessions.get(id)).toBeUndefined();
+  });
+
+  test("publish to a never-created session is a silent no-op", () => {
+    const stub = stubExecutor();
+    const { gw, dir } = gwAt(stub.url);
+    expect(() => gw.publish("ghost", { type: "text", sessionId: "ghost", delta: "hi" })).not.toThrow();
+    expect(existsSync(join(dir, "events-ghost.jsonl"))).toBe(false);
+  });
+
   test("store.delete removes the record and persists", () => {
     const dir = mkdtempSync(join(tmpdir(), "laun-delstore-"));
     const s = new SessionStore(dir);
