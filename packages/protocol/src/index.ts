@@ -22,6 +22,12 @@ export interface CreateSessionRequest {
 
 export interface SendMessageRequest {
   text: string;
+  /**
+   * Delivery intent for a busy session. `steer` interrupts with new
+   * direction, `queue` appends after the run. Gateway honors this once
+   * steer/queue lands; until then the gateway keeps returning 409.
+   */
+  mode?: "steer" | "queue";
 }
 
 export type ApprovalDecisionValue = "approve" | "deny";
@@ -46,6 +52,18 @@ export type AgentEvent =
   | { type: "text"; sessionId: string; delta: string }
   | { type: "tool_call"; sessionId: string; name: string; args?: unknown }
   | { type: "tool_result"; sessionId: string; name: string; ok: boolean; output?: string }
+  /**
+   * A coalesced chunk of model reasoning. The executor batches thinking
+   * deltas (flush at >=300 chars or on a reasoning boundary) so a long
+   * reasoning block cannot flood the gateway's bounded event ring.
+   */
+  | { type: "thinking"; sessionId: string; delta: string }
+  /**
+   * Token/cost accounting surfaced from the harness (pi reports `usage`
+   * on `message_update`). All fields optional: forward what the harness
+   * gives, omit the rest.
+   */
+  | { type: "usage"; sessionId: string; inputTokens?: number; outputTokens?: number; totalTokens?: number; costUsd?: number }
   | { type: "approval_request"; sessionId: string; requestId: string; reason: string; detail?: string }
   | { type: "done"; sessionId: string; summary?: string }
   | { type: "error"; sessionId: string; message: string };
