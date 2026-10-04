@@ -20,9 +20,14 @@ services:
       # ~/.pi/agent/auth.json (see examples/models.md). Never bake keys into images.
     volumes:
       - cloudbear-data:/data
-      # pi auth lives here (host login, e.g. opencode-go). The executor reads it;
-      # the agent itself stays confined by OpenShell policy. See examples/models.md.
-      - ${HOME}/.pi:/root/.pi:ro
+      # pi's config + credentials. Two traps avoided deliberately:
+      #  * the source must be the INVOKING USER's home — compose is started under
+      #    sudo by deploy/bootstrap.sh, where HOME=/root would silently bind an
+      #    empty /root/.pi instead of the operator's pi login;
+      #  * it must be writable: pi creates ~/.pi/agent and refreshes model
+      #    availability on every run. Confinement comes from OpenShell policy,
+      #    not from this mount. See examples/models.md.
+      - ${PI_CONFIG_DIR:-${HOME}/.pi}:/root/.pi
       # Give the agent a workspace that survives restarts. Mount your repos here:
       # - /srv/repos:/repos:ro
     restart: unless-stopped

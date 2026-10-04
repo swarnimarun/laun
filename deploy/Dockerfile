@@ -6,10 +6,19 @@ FROM oven/bun:1.4 AS base
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates git && rm -rf /var/lib/apt/lists/*
 
 # Pi CLI is required only in the executor image.
+# pi.dev's installer refuses to run without Node >= 22.19 and a TTY — exactly
+# what a Docker build lacks — so install pi from npm instead and FAIL the build
+# if it is missing. The previous `|| echo WARNING` shipped an executor image
+# with no agent in it at all. ripgrep + fd ship too, so pi never has to fetch
+# them at runtime (blocked inside a sandbox).
 ARG APP
 RUN if [ "$APP" = "apps/executor" ]; then \
-      curl -fsSL https://pi.dev/install.sh | sh; \
-      command -v pi || echo "WARNING: pi not on PATH after install — set PI_BIN explicitly"; \
+      curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
+      apt-get install -y --no-install-recommends nodejs ripgrep fd-find && \
+      ln -sf /usr/bin/fdfind /usr/local/bin/fd && \
+      npm install -g --ignore-scripts @earendil-works/pi-coding-agent && \
+      command -v pi >/dev/null && pi --version && \
+      rm -rf /var/lib/apt/lists/*; \
     fi
 # OpenShell is best-effort at build time (needs Linux + container runtime on the host to be useful).
 # If this step fails, the executor still runs with OPENSHELL_ENABLED=false.

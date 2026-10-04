@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { parseAgentKey } from "@cloudbear/protocol";
 import { UsageError, flagBool, flagString, parseArgs, requiredArg } from "./args.js";
 import { loadTarget, resolveTarget, saveTarget, targetUrl } from "./config.js";
-import { ensureEnv, readEnvValue, upsertEnv } from "./setup.js";
+import { ensureEnv, parseSshTarget, readEnvValue, upsertEnv } from "./setup.js";
 import { lastMatch, runRemoteSetup, shQuote, sshArgv, type CommandRunner } from "./ssh.js";
 
 describe("args", () => {
@@ -127,6 +127,9 @@ describe("ssh layer", () => {
     expect(result).toEqual({ key, port: 8081, dir: "/opt/cloudbear" });
     expect(calls).toHaveLength(3);
     expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain("mkdir -p '/opt/cloudbear'");
+    // non-root users need the sudo fallback for paths such as /opt/...
+    expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain("sudo -n mkdir -p '/opt/cloudbear'");
+    expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain("$(id -u):$(id -g)");
     expect(calls[1]!.argv[calls[1]!.argv.length - 1]).toContain("cat > '/opt/cloudbear'/.env");
     expect(calls[2]!.argv[calls[2]!.argv.length - 1]).toBe("bash -s -- '/opt/cloudbear' 'git@github.com:me/cloudbear.git'");
     // the env travels on stdin, and no secret ever appears in argv
@@ -162,10 +165,35 @@ describe("ssh layer", () => {
   });
 });
 
+describe("parseSshTarget", () => {
+  test("never produces root@ubuntu@host", () => {
+    // the bug: a user embedded in the host got prefixed with the default user
+    expect(parseSshTarget("ubuntu@1.2.3.4")).toEqual({ user: "ubuntu", host: "1.2.3.4" });
+    expect(parseSshTarget("ubuntu@1.2.3.4", "root")).toEqual({ user: "root", host: "1.2.3.4" });
+    expect(parseSshTarget("root@1.2.3.4")).toEqual({ user: "root", host: "1.2.3.4" });
+  });
+
+  test("a bare host falls back to the default user", () => {
+    expect(parseSshTarget("1.2.3.4")).toEqual({ user: "root", host: "1.2.3.4" });
+    expect(parseSshTarget("1.2.3.4", "ubuntu")).toEqual({ user: "ubuntu", host: "1.2.3.4" });
+    expect(parseSshTarget("1.2.3.4", undefined, "deploy")).toEqual({ user: "deploy", host: "1.2.3.4" });
+  });
+
+  test("the flag beats an embedded user, and IPv6 survives", () => {
+    expect(parseSshTarget("alice@srv.example", "bob")).toEqual({ user: "bob", host: "srv.example" });
+    expect(parseSshTarget("[2001:db8::1]", "ubuntu")).toEqual({ user: "ubuntu", host: "[2001:db8::1]" });
+  });
+
+  test("an empty host is a usage error", () => {
+    expect(() => parseSshTarget("ubuntu@")).toThrow(UsageError);
+  });
+});
+
 describe("bootstrap contract", () => {
+  const repoRoot = join(import.meta.dir, "..", "..", "..");
+
   test("deploy/bootstrap.sh exists, is bash-valid, and prints the key last", () => {
-    const script = join(import.meta.dir, "..", "..", "..", "deploy", "bootstrap.sh");
-    const body = readFileSync(script, "utf8");
+    const body = readFileSync(join(repoRoot, "deploy", "bootstrap.sh"), "utf8");
     expect(body).toContain("set -euo pipefail");
     expect(body.startsWith("#!/usr/bin/env bash")).toBe(true);
     // the key must be the last summary line the CLI parses
@@ -173,5 +201,26 @@ describe("bootstrap contract", () => {
     expect(lines[lines.length - 1]).toContain("CLOUDBEAR_KEY=");
     // and the service token must never be echoed
     expect(body).not.toMatch(/printf.*GATEWAY_TOKEN/);
+  });
+
+  test("compose must not read HOME for the pi mount (sudo resolves it to /root)", () => {
+    const compose = readFileSync(join(repoRoot, "deploy", "docker-compose.yml"), "utf8");
+    // regression: `${HOME}/.pi` bound /root/.pi when compose ran under sudo,
+    // silently mounting an empty read-only dir and breaking pi entirely.
+    expect(compose).not.toMatch(/- \$\{HOME\}\/\.pi/);
+    expect(compose).toContain("${PI_CONFIG_DIR:-${HOME}/.pi}:/root/.pi");
+    // pi must be able to create ~/.pi/agent, so the mount cannot be read-only
+    expect(compose).not.toContain("/root/.pi:ro");
+
+    const bootstrap = readFileSync(join(repoRoot, "deploy", "bootstrap.sh"), "utf8");
+    // bootstrap resolves the invoking user's home and passes it through sudo
+    expect(bootstrap).toContain("getent passwd");
+    expect(bootstrap).toContain('env PI_CONFIG_DIR="$PI_CONFIG_DIR"');
+    // it must resolve to <home>/.pi — never the bare home directory, which
+    // would mount ssh keys and everything else into the container
+    expect(bootstrap).toMatch(/\$PI_HOME\/\.pi/);
+    expect(bootstrap).toContain("*.pi");
+    // and warns when there is no pi login, instead of failing opaquely later
+    expect(bootstrap).toContain("agent/auth.json");
   });
 });

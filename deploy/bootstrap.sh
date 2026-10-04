@@ -59,12 +59,21 @@ apt_update_once() {
 }
 
 # --- prerequisites --------------------------------------------------------------
-command -v curl >/dev/null 2>&1 && command -v git >/dev/null 2>&1 || {
-  log "installing prerequisites (curl, ca-certificates, git)"
+# unzip is not optional: bun's own installer hard-fails without it.
+PREREQS="curl ca-certificates git unzip"
+missing_prereqs=""
+for p in $PREREQS; do
+  case "$p" in
+    ca-certificates) dpkg -s ca-certificates >/dev/null 2>&1 || missing_prereqs="$missing_prereqs $p" ;;
+    *) command -v "$p" >/dev/null 2>&1 || missing_prereqs="$missing_prereqs $p" ;;
+  esac
+done
+if [ -n "$missing_prereqs" ]; then
+  log "installing prerequisites:$missing_prereqs"
   apt_update_once
-  $SUDO apt-get install -y --no-install-recommends curl ca-certificates git >/dev/null \
-    || die "could not install curl/ca-certificates/git"
-}
+  $SUDO apt-get install -y --no-install-recommends $missing_prereqs >/dev/null \
+    || die "could not install:$missing_prereqs"
+fi
 
 # --- docker ---------------------------------------------------------------------
 if ! command -v docker >/dev/null 2>&1; then
@@ -86,7 +95,8 @@ fi
 # --- bun ------------------------------------------------------------------------
 if ! command -v bun >/dev/null 2>&1 && [ ! -x "$HOME/.bun/bin/bun" ]; then
   log "installing bun"
-  curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1 || die "bun install failed"
+  curl -fsSL https://bun.sh/install | bash >/tmp/bun-install.log 2>&1 \
+    || { tail -5 /tmp/bun-install.log >&2; die "the bun installer failed (bun needs unzip; see the log above)"; }
 fi
 export PATH="$HOME/.bun/bin:$PATH"
 
@@ -114,7 +124,7 @@ chmod 600 "$ENV_FILE"
 # --- build ----------------------------------------------------------------------
 if [ -x "$REMOTE_DIR/node_modules/.bin/tsc" ] || command -v bun >/dev/null 2>&1; then
   log "installing dependencies"
-  (cd "$REMOTE_DIR" && bun install --frozen-lockfile) || warn "bun install failed — continuing"
+  (cd "$REMOTE_DIR" && bun install --frozen-lockfile) || warn "bun install of dependencies failed — continuing"
   log "typechecking"
   (cd "$REMOTE_DIR" && bun run build) || warn "bun run build failed — continuing"
 fi
@@ -126,8 +136,24 @@ GATEWAY_PORT="${GATEWAY_PORT:-8080}"
 if [ "${CB_NO_START:-false}" = "true" ]; then
   log "CB_NO_START=true — leaving the stack stopped"
 else
+  # `sudo docker compose` sets HOME=/root, which would make compose bind-mount
+  # /root/.pi (empty) instead of the operator's pi credentials. Resolve the real
+  # home and hand compose an explicit PI_CONFIG_DIR. It must end in /.pi — a
+  # bare home directory would mount the whole home (ssh keys included).
+  REAL_USER="${SUDO_USER:-$(id -un)}"
+  PI_HOME="$(getent passwd "$REAL_USER" | cut -d: -f6)"
+  [ -n "$PI_HOME" ] || PI_HOME="$(eval echo "~$REAL_USER")"
+  PI_CONFIG_DIR="${PI_CONFIG_DIR:-$PI_HOME/.pi}"
+  case "$PI_CONFIG_DIR" in
+    *.pi) ;;
+    *) PI_CONFIG_DIR="$PI_CONFIG_DIR/.pi" ;;
+  esac
+  if [ ! -f "$PI_CONFIG_DIR/agent/auth.json" ]; then
+    warn "no pi credentials at $PI_CONFIG_DIR/agent/auth.json — every session will fail until pi is logged in on this host (run pi once and /login)"
+  fi
+
   log "starting the stack (docker compose up -d --build)"
-  (cd "$REMOTE_DIR" && $SUDO docker compose -f deploy/docker-compose.yml --env-file .env up -d --build) \
+  (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" docker compose -f deploy/docker-compose.yml --env-file .env up -d --build) \
     || die "docker compose up failed — inspect: cd $REMOTE_DIR && docker compose logs"
   healthy=0
   for _ in $(seq 1 20); do
