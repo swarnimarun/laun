@@ -4,9 +4,21 @@ import { checkBearer } from "@cloudbear/protocol";
 import type { ExecutorConfig, ExecutorMode } from "./config.js";
 import { clampTimeout, ensureWorkdir, resolveSessionDir, resolveWorkdir, assertValidPrompt, assertValidSessionId } from "./paths.js";
 import { runPiStreaming } from "./pi.js";
+import {
+  DEFAULT_RECOVERY_ATTEMPTS,
+  DEFAULT_RECOVERY_BACKOFF_MS,
+  recoveryExhaustedMessage,
+  retryingMessage,
+  runWithRecovery,
+} from "./recovery.js";
 import { RpcManager } from "./rpc.js";
 
 interface JsonActive {
+  controller: AbortController;
+  send: (e: AgentEvent) => void;
+}
+
+interface RpcActive {
   controller: AbortController;
   send: (e: AgentEvent) => void;
 }
@@ -17,6 +29,11 @@ export function createHandler(cfg: ExecutorConfig) {
   const rpcIdleTtlMs = (cfg as Partial<ExecutorConfig>).rpcIdleTtlMs ?? 300_000;
   const rpc = new RpcManager({ piBin: cfg.piBin, openshellPrefix: cfg.openshellPrefix, idleTtlMs: rpcIdleTtlMs });
   const jsonActive = new Map<string, JsonActive>();
+  const rpcActive = new Map<string, RpcActive>();
+  // Additive recovery config: absent fields (older callers/tests) fall back
+  // to the defaults, and 0 retries keeps the exact pre-recovery behaviour.
+  const recoveryAttempts = (cfg as Partial<ExecutorConfig>).recoveryAttempts ?? DEFAULT_RECOVERY_ATTEMPTS;
+  const recoveryBackoffMs = (cfg as Partial<ExecutorConfig>).recoveryBackoffMs ?? DEFAULT_RECOVERY_BACKOFF_MS;
 
   function isKnownIdleSession(sessionId: string): boolean {
     if (rpc.has(sessionId)) return true;
@@ -93,26 +110,65 @@ export function createHandler(cfg: ExecutorConfig) {
         jsonActive.set(sessionId, { controller: aborter, send });
         send({ type: "status", sessionId, status: "running", message: `model ${model}` });
         try {
-          const result = await runPiStreaming({
-            sessionId,
-            piSessionDir: resolveSessionDir(cfg.sessionDir, sessionId),
-            workdir,
-            model,
-            prompt,
-            piBin: cfg.piBin,
-            openshellPrefix: cfg.openshellPrefix,
+          // Recovery: re-spawn pi with the same --session-id (history
+          // persists in pi's session dir) and a continuation prompt. The
+          // shared deadline bounds every attempt plus backoff, and an
+          // operator abort stops the loop immediately (never resurrected).
+          // Attempts are sequential: runPiStreaming only resolves after its
+          // child closes, so no attempt leaks a process into the next.
+          const deadline = Date.now() + timeoutMs;
+          const loop = await runWithRecovery({
+            maxRetries: recoveryAttempts,
+            backoffMs: recoveryBackoffMs,
             timeoutMs,
-            onEvent: send,
+            deadline,
             signal: aborter.signal,
+            initialPrompt: prompt,
+            onRetrying: (retryIndex, maxRetries, firstError) =>
+              send({ type: "status", sessionId, status: "running", message: retryingMessage(retryIndex, maxRetries, firstError) }),
+            attempt: async (attemptPrompt, budget) => {
+              let firstError: string | null = null;
+              const result = await runPiStreaming({
+                sessionId,
+                piSessionDir: resolveSessionDir(cfg.sessionDir, sessionId),
+                workdir,
+                model,
+                prompt: attemptPrompt,
+                piBin: cfg.piBin,
+                openshellPrefix: cfg.openshellPrefix,
+                timeoutMs: budget,
+                onEvent: (e) => {
+                  if (e.type === "error" && firstError === null) firstError = e.message;
+                  send(e);
+                },
+                signal: aborter.signal,
+              });
+              return {
+                sawError: result.sawError,
+                sawDone: result.sawDone,
+                aborted: aborter.signal.aborted,
+                firstError,
+                exitCode: result.exitCode,
+              };
+            },
           });
           // pi --mode json can exit 0 with a failed assistant response, so the
           // event stream (not the exit code) decides success.
-          if (result.sawError || result.exitCode !== 0) {
+          if (loop.aborted) {
+            send({ type: "status", sessionId, status: "error", message: "run aborted" });
+          } else if (loop.totalRuns > 1 && (loop.sawError || !loop.sawDone)) {
             send({
               type: "status",
               sessionId,
               status: "error",
-              message: result.exitCode === null ? "run failed (no exit code)" : `run exited ${result.exitCode}`,
+              message: recoveryExhaustedMessage(loop.totalRuns, loop.firstError ?? "unknown error"),
+            });
+          } else if (loop.sawError || loop.exitCode !== 0) {
+            send({
+              type: "status",
+              sessionId,
+              status: "error",
+              message: loop.exitCode === null ? "run failed (no exit code)" : `run exited ${loop.exitCode}`,
             });
           } else {
             send({ type: "status", sessionId, status: "done" });
@@ -155,28 +211,64 @@ export function createHandler(cfg: ExecutorConfig) {
             // already closed by the consumer
           }
         };
+        const aborter = new AbortController();
+        rpcActive.set(sessionId, { controller: aborter, send });
         send({ type: "status", sessionId, status: "running", message: `model ${model}` });
         try {
-          const result = await rpc.run({
-            sessionId,
-            piSessionDir: resolveSessionDir(cfg.sessionDir, sessionId),
-            workdir,
-            model,
-            prompt,
+          // Recovery: re-issue a continuation prompt through the same
+          // long-lived rpc child (respawned transparently if it died).
+          // Same shared-deadline and abort rules as json mode.
+          const deadline = Date.now() + timeoutMs;
+          const loop = await runWithRecovery({
+            maxRetries: recoveryAttempts,
+            backoffMs: recoveryBackoffMs,
             timeoutMs,
-            onEvent: send,
+            deadline,
+            signal: aborter.signal,
+            initialPrompt: prompt,
+            onRetrying: (retryIndex, maxRetries, firstError) =>
+              send({ type: "status", sessionId, status: "running", message: retryingMessage(retryIndex, maxRetries, firstError) }),
+            attempt: async (attemptPrompt, budget) => {
+              let firstError: string | null = null;
+              const r = await rpc.run({
+                sessionId,
+                piSessionDir: resolveSessionDir(cfg.sessionDir, sessionId),
+                workdir,
+                model,
+                prompt: attemptPrompt,
+                timeoutMs: budget,
+                onEvent: (e) => {
+                  if (e.type === "error" && firstError === null) firstError = e.message;
+                  send(e);
+                },
+              });
+              return {
+                sawError: r.sawError,
+                sawDone: r.sawDone,
+                aborted: r.aborted || aborter.signal.aborted,
+                firstError,
+                timedOut: r.timedOut,
+              };
+            },
           });
           // Success is decided by the event stream, never the exit code: the
           // long-lived child stays alive across runs, so there is no exit code
           // to check. agent_settled (sawDone) is the only completion signal.
-          if (result.aborted || result.timedOut || result.sawError || !result.sawDone) {
-            if (result.aborted) {
+          if (loop.aborted || loop.timedOut || loop.sawError || !loop.sawDone) {
+            if (loop.aborted) {
               // The "aborted by user" status was already emitted by abort();
               // close with a terminal error so clients never see a bare done.
               send({ type: "status", sessionId, status: "error", message: "run aborted" });
-            } else if (result.timedOut) {
+            } else if (loop.totalRuns > 1) {
+              send({
+                type: "status",
+                sessionId,
+                status: "error",
+                message: recoveryExhaustedMessage(loop.totalRuns, loop.firstError ?? "unknown error"),
+              });
+            } else if (loop.timedOut) {
               send({ type: "status", sessionId, status: "error", message: "run timed out" });
-            } else if (result.sawError) {
+            } else if (loop.sawError) {
               send({ type: "status", sessionId, status: "error", message: "run failed" });
             } else {
               send({ type: "status", sessionId, status: "error", message: "run failed (no completion)" });
@@ -187,6 +279,7 @@ export function createHandler(cfg: ExecutorConfig) {
         } catch (e) {
           send({ type: "error", sessionId, message: (e as Error).message });
         } finally {
+          rpcActive.delete(sessionId);
           busy.delete(sessionId);
           finish();
         }
@@ -225,16 +318,40 @@ export function createHandler(cfg: ExecutorConfig) {
     // Active run: terminate the agent child for that session, emit the abort
     // event on its stream, and release the busy slot. Never leave busy set.
     if (mode === "rpc") {
+      const active = rpcActive.get(sessionId);
+      if (!active) {
+        const ok = rpc.abort(sessionId);
+        if (!ok) {
+          // Desync guard: busy said running but the rpc child had no live run
+          // (already settled or never started). Release the slot anyway.
+          busy.delete(sessionId);
+          return json({ error: "session not running" }, 409);
+        }
+        // rpc.abort() resolves the run; the stream's finally releases busy, but
+        // release it here too so a 200 always means the slot is free, even if the
+        // stream close is still in flight. The finally delete is idempotent.
+        busy.delete(sessionId);
+        return json({ ok: true });
+      }
+      // Signal the recovery loop first: it must never start another attempt
+      // after an operator abort, including while parked in backoff.
+      try {
+        active.controller.abort();
+      } catch {
+        // already aborted
+      }
       const ok = rpc.abort(sessionId);
       if (!ok) {
-        // Desync guard: busy said running but the rpc child had no live run
-        // (already settled or never started). Release the slot anyway.
-        busy.delete(sessionId);
-        return json({ error: "session not running" }, 409);
+        // No live run to resolve (between recovery attempts): announce the
+        // abort here — rpc.abort() only announces when it resolves a run.
+        // The loop observes the signal, skips further attempts, and the
+        // stream still closes with a terminal "run aborted".
+        try {
+          active.send({ type: "status", sessionId, status: "error", message: "aborted by user" });
+        } catch {
+          // consumer gone; the loop still needs to stop
+        }
       }
-      // rpc.abort() resolves the run; the stream's finally releases busy, but
-      // release it here too so a 200 always means the slot is free, even if the
-      // stream close is still in flight. The finally delete is idempotent.
       busy.delete(sessionId);
       return json({ ok: true });
     }

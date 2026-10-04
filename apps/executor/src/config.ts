@@ -1,3 +1,5 @@
+import { DEFAULT_RECOVERY_ATTEMPTS, DEFAULT_RECOVERY_BACKOFF_MS, MAX_RECOVERY_ATTEMPTS, MAX_RECOVERY_BACKOFF_MS } from "./recovery.js";
+
 export type ExecutorMode = "json" | "rpc";
 
 export interface ExecutorConfig {
@@ -16,6 +18,13 @@ export interface ExecutorConfig {
   executorMode?: ExecutorMode;
   /** Idle TTL for rpc children before they are reaped. Restart reuses the same session dir. Defaults to 300_000. */
   rpcIdleTtlMs?: number;
+  /**
+   * Max recovery retries after the initial run (total runs <= 1 + this).
+   * 0 disables recovery entirely. Defaults to 2.
+   */
+  recoveryAttempts?: number;
+  /** Backoff between recovery attempts. Defaults to 2000. */
+  recoveryBackoffMs?: number;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -48,6 +57,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ExecutorConfig
   if (!Number.isFinite(rpcIdleTtlMs) || rpcIdleTtlMs < 100) {
     throw new Error("RPC_IDLE_TTL_MS must be >= 100");
   }
+  const recoveryAttemptsRaw = (env["RUN_RECOVERY_ATTEMPTS"] ?? "").trim();
+  const recoveryAttempts = recoveryAttemptsRaw === "" ? DEFAULT_RECOVERY_ATTEMPTS : Number(recoveryAttemptsRaw);
+  if (!Number.isInteger(recoveryAttempts) || recoveryAttempts < 0 || recoveryAttempts > MAX_RECOVERY_ATTEMPTS) {
+    throw new Error(`RUN_RECOVERY_ATTEMPTS must be an integer 0-${MAX_RECOVERY_ATTEMPTS}`);
+  }
+  const recoveryBackoffRaw = (env["RUN_RECOVERY_BACKOFF_MS"] ?? "").trim();
+  const recoveryBackoffMs = recoveryBackoffRaw === "" ? DEFAULT_RECOVERY_BACKOFF_MS : Number(recoveryBackoffRaw);
+  if (!Number.isFinite(recoveryBackoffMs) || recoveryBackoffMs < 0 || recoveryBackoffMs > MAX_RECOVERY_BACKOFF_MS) {
+    throw new Error(`RUN_RECOVERY_BACKOFF_MS must be 0-${MAX_RECOVERY_BACKOFF_MS}`);
+  }
   return {
     port,
     gatewayToken,
@@ -59,5 +78,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ExecutorConfig
     defaultTimeoutMs,
     executorMode: modeRaw as ExecutorMode,
     rpcIdleTtlMs,
+    recoveryAttempts,
+    recoveryBackoffMs: Math.floor(recoveryBackoffMs),
   };
 }
