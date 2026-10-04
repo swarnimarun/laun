@@ -185,6 +185,19 @@ means the most common long-job failure is unrecoverable automatically.
 with a total ceiling), or the choice is documented as deliberate and `watch`
 knows how to resume one.
 
+> Wedge class fixed 2026-10-04 (observed live on 41bb1ac8, fixed before it
+> could recur): a timed-out run left the executor answering 409 forever while
+> the gateway record said idle — and `stop` refused without asking. Two halves:
+> executor frees every slot on timeout/abort/error (wedged children SIGKILLed
+> after a bounded 5s grace; per-run generation guard stops an old `finally`
+> from clobbering a new run's slot; sync throws become 500 with the slot
+> freed), and gateway `stop` always pokes the executor instead of trusting
+> its local record. No `docker restart` should ever be needed for this again.
+>
+> Live on the box since the 2026-10-04 redeploy (code markers verified inside
+> the running containers). Self-healing after a real timeout is still
+> unproven live — the next 30-minute timeout is the test.
+
 ---
 
 ## P2 — product completeness
@@ -240,7 +253,7 @@ branding (talk ACP to `goose serve` instead). See `PLAN.md` for the reasoning.
 | Policy proposals auto-approved (network only) | missing | P0 |
 | Real (gating) approvals | stub | P0 |
 | `pi` in-sandbox JSON/RPC | unverified | P0 |
-| Thinking visible (coalesced) | code landed, gateway/UI pending | P1 |
+| Thinking visible (coalesced) | pipeline live since redeploy, awaiting a tool-heavy run | P1 |
 | Completion notification (`watch`) | landed + live-proven | P1 |
 | Queue/steer while busy | stub | P1 |
 | Resume after reboot | stub | P1 |
@@ -252,5 +265,5 @@ branding (talk ACP to `goose serve` instead). See `PLAN.md` for the reasoning.
 | Budgets + concurrency cap | missing | P2 |
 | Key scopes, multi-target | missing | P2 |
 | `cloudbear doctor` | landed + live-proven | P2 |
-| Bridge disabled without a token | landed, live proof on redeploy | P2 |
+| Bridge disabled without a token | live: stack all-healthy, Exited (0) | P2 |
 | TLS recipe | partial | P2 |

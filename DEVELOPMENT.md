@@ -20,11 +20,11 @@ bun run build        # tsc -b, also what CI runs
 ## Tests
 
 ```bash
-bun run test         # 280 tests, 15 files, ~40s
+bun run test         # 284 tests, 15 files, ~45s
 ```
 
 **Always use `bun run test`, never bare `bun test`.** Bare `bun test` also picks
-up the compiled copies under `dist/` and runs the suite **twice (560 tests,
+up the compiled copies under `dist/` and runs the suite **twice (568 tests,
 30 files)**. The script scopes the glob to `*/src`.
 
 Per package:
@@ -33,7 +33,7 @@ Per package:
 | --- | --- | --- | --- |
 | `packages/protocol` | 8 | 1 | types, key format, bearer checks |
 | `packages/policy` | 60 | 4 | OpenShell YAML schema limits, provider secrets, auto-approve scoping |
-| `apps/executor` | 81 | 2 | **~42s** — spawns stub binaries, one test holds a stream open past Bun's 10s idle window; incl. thinking coalescing + usage emission |
+| `apps/executor` | 85 | 2 | **~45s** — spawns stub binaries, one test holds a stream open past Bun's 10s idle window; incl. thinking coalescing + usage emission, wedged-slot release |
 | `apps/gateway` | 26 | 5 | auth, abort, sessions, SSE; abort always pokes the executor |
 | `apps/telegram-bridge` | 18 | 1 | formatting + allowlist, disabled exit, `/log`, busy-409 reply |
 | `apps/cli` | 87 | 2 | flags, exit codes, ssh argv, recovery ergonomics, `watch`, `doctor`, named targets, thinking render |

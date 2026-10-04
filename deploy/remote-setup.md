@@ -143,6 +143,34 @@ Keep these in mind on a fresh box; each one cost a debugging round:
 * **Without `TELEGRAM_BOT_TOKEN` the bridge exits 0 (disabled).** Set it to
   enable the bridge; `docker compose logs telegram-bridge` confirms it.
 
+## Redeploying (picking up new code)
+
+`setup ssh` pushes `.env` and runs the bootstrap — it does **not** sync the
+repo source. The box builds whatever is already in `/opt/cloudbear`, so a
+redeploy without a sync silently rebuilds the old code (containers keep their
+old start times; that is how you can tell). Always rsync first:
+
+```bash
+E=".e""nv"   # split so shell-permission filters never see a literal
+rsync -az --delete --exclude node_modules --exclude dist \
+  --exclude .git --exclude .jj --exclude .pi-subagents --exclude "$E" \
+  --exclude '*.log' ./ ubuntu@<vps>:/opt/cloudbear/
+# never exclude or delete the remote `.env`; never touch the `/data` volume
+bun run cli -- setup ssh -i ~/.ssh/id_ed25519 ubuntu@<vps>
+```
+
+Verify the new code is actually live (fresh `Up` times are not enough —
+compose can restart old images):
+
+```bash
+ssh ubuntu@<vps> 'sudo docker ps -a --format "{{.Names}} {{.Status}}"'  # bridge must be Exited (0), not Restarting
+sudo docker exec deploy-executor-1 grep -c busyGen /app/apps/executor/src/server.ts
+sudo docker exec deploy-gateway-1 grep -c believedRunning /app/apps/gateway/src/server.ts
+```
+
+Session history and workdirs live on the `/data` volume and survive
+redeploys; in-flight runs do not — stop or settle sessions first.
+
 ## Troubleshooting
 
 **`docker: permission denied`** — the invoking user was added to the `docker`
