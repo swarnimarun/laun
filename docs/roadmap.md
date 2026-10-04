@@ -2,8 +2,7 @@
 
 What laun is missing, in the order it should be built, with the evidence
 that a feature is actually missing and a definition of done for each. Read this
-alongside `PLAN.md` (architecture and the lane workflow) and `DEVELOPMENT.md`
-(how to run it).
+alongside `DEVELOPMENT.md` (how to run it, and the lane/worker/validator workflow).
 
 **Status legend:** *missing* = not in the code at all · *stub* = present but not
 doing the real job · *unverified* = built but never proven in the real world.
@@ -250,7 +249,7 @@ knows how to resume one.
 
 Single VPS + docker compose + long polling is the intended shape. **Not** doing:
 Kubernetes, webhooks, a mobile app, multi-tenant auth, or forking goose for
-branding (talk ACP to `goose serve` instead). See `PLAN.md` for the reasoning.
+branding (talk ACP to `goose serve` instead).
 
 ---
 

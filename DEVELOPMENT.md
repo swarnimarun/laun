@@ -210,7 +210,8 @@ jj workspace add ../laun-lane-<task>   # sibling of the repo, from a clean tree
 - Handoffs go in `.pi-subagents/handoffs/<lane>.md` in the **parent** repo
   (gitignored, shared on disk, never committed).
 
-See `PLAN.md` for the milestone table and the DoD for each wave.
+See `docs/roadmap.md` for the milestone table, what is missing or stubbed, and
+the definition of done for each wave.
 
 ## Cleaning up
 

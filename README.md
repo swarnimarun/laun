@@ -3,8 +3,14 @@
 Self-hosted remote agent runner. Pi-first executor, OpenShell policy sandbox, Telegram bridge. One VPS, on 24/7.
 
 ```
-Telegram / CLI / browser -> gateway -> executor (pi inside OpenShell sandbox) -> your repo/container
+Telegram / CLI / browser -> gateway -> executor (pi via rpc) -> your repo/container
 ```
+
+Sandboxing (OpenShell) is built but disabled: the executor can already
+create per-session sandboxes and run one-shot commands inside them, but
+long-lived rpc needs the SDK transport and session files need a workdir
+mapping first — see `docs/roadmap.md` P0. `OPENSHELL_ENABLED` stays `false`
+until then.
 
 ## Quick start (one command)
 
@@ -45,8 +51,9 @@ See `deploy/remote-setup.md` for flags, prerequisites, and troubleshooting, and
 
 ### Browser UI
 
-Open `http://<host>:8080/` and paste the agent key: session list, live
-transcript, new session, follow-up messages, and approve/deny buttons.
+Open `http://127.0.0.1:18080/` (over the tunnel — port 8080 is firewalled)
+and paste the agent key: session list, live transcript, new session,
+follow-up messages, and approve/deny buttons.
 
 ### Remote control (CLI)
 
@@ -69,7 +76,7 @@ plain text follows up on your latest session.
 ## Quick start (manual, VPS)
 
 ```bash
-git clone <this-repo> laun && cd laun
+git clone git@github.com:swarnimarun/laun.git laun && cd laun && git checkout v1
 cp deploy/.env.example .env   # fill in TELEGRAM_BOT_TOKEN, GATEWAY_TOKEN, allowlist
 chmod +x deploy/install.sh && ./deploy/install.sh
 ```
@@ -90,9 +97,9 @@ WORKDIR=/data/sessions/<id>/work MODEL_HOST=YOUR_MODEL_HOST bun packages/policy/
 
 Model setup (Muse via opencode-go): see `examples/models.md`.
 OpenShell policy mapping: see `examples/openshell-policy-notes.md`.
-Roadmap and verified harness findings: see `PLAN.md`; the forward-looking
-backlog of **unimplemented features**, each with its evidence and definition of
-done, is in [`docs/roadmap.md`](docs/roadmap.md).
+Roadmap and verified harness findings: the forward-looking backlog of
+**unimplemented features**, each with its evidence and definition of done,
+is in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Local dev (Bun-only)
 
@@ -113,28 +120,15 @@ bun run dev:gateway    # :8080
 bun run dev:bridge     # long-polling Telegram
 ```
 
-## Upgrading (cloudbear v0 → laun v1)
-
-v1 is a clean break: `laun_`-prefixed keys, `LAUN_*` env names, `~/.laun/`,
-`/opt/laun` on the box. The old stack keeps running untouched until you cut
-over — then fresh-setup beside it and re-auth once:
-
-```bash
-laun setup ssh -i ~/.ssh/id_ed25519 ubuntu@<vps>   # new key, /opt/laun
-laun agent auth --host 127.0.0.1 --port 18080 --key <new key>
-```
-
-The old `cb_` key dies with the old stack; delete `~/.cloudbear/` after.
-Redeploying later? `setup ssh` rebuilds what is already on the box — rsync
-first (procedure in `deploy/remote-setup.md`, “Redeploying”).
-
 ## Layout
 
 * `packages/protocol` — shared types + validation for gateway/executor/bridge/CLI. Executor interface supports pi now, goose/dots later.
 * `packages/policy` — OpenShell policy templates (restrictive default).
 * `apps/executor` — one long-lived `pi --mode rpc` child per session (json
-  one-shot fallback), streamed JSONL events, abort/steer, self-healing retry.
-  Runs the child inside an OpenShell sandbox when `OPENSHELL_ENABLED=true`.
+  one-shot fallback), streamed JSONL events, abort, self-healing retry, and a
+  wedged slot can never need a restart again. Sandbox execution is implemented
+  behind `OPENSHELL_ENABLED` (off until the SDK transport + workdir mapping
+  land — `docs/roadmap.md` has the proof log).
 * `apps/gateway` — tiny HTTP API + SSE + agent-key management. Serves the browser UI from `apps/gateway/public`.
 * `apps/telegram-bridge` — grammY long-polling bot, allowlisted user IDs only.
 * `apps/laun` — the `laun` command: local/remote setup, agent auth, and agent/key control.
@@ -152,7 +146,11 @@ Auth: `Authorization: Bearer <token>`, where the token is either `GATEWAY_TOKEN`
 * `POST /sessions/:id/messages` `{ text }` -> `{ accepted: true }` (409 when busy)
 * `GET /sessions/:id/log?since=N` -> `{ events, next }` (polling)
 * `GET /sessions/:id/events` (SSE) — executor output, tool calls, approval requests
+* `POST /sessions/:id/abort` — stop the run (200 ok; 409 not running).
+  `stop` always asks the executor, so a wedged slot is reachable even when
+  the record says idle.
 * `POST /sessions/:id/approvals` `{ requestId, decision: "approve"|"deny" }`
+  — recorded and broadcast (acknowledge-only today; real gating is roadmap P0)
 * `POST /keys` `{ label? }` -> `{ key, record }` — service token only
 * `GET /keys` -> `{ keys }` — service token only
 * `DELETE /keys/:id` — service token only
@@ -169,8 +167,12 @@ Executor on `:8081`: `POST /run` (gateway only, same service token).
   sessions but cannot mint or revoke keys, so a leak is contained.
 * Agent keys are stored as sha256 hashes in `data/keys.json` (0600); the
   plaintext is printed once by `setup` and never retrievable afterwards.
-* Pi never sees provider keys directly when OpenShell is on — keys live on gateway/host, injected only for approved endpoints.
-* Policy escalations surface as approval events; default deny on timeout.
+* Pi never sees provider keys directly — that is the design once a model key
+  is provisioned through an OpenShell provider (not yet: no model key on the
+  box, placeholder-only inside sandboxes).
+* Policy escalations surface as approval events; timeout-deny-by-default is
+  the rule the real gating will enforce (`extension_ui` round-trip, roadmap P0).
+  Today nothing gates the agent — approvals record a human decision.
 * The gateway speaks plain HTTP: put it behind TLS or a private network before
   exposing it to the internet.
 * Durability: pi session files + gateway `index.json` + per-session `events-<id>.jsonl`
