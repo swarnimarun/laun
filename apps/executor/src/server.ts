@@ -637,6 +637,11 @@ export function createHandler(cfg: ExecutorConfig, deps: HandlerDeps = {}) {
         } catch (e) {
           send({ type: "error", sessionId, message: (e as Error).message });
         } finally {
+          // Stale-permission guard: the adapter fail-closed at request
+          // time, so entries here only exist to ack mid-run decisions.
+          // Drop the whole session entry when the run ends — a late POST
+          // /approvals for a finished run must 404, never 200-ack dead.
+          goosePending.delete(sessionId);
           if (busyGen.get(sessionId) === gen) {
             busyGen.delete(sessionId);
             if (gooseActive.get(sessionId) === myActive) gooseActive.delete(sessionId);

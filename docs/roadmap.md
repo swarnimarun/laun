@@ -42,6 +42,11 @@ doing the real job · *unverified* = built but never proven in the real world ·
 - Gateway self-preservation: boot auto-resume (interrupted runs continue
   instead of erroring), stall sweeper (silent runs aborted only on verified
   abort), concurrency cap + per-session token budgets.
+- Executor steer (`POST /steer` exactly per contract), real gating approvals
+  (`extension_ui` park with timeout-deny, abort/timeout/disconnect release),
+  repo checkout on create, ACP runtime wiring (`goose`/`dots` → runGoose).
+  Approval decisions forward best-effort; `repo`/`runtime` thread protocol →
+  gateway → executor; CLI adds `--repo`/`--runtime` on `new`.
 - TLS upgrade path documented (Caddy recipe, validated config, executor
   stays loopback-only).
 - Goose ACP adapter (`packages/acp`): JSON-RPC over WS, session lifecycle,

@@ -264,8 +264,35 @@ describe("ACP runtime wiring", () => {
     }
   });
 
-  test("POST /approvals acknowledges a goose permission (200); unknown is 404", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "laun-goose-appr-"));
+  test("POST /approvals acks a live goose permission (200)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "laun-goose-appr-live-"));
+    let emitted = false;
+    const runner: GooseRunner = (opts) =>
+      new Promise((resolve) => {
+        opts.onEvent({ type: "approval_request", sessionId: opts.sessionId, requestId: "g-live", reason: "perm" });
+        emitted = true; // onEvent recorded the entry synchronously above
+        opts.signal?.addEventListener("abort", () =>
+          resolve({ sawError: true, sawDone: false, aborted: true, timedOut: false }),
+        );
+      });
+    const h = gooseHandler(dir, runner);
+    try {
+      const res = await h.handleRun(authed("/run", { sessionId: "g1", prompt: "hi", runtime: "goose" }));
+      expect(res.status).toBe(200);
+      const textP = res.text();
+      await pollFor(() => emitted, "goose permission event");
+      const ok = await h.handleApprovals(authed("/approvals", { sessionId: "g1", requestId: "g-live", decision: "approve" }));
+      expect(ok.status).toBe(200);
+      await h.handleAbort(authed("/abort", { sessionId: "g1" }));
+      await textP;
+      expect(h.busy.size).toBe(0);
+    } finally {
+      h.close();
+    }
+  }, 20_000);
+
+  test("approve after goose run end is 404, not 200 (stale pending cleared)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "laun-goose-appr-stale-"));
     const runner: GooseRunner = async (opts) => {
       opts.onEvent({ type: "approval_request", sessionId: opts.sessionId, requestId: "g-9", reason: "perm" });
       opts.onEvent({ type: "done", sessionId: opts.sessionId });
@@ -274,9 +301,11 @@ describe("ACP runtime wiring", () => {
     const h = gooseHandler(dir, runner);
     try {
       const res = await h.handleRun(authed("/run", { sessionId: "g1", prompt: "hi", runtime: "goose" }));
-      await res.text();
-      const ok = await h.handleApprovals(authed("/approvals", { sessionId: "g1", requestId: "g-9", decision: "deny" }));
-      expect(ok.status).toBe(200);
+      expect(res.status).toBe(200);
+      await res.text(); // run ended; finally dropped the session entry
+      expect(h.busy.size).toBe(0);
+      const stale = await h.handleApprovals(authed("/approvals", { sessionId: "g1", requestId: "g-9", decision: "deny" }));
+      expect(stale.status).toBe(404);
       const unknown = await h.handleApprovals(authed("/approvals", { sessionId: "g1", requestId: "nope", decision: "deny" }));
       expect(unknown.status).toBe(404);
     } finally {
