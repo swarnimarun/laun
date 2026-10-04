@@ -31,6 +31,42 @@ export function isTerminal(e: AgentEvent): boolean {
   return e.type === "done" || e.type === "error";
 }
 
+export interface TranscriptIo {
+  /** Print a complete line. */
+  out: (line: string) => void;
+  /** Write raw text with no trailing newline (streaming deltas). */
+  write: (text: string) => void;
+}
+
+/**
+ * Stream events to a terminal as a human would read them: text deltas are
+ * concatenated as they arrive (pi emits a delta per token, so printing each one
+ * as a line shreds paragraphs), and every other event starts a fresh line.
+ */
+export function createTranscript(io: TranscriptIo, asJson = false): (e: AgentEvent) => void {
+  let inText = false;
+  const endText = () => {
+    if (inText) {
+      io.write("\n");
+      inText = false;
+    }
+  };
+  return (e: AgentEvent) => {
+    if (asJson) {
+      endText();
+      io.out(JSON.stringify(e));
+      return;
+    }
+    if (e.type === "text") {
+      io.write(e.delta);
+      inText = true;
+      return;
+    }
+    endText();
+    for (const line of renderEvent(e)) io.out(line);
+  };
+}
+
 export interface FollowOptions {
   since?: number;
   pollMs?: number;

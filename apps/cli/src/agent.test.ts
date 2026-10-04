@@ -178,10 +178,11 @@ describe("agent rendering + follow", () => {
 });
 
 describe("main dispatch", () => {
-  function io(): Io & { lines: string[]; errs: string[] } {
+  function io(): Io & { lines: string[]; errs: string[]; written: string[] } {
     const lines: string[] = [];
     const errs: string[] = [];
-    return { lines, errs, out: (l) => lines.push(l), err: (l) => errs.push(l) };
+    const written: string[] = [];
+    return { lines, errs, written, out: (l) => void lines.push(l), err: (l) => void errs.push(l), write: (t) => void written.push(t) };
   }
 
   test("help and version", async () => {

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { UsageError, flagBool, flagString, parseArgs, requiredArg } from "./args.js";
-import { renderEvent, follow, formatApprovals, sessionLine } from "./agent.js";
+import { createTranscript, follow, formatApprovals, sessionLine } from "./agent.js";
 import { GatewayClient, GatewayError } from "./client.js";
 import { authFilePath, resolveTarget, saveTarget, targetUrl, type Target } from "./config.js";
 import { connectionBlock, localSetup, parseSshTarget, remoteSetup } from "./setup.js";
@@ -39,9 +39,15 @@ const HELP = `cloudbear — self-hosted remote agent control
 export interface Io {
   out: (line: string) => void;
   err: (line: string) => void;
+  /** Raw write for streaming text (no trailing newline). */
+  write: (text: string) => void;
 }
 
-const defaultIo: Io = { out: (l) => console.log(l), err: (l) => console.error(l) };
+const defaultIo: Io = {
+  out: (l) => console.log(l),
+  err: (l) => console.error(l),
+  write: (t) => process.stdout.write(t),
+};
 
 function clientFor(target: Target, tokenOverride?: string): GatewayClient {
   return new GatewayClient(targetUrl(target), tokenOverride ?? target.key);
@@ -161,10 +167,7 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
     const id = requiredArg(parsed.positionals, 0, "session id", "cloudbear agent log <id> [--follow]");
     const since = Number(flagString(parsed.flags, "since") ?? 0);
     const asJson = flagBool(parsed.flags, "json");
-    const emit = (e: Parameters<typeof renderEvent>[0]) => {
-      if (asJson) io.out(JSON.stringify(e));
-      else for (const line of renderEvent(e)) io.out(line);
-    };
+    const emit = createTranscript(io, asJson);
     if (flagBool(parsed.flags, "follow")) {
       await follow(client, id, { since, onEvent: emit });
     } else {
