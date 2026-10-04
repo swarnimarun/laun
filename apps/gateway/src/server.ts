@@ -17,7 +17,7 @@ import {
   DEFAULT_STALL_MS,
   RESUME_PROMPT,
 } from "./config.js";
-import { streamExecutorRun, abortExecutorRun, executorKnowsAbort, steerExecutorRun, executorKnowsSteer } from "./executorClient.js";
+import { streamExecutorRun, abortExecutorRun, executorKnowsAbort, steerExecutorRun, executorKnowsSteer, approveExecutorDecision } from "./executorClient.js";
 import { AgentKeyStore } from "./keys.js";
 import { SessionStore } from "./store.js";
 
@@ -187,13 +187,24 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
     if (rec) publish(sessionId, { type: "status", sessionId, status });
   }
 
-  async function runAgent(sessionId: string, prompt: string, model: string): Promise<void> {
+  async function runAgent(
+    sessionId: string,
+    prompt: string,
+    model: string,
+    opts: { repo?: string; runtime?: SessionRecord["runtime"] } = {},
+  ): Promise<void> {
     if (running.has(sessionId)) return;
     running.add(sessionId);
     sessions.setStatus(sessionId, "running");
     publish(sessionId, { type: "status", sessionId, status: "running" });
     try {
-      for await (const e of streamExecutorRun(cfg.executorUrl, cfg.gatewayToken, { sessionId, prompt, model })) {
+      for await (const e of streamExecutorRun(cfg.executorUrl, cfg.gatewayToken, {
+        sessionId,
+        prompt,
+        model,
+        repo: opts.repo,
+        runtime: opts.runtime,
+      })) {
         publish(sessionId, e);
         if (e.type === "status" && (e.status === "done" || e.status === "error")) {
           sessions.setStatus(sessionId, e.status);
@@ -213,7 +224,7 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
       if (next !== undefined) {
         pendingQueue.delete(sessionId);
         const rec = sessions.get(sessionId);
-        if (rec) void runAgent(sessionId, next, rec.model);
+        if (rec) void runAgent(sessionId, next, rec.model, { repo: rec.repo, runtime: rec.runtime });
       }
     }
   }
@@ -231,7 +242,7 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
           status: "running",
           message: "gateway restarted during run — resuming where it left off",
         });
-        void runAgent(rec.id, RESUME_PROMPT, rec.model);
+        void runAgent(rec.id, RESUME_PROMPT, rec.model, { repo: rec.repo, runtime: rec.runtime });
       } else {
         sessions.setStatus(rec.id, "error");
         publish(rec.id, {
@@ -312,7 +323,7 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
       const norm = normalizeCreateSession(input);
       const rec = sessions.create({ goal: norm.goal, repo: norm.repo, model: norm.model, runtime: norm.runtime });
       busFor(rec.id);
-      void runAgent(rec.id, norm.goal, norm.model);
+      void runAgent(rec.id, norm.goal, norm.model, { repo: norm.repo, runtime: norm.runtime });
       return rec;
     },
 
@@ -328,7 +339,7 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
       }
       if (!running.has(sessionId)) {
         checkConcurrency();
-        void runAgent(sessionId, text, rec.model);
+        void runAgent(sessionId, text, rec.model, { repo: rec.repo, runtime: rec.runtime });
         return Promise.resolve({ outcome: "started" as const });
       }
       if (mode === "steer") return this.steerRunning(sessionId, text);
@@ -409,6 +420,27 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
       if (rec && b.pendingApprovals.size === 0 && rec.status === "waiting_approval") {
         sessions.setStatus(sessionId, "running");
       }
+      // Forward to a parked executor run (extension_ui gating). Best-effort:
+      // the local record above is what the UI shows, so a settled run or a
+      // dead executor only earns a note event, never a failed click.
+      void approveExecutorDecision(cfg.executorUrl, cfg.gatewayToken, sessionId, d.requestId, d.decision).then(
+        (r) => {
+          if (r.status !== 200) {
+            publish(sessionId, {
+              type: "status",
+              sessionId,
+              status: "running",
+              message:
+                r.status === 0
+                  ? `approval ${d.requestId} recorded; executor unreachable — run holds until timeout`
+                  : `approval ${d.requestId} recorded; executor said ${r.status} — run holds until timeout`,
+            });
+          }
+        },
+        () => {
+          // approveExecutorDecision never rejects (catches internally); guard anyway.
+        },
+      );
     },
 
     pendingApprovals(sessionId: string) {

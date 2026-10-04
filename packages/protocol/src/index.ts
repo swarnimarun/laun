@@ -45,6 +45,10 @@ export interface ExecutorRunRequest {
   /** Absolute workdir the agent runs in. Executor must confine it. */
   workdir?: string;
   timeoutMs?: number;
+  /** Repo path or URL the executor checks out before starting (if set). */
+  repo?: string;
+  /** Runtime harness (executor routes goose/dots to its ACP adapter). */
+  runtime?: RuntimeKind;
 }
 
 export type AgentEvent =

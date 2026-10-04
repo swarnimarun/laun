@@ -125,3 +125,29 @@ export function executorKnowsSteer(result: { status: number; body: string }): bo
   if (result.status !== 404) return false;
   return /unknown session/i.test(result.body);
 }
+
+/**
+ * Deliver a human approval decision to a parked executor run.
+ * Best-effort by design: the gateway's local record is authoritative for the
+ * UI, so a dead executor (or a run that already settled) never fails the
+ * human's click — the outcome is published as an event either way.
+ */
+export async function approveExecutorDecision(
+  executorUrl: string,
+  token: string,
+  sessionId: string,
+  requestId: string,
+  decision: "approve" | "deny",
+): Promise<{ status: number; body: string }> {
+  try {
+    const res = await fetch(`${executorUrl}/approvals`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ sessionId, requestId, decision }),
+    });
+    const body = await res.text().catch(() => "");
+    return { status: res.status, body };
+  } catch {
+    return { status: 0, body: "" };
+  }
+}

@@ -47,7 +47,7 @@ const HELP = `laun — self-hosted remote agent control
         Verify the key and save it to ~/.laun/auth.json (0600).
 
   Drive agents (all accept --target <name> for a saved host)
-    laun agent new "<goal>" [--model <m>] [--json]
+    laun agent new "<goal>" [--model <m>] [--repo <url-or-path>] [--runtime pi|goose|dots] [--json]
     laun agent ls [--json]
     laun agent status <id> [--json]
         Status appends a usage total line when the log holds usage events.
@@ -258,9 +258,12 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
   const client = clientFor(target);
 
   if (sub === "new") {
-    const parsed = parseArgs(rest, { boolean: ["json"], value: ["model"] });
+    const parsed = parseArgs(rest, { boolean: ["json"], value: ["model", "repo", "runtime"] });
     const goal = requiredArg(parsed.positionals, 0, "goal", 'laun agent new "<goal>"');
-    const rec = await client.createSession(goal, flagString(parsed.flags, "model"));
+    const rec = await client.createSession(goal, flagString(parsed.flags, "model"), {
+      repo: flagString(parsed.flags, "repo"),
+      runtime: flagString(parsed.flags, "runtime"),
+    });
     if (flagBool(parsed.flags, "json")) io.out(JSON.stringify(rec));
     else io.out(`🚀 ${rec.id} [${rec.status}] ${rec.model}`);
     return 0;

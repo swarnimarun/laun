@@ -361,6 +361,7 @@ describe("target + watch + doctor commands", () => {
   };
   let server: ReturnType<typeof Bun.serve>;
   let base = "";
+  const createdBodies: string[] = [];
 
   beforeAll(() => {
     server = Bun.serve({
@@ -369,6 +370,10 @@ describe("target + watch + doctor commands", () => {
         const url = new URL(req.url);
         if (url.pathname === "/health") return Response.json({ ok: true, service: "gateway", executor: "http://x" });
         if (url.pathname === "/sessions" && req.method === "GET") return Response.json({ sessions: [rec] });
+        if (url.pathname === "/sessions" && req.method === "POST") {
+          createdBodies.push(await req.text());
+          return Response.json({ ...rec, id: "new1" });
+        }
         const sess = url.pathname.match(/^\/sessions\/([^/]+)$/);
         if (sess && req.method === "GET") {
           const id = sess[1]!;
@@ -470,6 +475,17 @@ describe("target + watch + doctor commands", () => {
     expect(await main(["agent", "watch"], env, io)).toBe(2);
     io = makeIo();
     expect(await main(["agent", "watch", "s1", "--timeout", "soon"], env, io)).toBe(2);
+  });
+
+  test("agent new forwards --repo and --runtime", async () => {
+    const env = serverEnv();
+    const io = makeIo();
+    expect(await main(["agent", "new", "do thing", "--repo", "https://example.com/r.git", "--runtime", "goose"], env, io)).toBe(0);
+    expect(io.lines.join("\n")).toContain("new1");
+    const body = JSON.parse(createdBodies[createdBodies.length - 1]!);
+    expect(body.goal).toBe("do thing");
+    expect(body.repo).toBe("https://example.com/r.git");
+    expect(body.runtime).toBe("goose");
   });
 
   test("doctor: healthy gateway exits 0 without ever printing the key", async () => {

@@ -15,16 +15,19 @@ interface StubOpts {
   runCalls?: string[];
   steerStatus?: number;
   steerBody?: string;
+  approvalsStatus?: number;
+  approvalsCalls?: string[];
   steerCalls?: string[];
   abortStatus?: number;
   abortCalls?: string[];
 }
 
 /** Stub executor with a recording /run stream and a configurable /steer. */
-function stubExecutor(o: StubOpts = {}): { url: string; calls: { runCalls: string[]; steerCalls: string[]; abortCalls: string[] } } {
+function stubExecutor(o: StubOpts = {}): { url: string; calls: { runCalls: string[]; steerCalls: string[]; abortCalls: string[]; approvalsCalls: string[] } } {
   const runCalls: string[] = [];
   const steerCalls: string[] = [];
   const abortCalls: string[] = [];
+  const approvalsCalls: string[] = [];
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -43,6 +46,10 @@ function stubExecutor(o: StubOpts = {}): { url: string; calls: { runCalls: strin
         steerCalls.push(await req.text());
         return new Response(o.steerBody ?? '{"ok":true}', { status: o.steerStatus ?? 200 });
       }
+      if (url.pathname === "/approvals" && req.method === "POST") {
+        approvalsCalls.push(await req.text());
+        return new Response('{"ok":true}', { status: o.approvalsStatus ?? 200 });
+      }
       if (url.pathname === "/abort" && req.method === "POST") {
         abortCalls.push(await req.text());
         return new Response('{"ok":true}', { status: o.abortStatus ?? 200 });
@@ -51,7 +58,7 @@ function stubExecutor(o: StubOpts = {}): { url: string; calls: { runCalls: strin
     },
   });
   servers.push(server);
-  return { url: `http://localhost:${server.port}`, calls: { runCalls, steerCalls, abortCalls } };
+  return { url: `http://localhost:${server.port}`, calls: { runCalls, steerCalls, abortCalls, approvalsCalls } };
 }
 
 function gwAt(executorUrl: string): { gw: Gateway; id: string } {
@@ -161,5 +168,42 @@ describe("gateway steer/queue", () => {
     await pollFor(() => !gw.running.has(id), "run settled");
     const prompts = stub.calls.runCalls.map((c) => JSON.parse(c).prompt as string);
     expect(prompts).toEqual(["fresh"]);
+  });
+
+  test("repo and runtime thread through to the executor run", async () => {
+    const stub = stubExecutor();
+    const { gw } = gwAt(stub.url);
+    const rec = gw.createSession({ goal: "g", repo: "https://example.com/r.git", runtime: "goose" });
+    await pollFor(() => stub.calls.runCalls.length >= 1, "run sent");
+    const body = JSON.parse(stub.calls.runCalls[0]!);
+    expect(body.repo).toBe("https://example.com/r.git");
+    expect(body.runtime).toBe("goose");
+    await pollFor(() => !gw.running.has(rec.id), "run settled");
+  });
+
+  test("approval decisions forward to the executor, failures noted not thrown", async () => {
+    const stub = stubExecutor();
+    const { gw, id } = gwAt(stub.url);
+    gw.publish(id, { type: "approval_request", sessionId: id, requestId: "r1", reason: "sudo?" });
+    gw.decideApproval(id, { requestId: "r1", decision: "approve" }, "tester");
+    await pollFor(() => stub.calls.approvalsCalls.length >= 1, "forwarded");
+    expect(JSON.parse(stub.calls.approvalsCalls[0]!)).toEqual({
+      sessionId: id,
+      requestId: "r1",
+      decision: "approve",
+    });
+    // No failure note on success.
+    expect(gw.log(id, 0).events.some((e) => e.type === "status" && (e.message ?? "").includes("executor"))).toBe(false);
+  });
+
+  test("unreachable executor keeps the local decision and notes it", async () => {
+    const { gw, id } = gwAt("http://127.0.0.1:1");
+    gw.publish(id, { type: "approval_request", sessionId: id, requestId: "r1", reason: "sudo?" });
+    gw.decideApproval(id, { requestId: "r1", decision: "deny" }, "tester");
+    await pollFor(
+      () => gw.log(id, 0).events.some((e) => e.type === "status" && (e.message ?? "").includes("executor unreachable")),
+      "failure noted",
+    );
+    expect(gw.pendingApprovals(id)).toEqual([]);
   });
 });

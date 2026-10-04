@@ -96,10 +96,14 @@ export class GatewayClient {
     return this.request("/sessions");
   }
 
-  createSession(goal: string, model?: string): Promise<SessionRecord> {
+  createSession(goal: string, model?: string, opts?: { repo?: string; runtime?: string }): Promise<SessionRecord> {
+    const body: Record<string, unknown> = { goal };
+    if (model) body["model"] = model;
+    if (opts?.repo) body["repo"] = opts.repo;
+    if (opts?.runtime) body["runtime"] = opts.runtime;
     return this.request("/sessions", {
       method: "POST",
-      body: JSON.stringify(model ? { goal, model } : { goal }),
+      body: JSON.stringify(body),
     });
   }
 
