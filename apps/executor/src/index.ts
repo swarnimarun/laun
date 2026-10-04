@@ -1,5 +1,6 @@
 import { loadConfig } from "./config.js";
 import { createHandler } from "./server.js";
+import { STREAMING_SERVE_OPTIONS } from "./serve.js";
 
 const cfg = loadConfig();
 
@@ -7,6 +8,7 @@ const handler = createHandler(cfg);
 
 Bun.serve({
   port: cfg.port,
+  ...STREAMING_SERVE_OPTIONS,
   async fetch(req) {
     const url = new URL(req.url);
     if (url.pathname === "/health") {

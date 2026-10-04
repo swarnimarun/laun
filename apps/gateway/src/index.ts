@@ -3,6 +3,7 @@ import { extname, join, resolve, sep } from "node:path";
 import { loadConfig } from "./config.js";
 import { createGateway } from "./server.js";
 import { SessionStore } from "./store.js";
+import { STREAMING_SERVE_OPTIONS } from "./serve.js";
 
 const cfg = loadConfig();
 const gw = createGateway(cfg, new SessionStore(cfg.dataDir));
@@ -52,6 +53,7 @@ function serveStatic(pathname: string): Response | null {
 
 Bun.serve({
   port: cfg.port,
+  ...STREAMING_SERVE_OPTIONS,
   async fetch(req) {
     const url = new URL(req.url);
     const path = url.pathname;
