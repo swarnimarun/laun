@@ -34,10 +34,21 @@ describe("executor config", () => {
     expect(() => loadConfig({} as NodeJS.ProcessEnv)).toThrow("GATEWAY_TOKEN");
   });
 
-  test("openshell without prefix fails closed", () => {
+  test("openshell without prefix or image fails closed", () => {
     expect(() =>
       loadConfig({ GATEWAY_TOKEN: "x", OPENSHELL_ENABLED: "true" } as NodeJS.ProcessEnv),
-    ).toThrow("OPENSHELL_PREFIX");
+    ).toThrow("OPENSHELL_SANDBOX_IMAGE");
+  });
+
+  test("openshell sandbox mode needs no prefix", () => {
+    const cfg = loadConfig({
+      GATEWAY_TOKEN: "x",
+      OPENSHELL_ENABLED: "true",
+      OPENSHELL_SANDBOX_IMAGE: "pi-agent:local",
+    } as NodeJS.ProcessEnv);
+    expect(cfg.openshellEnabled).toBe(true);
+    expect(cfg.sandboxImage).toBe("pi-agent:local");
+    expect(cfg.openshellPrefix).toEqual([]);
   });
 
   test("loads minimal config", () => {

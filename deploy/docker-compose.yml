@@ -21,10 +21,32 @@ services:
       RPC_IDLE_TTL_MS: ${RPC_IDLE_TTL_MS:-300000}
       OPENSHELL_ENABLED: ${OPENSHELL_ENABLED:-false}
       OPENSHELL_PREFIX: ${OPENSHELL_PREFIX:-}
+      # Per-session sandboxing (needs OPENSHELL_ENABLED=true). Image + policy
+      # are baked/shipped, never secret; the provider key stays server-side.
+      OPENSHELL_SANDBOX_IMAGE: ${OPENSHELL_SANDBOX_IMAGE:-pi-agent:local}
+      OPENSHELL_POLICY: ${OPENSHELL_POLICY:-/openshell/policy.yaml}
+      OPENSHELL_PROVIDER: ${OPENSHELL_PROVIDER:-}
+      OPENSHELL_APPROVAL_MODE: ${OPENSHELL_APPROVAL_MODE:-manual}
+      # SDK transport: how the executor reaches the OpenShell gateway API
+      # from inside its container (host loopback is unreachable there, hence
+      # host.docker.internal below). Certs have no SANs, so verification is
+      # skipped for this loopback-adjacent control channel; client mTLS still
+      # authenticates. See docs/roadmap.md NOW #1.
+      OPENSHELL_SDK_GATEWAY: ${OPENSHELL_SDK_GATEWAY:-https://host.docker.internal:17670}
+      OPENSHELL_SDK_INSECURE: ${OPENSHELL_SDK_INSECURE:-true}
+      OPENSHELL_SDK_CLIENT_CERT_FILE: ${OPENSHELL_SDK_CLIENT_CERT_FILE:-/openshell-mtls/tls.crt}
+      OPENSHELL_SDK_CLIENT_KEY_FILE: ${OPENSHELL_SDK_CLIENT_KEY_FILE:-/openshell-mtls/tls.key}
+      OPENSHELL_SDK_CA_FILE: ${OPENSHELL_SDK_CA_FILE:-/openshell-mtls/ca.crt}
+      OPENSHELL_SANDBOX_MAX_IDLE_MS: ${OPENSHELL_SANDBOX_MAX_IDLE_MS:-604800000}
       # No model keys here on purpose: pi authenticates from the executor host's
       # ~/.pi/agent/auth.json (see examples/models.md). Never bake keys into images.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - laun-data:/data
+      # OpenShell gateway mTLS identity (read-only): the same triple the box
+      # CLI uses. Mounted, never baked into the image.
+      - /home/ubuntu/.config/openshell/gateways/openshell/mtls:/openshell-mtls:ro
       # pi's config + credentials. Two traps avoided deliberately:
       #  * the source must be the INVOKING USER's home — compose is started under
       #    sudo by deploy/bootstrap.sh, where HOME=/root would silently bind an

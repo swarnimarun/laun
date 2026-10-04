@@ -72,16 +72,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ExecutorConfig
   const openshellEnabled = (env["OPENSHELL_ENABLED"] ?? "false").toLowerCase() === "true";
   const prefixRaw = (env["OPENSHELL_PREFIX"] ?? "").trim();
   const openshellPrefix = prefixRaw ? prefixRaw.split(/\s+/) : [];
-  if (openshellEnabled && openshellPrefix.length === 0) {
-    throw new Error(
-      "OPENSHELL_ENABLED=true but OPENSHELL_PREFIX is empty — set it to your openshell exec prefix (fail closed).",
-    );
-  }
   // Per-session sandbox wiring (lane-sandbox): enabled requires an image,
-  // never silently unsandboxed. OPENSHELL_PREFIX stays required for compat.
+  // never silently unsandboxed. The legacy argv prefix is only required when
+  // no image is set (prefix-only mode); sandbox mode does not use it.
   const sandboxImage = (env["OPENSHELL_SANDBOX_IMAGE"] ?? "").trim();
-  if (openshellEnabled && !sandboxImage) {
-    throw new Error("OPENSHELL_ENABLED=true but OPENSHELL_SANDBOX_IMAGE is empty — set it to the sandbox image (fail closed).");
+  if (openshellEnabled && openshellPrefix.length === 0 && !sandboxImage) {
+    throw new Error(
+      "OPENSHELL_ENABLED=true but neither OPENSHELL_PREFIX nor OPENSHELL_SANDBOX_IMAGE is set — set one (fail closed).",
+    );
   }
   const sandboxPolicyFile = (env["OPENSHELL_POLICY"] ?? "").trim();
   const sandboxProviders = (env["OPENSHELL_PROVIDER"] ?? "")

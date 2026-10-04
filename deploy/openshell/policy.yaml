@@ -1,0 +1,70 @@
+# Laun "restrictive" OpenShell policy template.
+#
+# Valid OpenShell policy YAML (schema: version 1 + filesystem_policy, landlock,
+# process, network_policies, network_middlewares). Render with
+#   WORKDIR=<in-sandbox workdir> MODEL_HOST=<model hostname>
+#   bun packages/policy/src/render.ts restrictive --target openshell
+# then apply with `openshell sandbox create --policy <rendered> ...`.
+#
+# Abstract variables (substituted at render time, never shipped literally):
+#   WORKDIR    in-sandbox working directory, e.g. /workspace. Landlock
+#                directory rules cover the whole subtree, so no /** suffix.
+#   MODEL_HOST model endpoint hostname, e.g. openrouter.ai (host only, no
+#                scheme, no port, no path).
+#
+# Verified against https://docs.nvidia.com/openshell/latest/how-it-works/policies/schema
+# (fetched 2026-10-04) and the run-pi-with-openrouter tutorial. What the docs
+# do NOT pin down is marked ASSUMED below; before trusting it unattended, check
+# with `openshell-prover check candidate.yaml --boundary boundary.yaml --output json`
+# and review advisor proposals (`openshell rule get <sandbox> --status pending`).
+
+version: 1
+
+filesystem_policy:
+  # Explicit list (no include_workdir) so the rendered file shows exactly what
+  # the agent may touch. Unlisted paths are inaccessible. When the effective
+  # policy has >= 1 network rule OpenShell additionally adds baseline paths
+  # (/usr, /lib, /etc, /app, /var/log, /proc, /dev/urandom read-only;
+  # /tmp, /dev/null read-write) -- listing the core ones here too is harmless.
+  include_workdir: false
+  read_only:
+    - /usr
+    - /lib
+    - /bin
+    - /etc
+  read_write:
+    - "/workspace"
+    - /tmp
+
+landlock:
+  # Fail closed: if no listed path can be enforced the sandbox refuses to start
+  # instead of running without filesystem rules.
+  compatibility: hard_requirement
+
+# Deliberately empty: Docker/Podman then use the image's USER. Pinning a UID
+# here would couple the policy to one image build.
+process: {}
+
+network_policies:
+  # The agent may reach ONLY the model endpoint, over inspected REST with
+  # violations blocked (not merely logged). Credentials for this endpoint come
+  # from an attached OpenShell provider -- the sandbox never sees the real key.
+  model:
+    endpoints:
+      - host: "opencode.ai"
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+    binaries:
+      # Pi runs on Node. ASSUMED: exact node path is image-dependent; confirm
+      # with `openshell logs` / advisor output (`openshell rule get <sandbox>`)
+      # for the pinned pi image and trim this list. Extra entries that match
+      # nothing are harmless.
+      - path: /usr/local/bin/node
+      - path: /usr/bin/node
+
+# No middleware on restrictive: nothing to redact once only the model host is
+# reachable. Present (empty) so the five top-level sections are all explicit.
+network_middlewares: {}
+

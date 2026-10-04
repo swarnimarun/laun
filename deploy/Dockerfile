@@ -31,6 +31,9 @@ COPY package.json bun.lock ./
 COPY packages ./packages
 COPY apps ./apps
 COPY vendor ./vendor
+# Rendered OpenShell policy (no secrets — hosts and paths only). The executor
+# reads it via OPENSHELL_POLICY when sandboxing is enabled.
+COPY deploy/openshell/policy.yaml /openshell/policy.yaml
 RUN bun install --frozen-lockfile
 
 # Persist the build arg as a runtime env (ARGs alone don't survive into the container).

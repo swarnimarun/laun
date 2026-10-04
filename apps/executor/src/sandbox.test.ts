@@ -272,10 +272,16 @@ describe("sandbox argv shaping", () => {
 });
 
 describe("sandbox config", () => {
-  test("enabled requires an image (fail closed)", () => {
+  test("enabled with neither prefix nor image fails closed", () => {
     expect(() =>
-      loadConfig({ GATEWAY_TOKEN: "x", OPENSHELL_ENABLED: "true", OPENSHELL_PREFIX: "openshell exec" } as NodeJS.ProcessEnv),
+      loadConfig({ GATEWAY_TOKEN: "x", OPENSHELL_ENABLED: "true" } as NodeJS.ProcessEnv),
     ).toThrow("OPENSHELL_SANDBOX_IMAGE");
+  });
+
+  test("legacy prefix mode without image still loads", () => {
+    const cfg = loadConfig({ GATEWAY_TOKEN: "x", OPENSHELL_ENABLED: "true", OPENSHELL_PREFIX: "openshell exec" } as NodeJS.ProcessEnv);
+    expect(cfg.openshellPrefix).toEqual(["openshell", "exec"]);
+    expect(cfg.sandboxImage).toBe("");
   });
 
   test("parses image, policy, providers, approval mode", () => {
