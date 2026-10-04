@@ -39,6 +39,9 @@ doing the real job · *unverified* = built but never proven in the real world ·
 - Gateway honors steer/queue on busy sessions (single pending slot, abort
   clears it, desync falls back to a fresh run); CLI drives it with
   `--steer`/`--queue` and reports usage totals in `agent status`.
+- Gateway self-preservation: boot auto-resume (interrupted runs continue
+  instead of erroring), stall sweeper (silent runs aborted only on verified
+  abort), concurrency cap + per-session token budgets.
 - TLS upgrade path documented (Caddy recipe, validated config, executor
   stays loopback-only).
 - Goose ACP adapter (`packages/acp`): JSON-RPC over WS, session lifecycle,
