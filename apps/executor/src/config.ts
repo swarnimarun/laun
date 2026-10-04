@@ -1,3 +1,5 @@
+export type ExecutorMode = "json" | "rpc";
+
 export interface ExecutorConfig {
   port: number;
   /** Shared secret the gateway must present. Never log. */
@@ -10,6 +12,10 @@ export interface ExecutorConfig {
   /** argv prefix prepended before the pi command, e.g. ["openshell","exec","--sandbox","agent"]. */
   openshellPrefix: string[];
   defaultTimeoutMs: number;
+  /** json = one-shot `pi -p --mode json` per run (fallback). rpc = one long-lived `pi --mode rpc` child per session. Defaults to json. */
+  executorMode?: ExecutorMode;
+  /** Idle TTL for rpc children before they are reaped. Restart reuses the same session dir. Defaults to 300_000. */
+  rpcIdleTtlMs?: number;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -34,6 +40,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ExecutorConfig
   if (!Number.isFinite(defaultTimeoutMs) || defaultTimeoutMs < 30_000) {
     throw new Error("RUN_TIMEOUT_MS must be >= 30000");
   }
+  const modeRaw = (env["EXECUTOR_MODE"] ?? "json").trim().toLowerCase();
+  if (modeRaw !== "json" && modeRaw !== "rpc") {
+    throw new Error('EXECUTOR_MODE must be "json" or "rpc"');
+  }
+  const rpcIdleTtlMs = Number(env["RPC_IDLE_TTL_MS"] ?? 300_000);
+  if (!Number.isFinite(rpcIdleTtlMs) || rpcIdleTtlMs < 100) {
+    throw new Error("RPC_IDLE_TTL_MS must be >= 100");
+  }
   return {
     port,
     gatewayToken,
@@ -43,5 +57,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ExecutorConfig
     openshellEnabled,
     openshellPrefix,
     defaultTimeoutMs,
+    executorMode: modeRaw as ExecutorMode,
+    rpcIdleTtlMs,
   };
 }

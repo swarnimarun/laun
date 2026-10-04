@@ -19,6 +19,7 @@ Bun.serve({
       });
     }
     if (url.pathname === "/run") return handler.handleRun(req);
+    if (url.pathname === "/abort") return handler.handleAbort(req);
     return new Response(JSON.stringify({ error: "not found" }), {
       status: 404,
       headers: { "content-type": "application/json" },

@@ -20,6 +20,8 @@ export interface PiRunOptions {
   openshellPrefix: string[];
   timeoutMs: number;
   onEvent: (e: AgentEvent) => void;
+  /** When aborted, the child is killed (used by POST /abort in json mode). */
+  signal?: AbortSignal;
 }
 
 export function buildPiArgs(o: { sessionId: string; piSessionDir: string; model: string; prompt: string }): string[] {
@@ -227,6 +229,11 @@ export async function runPiStreaming(opts: PiRunOptions): Promise<PiRunResult> {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
+      try {
+        opts.signal?.removeEventListener("abort", onAbort);
+      } catch {
+        // ignore
+      }
       resolve({ ...r, sawError, sawDone });
     };
     const child = spawn(cmd!, args, {
@@ -237,6 +244,18 @@ export async function runPiStreaming(opts: PiRunOptions): Promise<PiRunResult> {
       // with no output. Confirmed against pi 1.0.2 in the executor image.
       stdio: ["ignore", "pipe", "pipe"],
     });
+    const onAbort = () => {
+      // POST /abort in json mode: terminate the one-shot child.
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // already exited
+      }
+    };
+    if (opts.signal) {
+      if (opts.signal.aborted) onAbort();
+      else opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
     const timer = setTimeout(() => {
       emit({ type: "error", sessionId: opts.sessionId, message: `run timed out after ${opts.timeoutMs}ms` });
       child.kill("SIGKILL");
