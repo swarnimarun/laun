@@ -64,6 +64,13 @@ interface SessionState {
   streaming: boolean;
   currentRun: ActiveRun | null;
   pendingState: Map<string, (v: boolean | null) => void>;
+  /**
+   * Parked extension_ui approvals (confirm/select only), keyed by pi's
+   * request id. pi blocks until extension_ui_response arrives, so the run
+   * is implicitly parked; the per-entry timer fail-closes (deny) and
+   * abort/run-timeout/disconnect release every entry as denied.
+   */
+  pendingApprovals: Map<string, PendingApproval>;
   idleTimer: ReturnType<typeof setTimeout> | null;
   exited: boolean;
   killed: boolean;
@@ -80,6 +87,77 @@ interface SessionState {
 
 /** Max time a new run waits for the previous run's stale settled. */
 const SETTLE_WAIT_MS = 5000;
+
+/** Default bound for one parked approval before it is denied (5m). */
+const DEFAULT_APPROVAL_TIMEOUT_MS = 300_000;
+
+/** Only these extension_ui methods park a run waiting for a decision. */
+const PARKING_METHODS = new Set(["confirm", "select"]);
+
+/** Dialog methods that would block pi forever without a response. */
+const DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
+
+/** One parked approval: pi's dialog blocks until we answer. */
+interface PendingApproval {
+  /** pi extension_ui method (confirm|select). */
+  method: string;
+  /** select options in server order (first = the approve choice). */
+  options: string[];
+  /** Run-stream emitter for timeout/deny notices. */
+  onEvent: (e: AgentEvent) => void;
+  timer: ReturnType<typeof setTimeout>;
+  settled: boolean;
+}
+
+/** Parsed `extension_ui_request` (see pi docs rpc-extension-ui.md). */
+export interface ExtensionUiRequest {
+  id: string;
+  method: string;
+  title?: string;
+  message?: string;
+  options: string[];
+}
+
+/**
+ * Best-effort parse of one `extension_ui_request` object. Returns null for
+ * anything else (including malformed requests). Never throws. Option
+ * extraction is tolerant: bare strings plus {value}/{optionId,id}/{name,
+ * label} shapes across pi versions.
+ */
+export function parseExtensionUiRequest(obj: unknown): ExtensionUiRequest | null {
+  try {
+    if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return null;
+    const rec = obj as Record<string, unknown>;
+    if (rec["type"] !== "extension_ui_request") return null;
+    const id = rec["id"];
+    const method = rec["method"];
+    if (typeof id !== "string" || !id || typeof method !== "string" || !method) return null;
+    const optStr = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+    const options: string[] = [];
+    const raw = rec["options"];
+    if (Array.isArray(raw)) {
+      for (const o of raw) {
+        if (typeof o === "string") {
+          if (o) options.push(o);
+          continue;
+        }
+        if (o !== null && typeof o === "object" && !Array.isArray(o)) {
+          const r = o as Record<string, unknown>;
+          const v = optStr(r["value"]) ?? optStr(r["optionId"]) ?? optStr(r["id"]) ?? optStr(r["name"]) ?? optStr(r["label"]);
+          if (v) options.push(v);
+        }
+      }
+    }
+    const out: ExtensionUiRequest = { id, method, options };
+    const title = optStr(rec["title"]);
+    if (title) out.title = title;
+    const message = optStr(rec["message"]);
+    if (message) out.message = message;
+    return out;
+  } catch {
+    return null;
+  }
+}
 
 function extractIsStreaming(obj: Record<string, unknown>): boolean | null {
   const direct = obj["isStreaming"];
@@ -98,6 +176,12 @@ export interface RpcManagerOptions {
   piBin: string;
   openshellPrefix: string[];
   idleTtlMs: number;
+  /**
+   * Bound for one parked approval (extension_ui confirm/select) before it
+   * is denied automatically. Fail-closed: a run never hangs forever.
+   * Defaults to 300_000 (5m).
+   */
+  approvalTimeoutMs?: number;
   /**
    * When set, pi spawns inside a per-session sandbox (created on first run,
    * STOPPED (workspace preserved) when the child dies or is reaped, STARTED
@@ -193,6 +277,8 @@ export class RpcManager {
         } catch {
           // consumer gone
         }
+        // A parked run must not hang past the run timeout: deny first.
+        this.denyAllPending(o.sessionId, "run timed out");
         this.writeJson(session, { type: "abort" });
         // pi still owes a trailing settled for the timed-out run; mark it
         // so the next run gates until it is consumed (see settling).
@@ -256,6 +342,58 @@ export class RpcManager {
   }
 
   /**
+   * Steer the live run with new direction via pi's `steer` command
+   * (delivered after the current assistant turn, before the next LLM call).
+   * Fire-and-forget: the run continues, no completion side effects.
+   * Returns false when there is no live run (caller maps to 404/409).
+   */
+  steer(sessionId: string, text: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.exited) return false;
+    if (!session.currentRun || !session.streaming) return false;
+    return this.writeJson(session, { type: "steer", message: text });
+  }
+
+  /**
+   * Deliver a human decision to a parked approval. Writes the matching
+   * `extension_ui_response` (confirm: confirmed/cancelled; select: first
+   * option value/cancelled — cancelled reads as deny to the extension)
+   * and unparks the run. Returns false for unknown sessions/requests.
+   * An approve on a select with no recorded options fail-closes to deny.
+   */
+  decideApproval(sessionId: string, requestId: string, decision: "approve" | "deny"): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.exited) return false;
+    return this.settleApproval(session, requestId, decision, `approval ${requestId} ${decision}`);
+  }
+
+  /** Parked approval request ids for a session (tests/diagnostics). */
+  pendingApprovalIds(sessionId: string): string[] {
+    return [...(this.sessions.get(sessionId)?.pendingApprovals.keys() ?? [])];
+  }
+
+  /**
+   * Release every parked approval as denied (gateway disconnect path).
+   * The run itself continues: pi receives the denials and proceeds.
+   * Never throws; no-op when nothing is parked.
+   */
+  denyAllPending(sessionId: string, reason: string): void {
+    try {
+      const session = this.sessions.get(sessionId);
+      if (!session) return;
+      for (const id of [...session.pendingApprovals.keys()]) {
+        try {
+          this.settleApproval(session, id, "deny", `approval ${id} denied (${reason})`);
+        } catch {
+          // one bad entry must not block the rest
+        }
+      }
+    } catch {
+      // disconnect/teardown paths must never throw
+    }
+  }
+
+  /**
    * Abort the active run for a session: send `{"type":"abort"}` and wait for
    * idle is handled by pi; here we emit the user-visible event and resolve
    * the run so the HTTP stream closes and the busy slot releases. A healthy
@@ -268,6 +406,9 @@ export class RpcManager {
     if (!session || session.exited) return false;
     const run = session.currentRun;
     if (!run || !session.streaming) return false;
+    // A parked run must never hang: release every approval as denied first
+    // so pi's dialog unblocks, then abort the run itself.
+    this.denyAllPending(sessionId, "run aborted");
     this.writeJson(session, { type: "abort" });
     run.aborted = true;
     run.sawError = true;
@@ -380,6 +521,7 @@ export class RpcManager {
       for (const [, resolve] of session.pendingState) resolve(null);
       session.pendingState.clear();
       this.clearSettling(session);
+      this.clearPendingApprovals(session);
       if (session.killed || session.exited) continue;
       session.killed = true;
       try {
@@ -401,6 +543,7 @@ export class RpcManager {
     const existing = this.sessions.get(sessionId);
     if (existing && !existing.exited) {
       if (existing.child.exitCode !== null) {
+        this.clearPendingApprovals(existing);
         this.sessions.delete(sessionId);
       } else {
         if (existing.idleTimer) {
@@ -495,6 +638,7 @@ export class RpcManager {
       streaming: false,
       currentRun: null,
       pendingState: new Map(),
+      pendingApprovals: new Map(),
       idleTimer: null,
       exited: false,
       killed: false,
@@ -510,6 +654,7 @@ export class RpcManager {
       if (session.exited) return;
       session.exited = true;
       this.clearSettling(session);
+      this.clearPendingApprovals(session);
       const run = session.currentRun;
       if (run) {
         run.sawError = true;
@@ -534,6 +679,7 @@ export class RpcManager {
       // Awaiters gated on the stale settled must not hang when the child
       // is gone: the replacement child starts with no stale pending.
       this.clearSettling(session);
+      this.clearPendingApprovals(session);
       if (session.idleTimer) {
         clearTimeout(session.idleTimer);
         session.idleTimer = null;
@@ -590,6 +736,125 @@ export class RpcManager {
     });
   }
 
+  private approvalTimeoutMs(): number {
+    return this.opts.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
+  }
+
+  /**
+   * Route one `extension_ui_request`. confirm/select park the run: an
+   * `approval_request` event goes to the stream and the run waits (pi
+   * blocks) until decideApproval, timeout, abort, or disconnect. Every
+   * other method informs only: a running status on the stream, and an
+   * immediate cancelled response for dialogs (input/editor) so pi never
+   * blocks on a decision nobody will make. Fire-and-forget methods
+   * (notify/...) expect no response — none is sent.
+   */
+  private onExtensionUi(session: SessionState, req: ExtensionUiRequest): void {
+    const run = session.currentRun;
+    if (!run || !session.streaming || !PARKING_METHODS.has(req.method)) {
+      const text = (req.title ?? req.message ?? `${req.method} requested`).slice(0, 500);
+      if (run) {
+        try {
+          run.onEvent({ type: "status", sessionId: session.sessionId, status: "running", message: `ui ${req.method}: ${text}` });
+        } catch {
+          // consumer gone; the run still proceeds
+        }
+        // A dialog nobody parks would block pi forever: release it now.
+        if (DIALOG_METHODS.has(req.method)) {
+          this.writeJson(session, { type: "extension_ui_response", id: req.id, cancelled: true });
+        }
+      } else if (DIALOG_METHODS.has(req.method)) {
+        // Idle dialog (no run to park): still answer so the child never hangs.
+        this.writeJson(session, { type: "extension_ui_response", id: req.id, cancelled: true });
+      }
+      return;
+    }
+    const reason = (req.title ?? req.message ?? `${req.method} approval requested`).slice(0, 500);
+    const detail =
+      req.method === "select" && req.options.length > 0
+        ? `options: ${req.options.join(", ")}`.slice(0, 500)
+        : req.message && req.message !== reason
+          ? req.message.slice(0, 500)
+          : undefined;
+    try {
+      run.onEvent({
+        type: "approval_request",
+        sessionId: session.sessionId,
+        requestId: req.id,
+        reason,
+        ...(detail !== undefined ? { detail } : {}),
+      });
+    } catch {
+      // consumer gone; the approval still parks (timeout/abort release it)
+    }
+    const pending: PendingApproval = {
+      method: req.method,
+      options: req.options,
+      onEvent: run.onEvent,
+      timer: undefined as unknown as ReturnType<typeof setTimeout>,
+      settled: false,
+    };
+    const timer = setTimeout(() => this.onApprovalTimeout(session.sessionId, req.id), this.approvalTimeoutMs());
+    (timer as unknown as { unref?: () => void }).unref?.();
+    pending.timer = timer;
+    session.pendingApprovals.set(req.id, pending);
+  }
+
+  /** Resolve one parked approval and answer pi. Returns false when unknown. */
+  private settleApproval(session: SessionState, requestId: string, decision: "approve" | "deny", note: string): boolean {
+    const p = session.pendingApprovals.get(requestId);
+    if (!p || p.settled) return false;
+    p.settled = true;
+    clearTimeout(p.timer);
+    session.pendingApprovals.delete(requestId);
+    // Verified shapes come from pi docs rpc-extension-ui.md: confirm takes
+    // confirmed/cancelled, select takes value/cancelled. Deny is always
+    // cancelled (the extension reads it as false/undefined). Approve on a
+    // select answers the first offered option; with no recorded options
+    // there is no verifiable approve shape, so it fail-closes to deny.
+    const response =
+      decision === "approve" && p.method === "confirm"
+        ? { type: "extension_ui_response", id: requestId, confirmed: true }
+        : decision === "approve" && p.method === "select" && p.options.length > 0
+          ? { type: "extension_ui_response", id: requestId, value: p.options[0] }
+          : { type: "extension_ui_response", id: requestId, cancelled: true };
+    this.writeJson(session, response);
+    try {
+      p.onEvent({ type: "status", sessionId: session.sessionId, status: "running", message: note });
+    } catch {
+      // consumer gone; pi still got its answer
+    }
+    return true;
+  }
+
+  /** Bounded wait expired: deny by default (fail-closed). Never throws. */
+  private onApprovalTimeout(sessionId: string, requestId: string): void {
+    try {
+      const session = this.sessions.get(sessionId);
+      if (!session) return;
+      this.settleApproval(session, requestId, "deny", `approval ${requestId} denied (timeout)`);
+    } catch {
+      // timer paths must never throw
+    }
+  }
+
+  /** Clear pending timers without answering (child is dead). Never throws. */
+  private clearPendingApprovals(session: SessionState): void {
+    try {
+      for (const p of session.pendingApprovals.values()) {
+        try {
+          clearTimeout(p.timer);
+        } catch {
+          // ignore teardown races
+        }
+        p.settled = true;
+      }
+      session.pendingApprovals.clear();
+    } catch {
+      // teardown paths must never throw
+    }
+  }
+
   private writeJson(session: SessionState, obj: unknown): boolean {
     try {
       const stdin = session.child.stdin;
@@ -619,6 +884,14 @@ export class RpcManager {
       obj = JSON.parse(line);
     } catch {
       // Fall through to parsePiJsonLine, which forwards raw text lines.
+    }
+    // Extension UI subprotocol (pi docs rpc-extension-ui.md): intercept
+    // before the generic parser, whose message-field fallback would
+    // otherwise double-emit the dialog text as a chat event.
+    const uiReq = parseExtensionUiRequest(obj);
+    if (uiReq) {
+      this.onExtensionUi(session, uiReq);
+      return;
     }
     if (obj !== null && typeof obj === "object") {
       const rec = obj as Record<string, unknown>;
