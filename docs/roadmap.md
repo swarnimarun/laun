@@ -30,17 +30,71 @@ The bring-up script and real YAML policy layer already exist (Lane P, landed);
 the missing piece is executor ↔ sandbox wiring via
 `@nvidia/openshell-sdk`'s `sandbox.execInteractive` for `pi --mode rpc`.
 
-### 2. Model credentials are not provisioned *(missing)*
+### 2. Model access does not go through OpenShell *(missing — plan below)*
 
-The OpenShell provider path is skipped (`OS_PROVIDER=none`) because the only
-credential on the box is pi's `auth.json`, which OpenShell cannot inject. So
-even once OpenShell is wired, credential isolation is unproven.
+The OpenShell provider path is skipped entirely (`OS_PROVIDER=none`), because
+the only credential the box has is pi's `auth.json`, which OpenShell cannot
+inject. So even after OpenShell is wired up, the agent would be talking to its
+model *outside* the sandbox's credential and network policy — which is the
+whole point of the exercise.
 
-**Done when:** a key-based provider profile is created on the box, the agent
-inside the sandbox reaches the model, and the raw key is absent from the
-sandbox (assert it in the probe).
+**Evidence:** `deploy/openshell/install-and-verify.sh` skips provider creation
+when `MODEL_API_KEY` is unset; `grep provider create` in `deploy/openshell/` is
+reached only with a key supplied by hand.
 
-### 3. Approvals are acknowledge-only *(stub)*
+**Plan — connect a *different* model through OpenShell's provider path.** Local
+pi already holds credentials for several providers (`openrouter`,
+`vercel-ai-gateway`, `zenmux`, `opencode-go`, `openai-codex` — names only,
+values never read into a plan). OpenShell's documented example uses OpenRouter,
+and one is available, so:
+
+1. Create the provider on the box from an environment variable, never a literal:
+   `MODEL_API_KEY=<key> openshell provider create --name <n> --type <provider> --from-existing`
+2. Attach it **at sandbox creation** (`--provider`; static fields cannot be
+   changed afterwards).
+3. Point the agent at that provider's model id, so the sandbox's allowlisted
+   endpoint is the one pi actually calls.
+4. Keep the key out of the sandbox: the gateway holds it, the sandbox receives
+   a placeholder, and only approved endpoints see the real value.
+
+**Done when:** a session runs inside the sandbox against that model, the
+summary reports `OS_PROVIDER=<name>` instead of `none`, the raw key is **absent
+from inside the sandbox** (assert it in the probe), and a real model call
+succeeds from within the sandbox.
+
+### 3. Policy escalations still need a human *(missing — see 3a)*
+
+**Evidence:** `deploy/openshell/install-and-verify.sh` never sets an approval
+mode, and OpenShell's documented flow is manual:
+`openshell rule get <sandbox> --status pending` → `openshell rule approve
+<sandbox> --chunk-id <id>`.
+
+That is fine while a human watches. It directly contradicts "run unattended":
+as soon as the agent needs new egress, the run stalls waiting for someone to
+approve a rule.
+
+#### 3a. Automatic approval for policy proposals *(missing)*
+
+OpenShell supports an automatic mode at sandbox creation:
+`sandbox create --approval-mode auto` (with `agent_policy_proposals_enabled`
+for the advisor to propose at all).
+
+**Plan:** set it in the bring-up script, then decide *which* rule classes are
+allowed to auto-approve. This is a real safety trade, not a switch to flip:
+
+- **Auto-approve network egress proposals** so a model/tool call is not blocked.
+- **Never auto-approve filesystem or process changes** — those widen the
+  sandbox's blast radius and must stay human.
+- **Record what was granted**, so auto-approval does not become an unaudited
+  privilege creep.
+
+**Done when:** a run that needs new egress completes with no human in the loop,
+`openshell rule get <sandbox> --status pending` is **empty afterwards**, the
+approved set is queryable (what was granted, when), and a filesystem/process
+proposal is still *held* for review rather than silently granted. Prove it with
+a probe that needs egress, not by asserting the flag was set.
+
+### 4. Approvals are acknowledge-only *(stub)*
 
 `POST /sessions/:id/approvals` records a human decision and broadcasts it.
 Nothing gates the agent — pi's `extension_ui` subprotocol is never connected.
@@ -49,7 +103,7 @@ Nothing gates the agent — pi's `extension_ui` subprotocol is never connected.
 `extension_ui_request(confirm|select)` round-trips to `extension_ui_response`
 through gateway → Telegram/CLI/web, and a **timeout denies by default**.
 
-### 4. `pi` inside a sandbox is unverified *(unverified)*
+### 5. `pi` inside a sandbox is unverified *(unverified)*
 
 OpenShell's tutorial only covers interactive `pi`; JSON/RPC across
 `sandbox.execInteractive` is assumed, never tested.
@@ -160,7 +214,8 @@ branding (talk ACP to `goose serve` instead). See `PLAN.md` for the reasoning.
 | Feature | Status | Priority |
 |---|---|---|
 | OpenShell sandboxing enabled | stub | P0 |
-| Credential isolation via providers | missing | P0 |
+| Model via OpenShell provider (key never in sandbox) | missing | P0 |
+| Policy proposals auto-approved (network only) | missing | P0 |
 | Real (gating) approvals | stub | P0 |
 | `pi` in-sandbox JSON/RPC | unverified | P0 |
 | Thinking visible (coalesced) | missing | P1 |

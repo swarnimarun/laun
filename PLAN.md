@@ -166,6 +166,7 @@ add the `dots` runtime once research says what that means.
 | **W2.2** OpenShell policy layer — real YAML schema our templates can actually be applied as, provider profile for credential injection, VPS bring-up script that *probes* a denial instead of claiming one | `packages/policy/**`, `deploy/openshell/**` | Lane P | worker in flight |
 | **W2.3** `dots` runtime — adapter behind the same executor interface | TBD (`packages/` scaffold first) | blocked on research | research in flight |
 | **W2.4** Executor → sandbox wiring, then enable it for real | `apps/executor/**`, `deploy/**` | **integrator** | after W2.1/W2.2 land |
+| **W2.5** Model access through an OpenShell provider, plus auto-approval of policy proposals (network-only; fs/process stay human) | `deploy/openshell/**` | **integrator** | needs a provider key; see `docs/roadmap.md` P0 #2/#3a |
 
 **Ordering and why:** W2.1 and W2.2 are disjoint seams, so they run in
 parallel; W2.4 must wait for both because it consumes Lane P's bring-up script
