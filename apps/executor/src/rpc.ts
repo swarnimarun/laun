@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { AgentEvent } from "@cloudbear/protocol";
-import { parsePiJsonLine } from "./pi.js";
+import { handlePiLine, ThinkingCoalescer, parsePiJsonLine } from "./pi.js";
 
 export function buildRpcArgs(o: { sessionId: string; piSessionDir: string; model: string }): string[] {
   return ["--mode", "rpc", "--session-id", o.sessionId, "--session-dir", o.piSessionDir, "--model", o.model];
@@ -28,6 +28,8 @@ export interface RpcRunResult {
 
 interface ActiveRun {
   onEvent: (e: AgentEvent) => void;
+  /** Per-run reasoning accumulator (shared helper in pi.ts). */
+  thinking: ThinkingCoalescer;
   promptId: string;
   sawError: boolean;
   sawDone: boolean;
@@ -149,6 +151,12 @@ export class RpcManager {
         cur.timedOut = true;
         cur.sawError = true;
         try {
+          const rest = cur.thinking.flush();
+          if (rest) cur.onEvent(rest);
+        } catch {
+          // consumer gone
+        }
+        try {
           cur.onEvent({ type: "error", sessionId: o.sessionId, message: `run timed out after ${o.timeoutMs}ms` });
         } catch {
           // consumer gone
@@ -168,6 +176,7 @@ export class RpcManager {
           if (e.type === "done") run.sawDone = true;
           o.onEvent(e);
         },
+        thinking: new ThinkingCoalescer(o.sessionId),
         promptId,
         sawError: false,
         sawDone: false,
@@ -225,6 +234,12 @@ export class RpcManager {
     this.writeJson(session, { type: "abort" });
     run.aborted = true;
     run.sawError = true;
+    try {
+      const rest = run.thinking.flush();
+      if (rest) run.onEvent(rest);
+    } catch {
+      // consumer gone; the run still needs to resolve
+    }
     try {
       run.onEvent({ type: "status", sessionId, status: "error", message: "aborted by user" });
     } catch {
@@ -471,17 +486,23 @@ export class RpcManager {
         }
       }
     }
-    const ev = parsePiJsonLine(line, session.sessionId);
-    if (!ev) return;
-    if (ev.type === "done") {
-      const run = session.currentRun;
-      if (!run) {
-        // Idle settled: consume a pending stale (abort/timeout) if any.
-        // A new run() gated on settling is woken here and only then sends
-        // its prompt, so this event can never belong to a future run.
-        if (session.settling) this.clearSettling(session);
-        return;
-      }
+    const run = session.currentRun;
+    if (!run) {
+      // Idle: only a stale trailing settled matters (consumed by the
+      // abort/timeout gate). All other late/broadcast events are ignored.
+      // A new run() gated on settling is woken here and only then sends
+      // its prompt, so this event can never belong to a future run.
+      const idleEv = parsePiJsonLine(line, session.sessionId);
+      if (idleEv?.type === "done" && session.settling) this.clearSettling(session);
+      return;
+    }
+    // Thinking/usage/done handling is shared with the json path via the
+    // coalescing helper in pi.ts; the remainder flushes before `done`.
+    handlePiLine(line, session.sessionId, run.thinking, (e) => this.deliverToRun(session, run, e));
+  }
+
+  private deliverToRun(session: SessionState, run: ActiveRun, e: AgentEvent): void {
+    if (e.type === "done") {
       if (session.settling) {
         // Gate-timeout fallback path: a new generation started while the
         // stale was still pending. This done is the stale one: consume it
@@ -493,32 +514,43 @@ export class RpcManager {
       }
       run.sawDone = true;
       try {
-        run.onEvent(ev);
+        run.onEvent(e);
       } catch {
         // consumer disconnected mid-run: keep the run alive, drop this event.
       }
       this.finishRun(session, { aborted: false, timedOut: false });
       return;
     }
-    const run = session.currentRun;
-    if (!run) return; // idle: ignore late/broadcast events
-    if (ev.type === "error") run.sawError = true;
+    if (e.type === "error") run.sawError = true;
     // Self-healing: a retry starting forgives the transient provider error
     // that triggered it. An exhausted retry re-marks sawError via its own
     // error event, so healed runs settle as done while failed runs stay error.
-    if (ev.type === "status" && typeof ev.message === "string" && ev.message.startsWith("retrying")) {
+    if (e.type === "status" && typeof e.message === "string" && e.message.startsWith("retrying")) {
       run.sawError = false;
     }
     try {
-      run.onEvent(ev);
+      run.onEvent(e);
     } catch {
       // consumer disconnected mid-run: keep the run alive, drop this event.
+    }
+  }
+
+  /** Release a run's buffered reasoning, if any. Never throws. */
+  private flushThinking(run: ActiveRun): void {
+    try {
+      const rest = run.thinking.flush();
+      if (rest) run.onEvent(rest);
+    } catch {
+      // consumer gone; the run still needs to resolve
     }
   }
 
   private finishRun(session: SessionState, opts: { aborted: boolean; timedOut: boolean }): void {
     const run = session.currentRun;
     if (!run) return;
+    // Backstop: abort/timeout flushed explicitly before their status/error
+    // events, so this is normally a no-op; it covers child-crash paths.
+    this.flushThinking(run);
     session.currentRun = null;
     session.streaming = false;
     clearTimeout(run.timer);

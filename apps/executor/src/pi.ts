@@ -131,6 +131,12 @@ export function parsePiJsonLine(line: string, sessionId: string): AgentEvent | n
   if (t === "agent_settled") {
     return { type: "done", sessionId };
   }
+  // Model reasoning is coalesced per run by ThinkingCoalescer (see below),
+  // not emitted one event per wire line: a top-level thinking* event must
+  // never reach the text fallback and double-emit alongside the coalescer.
+  if (t.startsWith("thinking")) {
+    return null;
+  }
   if (
     t === "session" ||
     t === "agent_start" ||
@@ -205,6 +211,167 @@ export function parsePiJsonLine(line: string, sessionId: string): AgentEvent | n
   return fallback === undefined ? null : { type: "text", sessionId, delta: fallback };
 }
 
+/** Emit one coalesced `thinking` event per this many chars of reasoning. */
+export const THINKING_FLUSH_CHARS = 300;
+
+/**
+ * Per-run accumulator that coalesces model reasoning into bounded events.
+ * Text is buffered and released in >=300-char chunks; the remainder is
+ * released by an explicit flush at turn end (before `done`), on abort, or
+ * on timeout. A 10 000-char reasoning block yields ~34 events, never
+ * thousands, so the gateway's bounded event ring cannot flood.
+ * Shared by the json (`runPiStreaming`) and rpc (`RpcManager.onLine`) paths.
+ */
+export class ThinkingCoalescer {
+  private buf = "";
+  constructor(private sessionId: string) {}
+  /** Feed raw reasoning text; returns the coalesced events now due (often none). */
+  push(text: string): AgentEvent[] {
+    if (!text) return [];
+    this.buf += text;
+    const out: AgentEvent[] = [];
+    while (this.buf.length >= THINKING_FLUSH_CHARS) {
+      out.push({ type: "thinking", sessionId: this.sessionId, delta: this.buf.slice(0, THINKING_FLUSH_CHARS) });
+      this.buf = this.buf.slice(THINKING_FLUSH_CHARS);
+    }
+    return out;
+  }
+  /** Release the buffered remainder (null when empty). Idempotent. */
+  flush(): AgentEvent | null {
+    if (!this.buf) return null;
+    const delta = this.buf;
+    this.buf = "";
+    return { type: "thinking", sessionId: this.sessionId, delta };
+  }
+  /** Chars still buffered (for tests). */
+  get pending(): number {
+    return this.buf.length;
+  }
+}
+
+function optStr(v: unknown): string | undefined {
+  return typeof v === "string" ? v : undefined;
+}
+
+/**
+ * Best-effort extraction of model reasoning text from one raw pi output line.
+ * Recognizes any top-level `thinking*` type and any `message_update` whose
+ * inner event type starts with `thinking`, pulling the text generically
+ * (delta/text/content/message) the way the parser fallbacks do. Unknown
+ * shapes — and events without a string payload — return null. Never throws.
+ */
+export function extractThinkingText(line: string): string | null {
+  try {
+    const trimmed = line.trim();
+    if (!trimmed) return null;
+    const obj: unknown = JSON.parse(trimmed);
+    if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return null;
+    const rec = obj as Record<string, unknown>;
+    const t = typeof rec["type"] === "string" ? (rec["type"] as string) : "";
+    if (t === "message_update") {
+      const ev = rec["assistantMessageEvent"];
+      if (ev === null || typeof ev !== "object") return null;
+      const inner = ev as Record<string, unknown>;
+      const it = typeof inner["type"] === "string" ? (inner["type"] as string) : "";
+      if (!it.startsWith("thinking")) return null;
+      return optStr(inner["delta"]) ?? optStr(inner["text"]) ?? optStr(inner["content"]) ?? optStr(inner["message"]) ?? null;
+    }
+    if (t.startsWith("thinking")) {
+      return optStr(rec["delta"]) ?? optStr(rec["text"]) ?? optStr(rec["content"]) ?? optStr(rec["message"]) ?? null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+type UsageEvent = Extract<AgentEvent, { type: "usage" }>;
+
+/** Canonical usage field -> accepted wire-name aliases (exact + snake_case). */
+const USAGE_FIELDS: Array<{ key: keyof Omit<UsageEvent, "type" | "sessionId">; names: string[] }> = [
+  { key: "inputTokens", names: ["inputTokens", "input_tokens"] },
+  { key: "outputTokens", names: ["outputTokens", "output_tokens"] },
+  { key: "totalTokens", names: ["totalTokens", "total_tokens"] },
+  { key: "costUsd", names: ["costUsd", "cost_usd"] },
+];
+
+/**
+ * Best-effort mapping of pi's `usage` object to a `usage` event. Reads the
+ * `usage` object on `message_update` (or a top-level `usage` event) and
+ * copies only finite-numeric input/output/total-token and cost fields when
+ * present; anything else yields null. Never throws on unexpected shapes.
+ */
+export function parsePiUsageLine(line: string, sessionId: string): UsageEvent | null {
+  try {
+    const trimmed = line.trim();
+    if (!trimmed) return null;
+    const obj: unknown = JSON.parse(trimmed);
+    if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return null;
+    const rec = obj as Record<string, unknown>;
+    const t = typeof rec["type"] === "string" ? (rec["type"] as string) : "";
+    let src: Record<string, unknown> | null = null;
+    if (t === "usage") {
+      src = rec;
+    } else if (t === "message_update") {
+      const u = rec["usage"];
+      if (u !== null && typeof u === "object" && !Array.isArray(u)) {
+        src = u as Record<string, unknown>;
+      } else {
+        const ev = rec["assistantMessageEvent"];
+        if (ev !== null && typeof ev === "object" && !Array.isArray(ev)) {
+          const innerUsage = (ev as Record<string, unknown>)["usage"];
+          if (innerUsage !== null && typeof innerUsage === "object" && !Array.isArray(innerUsage)) {
+            src = innerUsage as Record<string, unknown>;
+          }
+        }
+      }
+    }
+    if (!src) return null;
+    const ev: UsageEvent = { type: "usage", sessionId };
+    let found = false;
+    for (const { key, names } of USAGE_FIELDS) {
+      for (const name of names) {
+        const v = src[name];
+        if (typeof v === "number" && Number.isFinite(v)) {
+          ev[key] = v;
+          found = true;
+          break;
+        }
+      }
+    }
+    return found ? ev : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The single line-processing helper shared by the json and rpc paths.
+ * Feeds thinking text through the run's coalescer, forwards usage, and
+ * maps everything else via `parsePiJsonLine`. The coalescer remainder is
+ * always flushed before a `done` event so reasoning precedes completion.
+ */
+export function handlePiLine(
+  line: string,
+  sessionId: string,
+  thinking: ThinkingCoalescer,
+  emit: (e: AgentEvent) => void,
+): void {
+  const text = extractThinkingText(line);
+  if (text) {
+    for (const e of thinking.push(text)) emit(e);
+  }
+  const usage = parsePiUsageLine(line, sessionId);
+  if (usage) emit(usage);
+  const ev = parsePiJsonLine(line, sessionId);
+  if (!ev) return;
+  if (ev.type === "done") {
+    const rest = thinking.flush();
+    if (rest) emit(rest);
+  }
+  emit(ev);
+}
+
 export interface PiRunResult {
   exitCode: number | null;
   /** An error event reached the caller (provider failure, timeout, bad exit). */
@@ -244,8 +411,15 @@ export async function runPiStreaming(opts: PiRunOptions): Promise<PiRunResult> {
       // with no output. Confirmed against pi 1.0.2 in the executor image.
       stdio: ["ignore", "pipe", "pipe"],
     });
+    const thinking = new ThinkingCoalescer(opts.sessionId);
+    const flushThinking = () => {
+      const rest = thinking.flush();
+      if (rest) emit(rest);
+    };
+    const emitLine = (line: string) => handlePiLine(line, opts.sessionId, thinking, emit);
     const onAbort = () => {
       // POST /abort in json mode: terminate the one-shot child.
+      flushThinking();
       try {
         child.kill("SIGKILL");
       } catch {
@@ -257,6 +431,7 @@ export async function runPiStreaming(opts: PiRunOptions): Promise<PiRunResult> {
       else opts.signal.addEventListener("abort", onAbort, { once: true });
     }
     const timer = setTimeout(() => {
+      flushThinking();
       emit({ type: "error", sessionId: opts.sessionId, message: `run timed out after ${opts.timeoutMs}ms` });
       child.kill("SIGKILL");
       finish({ exitCode: null });
@@ -268,8 +443,7 @@ export async function runPiStreaming(opts: PiRunOptions): Promise<PiRunResult> {
       const lines = stdoutBuf.split("\n");
       stdoutBuf = lines.pop() ?? "";
       for (const line of lines) {
-        const ev = parsePiJsonLine(line, opts.sessionId);
-        if (ev) emit(ev);
+        emitLine(line);
       }
     });
 
@@ -283,9 +457,10 @@ export async function runPiStreaming(opts: PiRunOptions): Promise<PiRunResult> {
     });
     child.on("close", (code) => {
       if (stdoutBuf.trim()) {
-        const ev = parsePiJsonLine(stdoutBuf, opts.sessionId);
-        if (ev) emit(ev);
+        emitLine(stdoutBuf);
       }
+      // Abnormal end without agent_settled: the done-flush above never ran.
+      flushThinking();
       if (code !== 0) {
         const detail = stderrTail.trim().split("\n").slice(-5).join("\n");
         emit({

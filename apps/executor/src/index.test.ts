@@ -5,7 +5,17 @@ import { join } from "node:path";
 import type { AgentEvent } from "@cloudbear/protocol";
 import { loadConfig } from "./config.js";
 import { assertValidPrompt, assertValidSessionId, clampTimeout, resolveWorkdir } from "./paths.js";
-import { buildPiArgs, MAX_TOOL_OUTPUT, parsePiJsonLine, runPiStreaming } from "./pi.js";
+import {
+  buildPiArgs,
+  extractThinkingText,
+  handlePiLine,
+  MAX_TOOL_OUTPUT,
+  parsePiJsonLine,
+  parsePiUsageLine,
+  runPiStreaming,
+  THINKING_FLUSH_CHARS,
+  ThinkingCoalescer,
+} from "./pi.js";
 import { buildRpcArgs, RpcManager } from "./rpc.js";
 import {
   DEFAULT_RECOVERY_ATTEMPTS,
@@ -1944,6 +1954,291 @@ describe("rpc recovery (stub rpc child)", () => {
     } finally {
       delete process.env["RPC_LOG"];
       handler.close();
+    }
+  });
+});
+
+describe("thinking extraction (lane-exec-think)", () => {
+  const sid = "s1";
+  const thinkLine = (delta: string) =>
+    JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta } });
+
+  test("recognizes thinking wire shapes generically", () => {
+    expect(extractThinkingText(thinkLine("deep thought"))).toBe("deep thought");
+    // Any inner type starting with "thinking" counts; text pulled generically.
+    expect(
+      extractThinkingText(
+        JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "thinking_custom", text: "alt field" } }),
+      ),
+    ).toBe("alt field");
+    // Any top-level thinking* type counts too.
+    expect(extractThinkingText(JSON.stringify({ type: "thinking", text: "top" }))).toBe("top");
+    expect(extractThinkingText(JSON.stringify({ type: "thinking_delta", delta: "d" }))).toBe("d");
+  });
+
+  test("non-thinking and malformed lines yield null", () => {
+    expect(
+      extractThinkingText(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "hi" } })),
+    ).toBeNull();
+    expect(
+      extractThinkingText(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "thinking_start" } })),
+    ).toBeNull();
+    expect(extractThinkingText(JSON.stringify({ type: "text", text: "hi" }))).toBeNull();
+    expect(extractThinkingText(JSON.stringify({ type: "mystery", n: 1 }))).toBeNull();
+    expect(extractThinkingText("plain log line")).toBeNull();
+    expect(extractThinkingText("   ")).toBeNull();
+    expect(extractThinkingText("[1,2]")).toBeNull();
+  });
+
+  test("thinking wire events never double-emit as text", () => {
+    // The coalescer owns thinking; the single-event parser stays silent so
+    // one wire line cannot produce both a text event and a thinking event.
+    expect(parsePiJsonLine(JSON.stringify({ type: "thinking", text: "t" }), sid)).toBeNull();
+    expect(parsePiJsonLine(JSON.stringify({ type: "thinking_delta", delta: "t" }), sid)).toBeNull();
+    expect(parsePiJsonLine(thinkLine("t"), sid)).toBeNull();
+  });
+});
+
+describe("thinking coalescing (lane-exec-think)", () => {
+  const sid = "s1";
+
+  test("emits per >=300 chars, preserves order, flushes remainder", () => {
+    const c = new ThinkingCoalescer(sid);
+    expect(c.push("a".repeat(150))).toEqual([]);
+    expect(c.pending).toBe(150);
+    const first = c.push("b".repeat(150));
+    expect(first).toHaveLength(1);
+    expect(first[0]).toEqual({ type: "thinking", sessionId: sid, delta: "a".repeat(150) + "b".repeat(150) });
+    expect(c.pending).toBe(0);
+    expect(c.push("c".repeat(100))).toEqual([]);
+    const rest = c.flush();
+    expect(rest).toEqual({ type: "thinking", sessionId: sid, delta: "c".repeat(100) });
+    expect(c.flush()).toBeNull(); // idempotent
+    expect(c.push("")).toEqual([]);
+  });
+
+  test("flood: 10k chars stay bounded and round-trip exactly", () => {
+    const input = "abcdefghij".repeat(1000); // 10 000 chars
+    const c = new ThinkingCoalescer(sid);
+    const events: AgentEvent[] = [];
+    // Odd chunk size so emissions split mid-chunk across boundaries.
+    for (let i = 0; i < input.length; i += 7) {
+      events.push(...c.push(input.slice(i, i + 7)));
+    }
+    const rest = c.flush();
+    if (rest) events.push(rest);
+    expect(events.length).toBeLessThanOrEqual(40);
+    expect(events.length).toBeGreaterThan(1);
+    expect(events.every((e) => e.type === "thinking")).toBe(true);
+    expect(events.map((e) => (e as { delta: string }).delta).join("")).toBe(input);
+  });
+
+  test("handlePiLine flushes the remainder before done", () => {
+    const events: AgentEvent[] = [];
+    const c = new ThinkingCoalescer(sid);
+    const emit = (e: AgentEvent) => events.push(e);
+    handlePiLine(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "short" } }), sid, c, emit);
+    expect(events).toEqual([]); // buffered, not yet emitted
+    handlePiLine(JSON.stringify({ type: "agent_settled" }), sid, c, emit);
+    expect(events).toEqual([
+      { type: "thinking", sessionId: sid, delta: "short" },
+      { type: "done", sessionId: sid },
+    ]);
+  });
+
+  test("handlePiLine forwards usage lines alongside text", () => {
+    const events: AgentEvent[] = [];
+    const c = new ThinkingCoalescer(sid);
+    handlePiLine(
+      JSON.stringify({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "hi" },
+        usage: { inputTokens: 3 },
+      }),
+      sid,
+      c,
+      (e) => events.push(e),
+    );
+    expect(events).toEqual([
+      { type: "usage", sessionId: sid, inputTokens: 3 },
+      { type: "text", sessionId: sid, delta: "hi" },
+    ]);
+  });
+});
+
+describe("usage passthrough (lane-exec-think)", () => {
+  const sid = "s1";
+
+  test("full usage object maps exactly", () => {
+    expect(
+      parsePiUsageLine(
+        JSON.stringify({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", delta: "hi" },
+          usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30, costUsd: 0.001 },
+        }),
+        sid,
+      ),
+    ).toEqual({ type: "usage", sessionId: sid, inputTokens: 10, outputTokens: 20, totalTokens: 30, costUsd: 0.001 });
+  });
+
+  test("partial and snake_case shapes forward what exists", () => {
+    expect(parsePiUsageLine(JSON.stringify({ type: "message_update", usage: { inputTokens: 5 } }), sid)).toEqual({
+      type: "usage",
+      sessionId: sid,
+      inputTokens: 5,
+    });
+    expect(
+      parsePiUsageLine(JSON.stringify({ type: "usage", input_tokens: 1, output_tokens: 2, total_tokens: 3, cost_usd: 0.5 }), sid),
+    ).toEqual({ type: "usage", sessionId: sid, inputTokens: 1, outputTokens: 2, totalTokens: 3, costUsd: 0.5 });
+  });
+
+  test("garbage shapes yield null and never throw", () => {
+    expect(parsePiUsageLine(JSON.stringify({ type: "message_update", usage: "nope" }), sid)).toBeNull();
+    expect(parsePiUsageLine(JSON.stringify({ type: "message_update", usage: { inputTokens: "lots" } }), sid)).toBeNull();
+    expect(parsePiUsageLine(JSON.stringify({ type: "message_update", usage: {} }), sid)).toBeNull();
+    expect(parsePiUsageLine(JSON.stringify({ type: "message_update" }), sid)).toBeNull();
+    expect(parsePiUsageLine(JSON.stringify({ type: "text", text: "hi" }), sid)).toBeNull();
+    expect(parsePiUsageLine("not json", sid)).toBeNull();
+    expect(parsePiUsageLine("   ", sid)).toBeNull();
+  });
+});
+
+describe("thinking end to end (lane-exec-think, stub binaries)", () => {
+  test("json mode: 10k thinking coalesces, usage forwards, done stays last", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-think-json-"));
+    const delta = "abcdefghij"; // 10 chars
+    const lines = 1000; // 10 000 chars of reasoning
+    const stub = join(dir, "think.sh");
+    writeFileSync(
+      stub,
+      "#!/bin/sh\n" +
+        `i=0\nwhile [ $i -lt ${lines} ]; do printf '%s\\n' '${JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta } })}'; i=$((i+1)); done\n` +
+        `printf '%s\\n' '${JSON.stringify({ type: "message_update", usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30, costUsd: 0.001 } })}'\n` +
+        "echo '{\"type\":\"agent_settled\"}'\n",
+    );
+    chmodSync(stub, 0o755);
+    const events: AgentEvent[] = [];
+    const r = await runPiStreaming({
+      sessionId: "s1",
+      model: "m",
+      prompt: "hi",
+      openshellPrefix: [],
+      timeoutMs: 15_000,
+      piBin: stub,
+      piSessionDir: dir,
+      workdir: dir,
+      onEvent: (e) => events.push(e),
+    });
+    expect(r.sawDone).toBe(true);
+    expect(r.sawError).toBe(false);
+    const thinking = events.filter((e) => e.type === "thinking");
+    expect(thinking.length).toBeLessThanOrEqual(40);
+    expect(thinking.length).toBeGreaterThan(1);
+    expect(thinking.map((e) => (e as { delta: string }).delta).join("")).toBe(delta.repeat(lines));
+    expect(events).toContainEqual({
+      type: "usage",
+      sessionId: "s1",
+      inputTokens: 10,
+      outputTokens: 20,
+      totalTokens: 30,
+      costUsd: 0.001,
+    });
+    expect(events.at(-1)).toEqual({ type: "done", sessionId: "s1" });
+  });
+
+  test("rpc mode: thinking coalesces through the shared helper", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-think-rpc-"));
+    const delta = "0123456789"; // 10 chars
+    const lines = 1000;
+    const thinkLine = JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta } });
+    const stub = writeRpcStub(
+      dir,
+      "rpc.sh",
+      "#!/bin/sh\n" +
+        'while IFS= read -r line; do\n' +
+        '  case "$line" in\n' +
+        "    *set_auto_retry*) ;;\n" +
+        '    *get_state*) echo \'{"type":"state","isStreaming":false}\' ;;\n' +
+        "    *prompt*)\n" +
+        `      i=0; while [ $i -lt ${lines} ]; do printf '%s\\n' '${thinkLine}'; i=$((i+1)); done\n` +
+        `      printf '%s\\n' '${JSON.stringify({ type: "message_update", usage: { inputTokens: 7, outputTokens: 8 } })}'\n` +
+        '      echo \'{"type":"agent_settled"}\'\n' +
+        "      ;;\n" +
+        '    *abort*) echo \'{"type":"agent_settled"}\' ;;\n' +
+        "  esac\n" +
+        "done\n",
+    );
+    const mgr = new RpcManager({ piBin: stub, openshellPrefix: [], idleTtlMs: 300_000 });
+    try {
+      const events: AgentEvent[] = [];
+      const r = await mgr.run({
+        sessionId: "s1",
+        piSessionDir: dir,
+        workdir: dir,
+        model: "m",
+        prompt: "hi",
+        timeoutMs: 15_000,
+        onEvent: (e) => events.push(e),
+      });
+      expect(r.sawDone).toBe(true);
+      expect(r.sawError).toBe(false);
+      const thinking = events.filter((e) => e.type === "thinking");
+      expect(thinking.length).toBeLessThanOrEqual(40);
+      expect(thinking.map((e) => (e as { delta: string }).delta).join("")).toBe(delta.repeat(lines));
+      expect(events).toContainEqual({ type: "usage", sessionId: "s1", inputTokens: 7, outputTokens: 8 });
+      expect(events.at(-1)).toEqual({ type: "done", sessionId: "s1" });
+    } finally {
+      mgr.close();
+    }
+  });
+
+  test("rpc abort flushes buffered thinking before the aborted status", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-think-abort-"));
+    const marker = join(dir, "emitted");
+    const stub = writeRpcStub(
+      dir,
+      "rpc.sh",
+      "#!/bin/sh\n" +
+        'while IFS= read -r line; do\n' +
+        '  case "$line" in\n' +
+        "    *set_auto_retry*) ;;\n" +
+        '    *get_state*) echo \'{"type":"state","isStreaming":false}\' ;;\n' +
+        "    *prompt*)\n" +
+        `      echo '${JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "partial-reasoning" } })}'\n` +
+        `      touch "${marker}"\n` +
+        "      sleep 5\n" +
+        '      echo \'{"type":"agent_settled"}\'\n' +
+        "      ;;\n" +
+        '    *abort*) echo \'{"type":"agent_settled"}\' ;;\n' +
+        "  esac\n" +
+        "done\n",
+    );
+    const mgr = new RpcManager({ piBin: stub, openshellPrefix: [], idleTtlMs: 300_000 });
+    try {
+      const events: AgentEvent[] = [];
+      const p = mgr.run({
+        sessionId: "s1",
+        piSessionDir: dir,
+        workdir: dir,
+        model: "m",
+        prompt: "hi",
+        timeoutMs: 15_000,
+        onEvent: (e) => events.push(e),
+      });
+      // Wait for the stub to emit its (sub-threshold, still buffered) thinking.
+      await pollFor(() => existsSync(marker), "rpc thinking emission");
+      expect(mgr.abort("s1")).toBe(true);
+      const r = await p;
+      expect(r.aborted).toBe(true);
+      const idxThink = events.findIndex((e) => e.type === "thinking");
+      const idxAbort = events.findIndex((e) => e.type === "status" && (e as { message?: string }).message === "aborted by user");
+      expect(idxThink).toBeGreaterThanOrEqual(0);
+      expect(events[idxThink]).toEqual({ type: "thinking", sessionId: "s1", delta: "partial-reasoning" });
+      expect(idxAbort).toBeGreaterThanOrEqual(0);
+      expect(idxThink).toBeLessThan(idxAbort);
+    } finally {
+      mgr.close();
     }
   });
 });
