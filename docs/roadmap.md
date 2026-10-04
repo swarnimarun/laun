@@ -219,6 +219,16 @@ approved set is queryable (what was granted, when), and a filesystem/process
 proposal is still *held* for review rather than silently granted. Prove it with
 a probe that needs egress, not by asserting the flag was set.
 
+> PROVEN LIVE 2026-10-04 (throwaway `laun-autoprobe`, `--approval-mode auto`,
+> deleted after): egress to an unlisted host denied (`EACCES`), proposal
+> `allow_example_com_443` auto-generated (confidence 65%) and auto-approved
+> the same minute with no human; retry returned `http=200`; pending empty
+> afterwards; grant queryable via `rule history`. Scoping holds by
+> construction: `rule` commands cover network egress only — filesystem
+> denials stay denials, nothing to auto-grant there. Production sessions
+> still run `manual`; flipping the default is a one-env change once
+> someone says go.
+
 > Landed 2026-10-04 (code-complete, live proof pending redeploy):
 > `--approval-mode auto` is set at sandbox creation with runtime sniffing
 > (degrades to `unsupported` + warn), network-egress auto-approve is scoped

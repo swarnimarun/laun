@@ -234,3 +234,4 @@ jj workspace list # finished lanes must be forgotten, then their dir deleted
 | `session not running` from `stop` | 409 — it finished or never started. Not an error in the tooling. |
 | `jj status` shows "Working copy changes" with committed work | Normal in jj: the working-copy commit *is* the commit. It is only uncommitted in the git sense. |
 | A test fails in CI but passes alone | Timing. Poll for the condition with a deadline instead of sleeping; give spawn-heavy tests an explicit timeout. |
+| Wondering what the sandbox auto-approved | `openshell rule history <sandbox>` (grants with timestamps) and `rule get <sandbox> --status pending` (should be empty after). Proven: denied egress proposes, network grants auto-approve, retries succeed. |
