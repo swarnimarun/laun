@@ -112,6 +112,10 @@ Bun.serve({
         const rec = gw.sessions.get(sessionId);
         if (!rec) return err("session not found", 404);
 
+        if (suffix === "" && req.method === "DELETE") {
+          await gw.deleteSession(sessionId, id.kind === "agent" ? id.label : "service");
+          return Response.json({ ok: true });
+        }
         if (suffix === "" && req.method === "GET") {
           return Response.json({ session: rec, pendingApprovals: gw.pendingApprovals(sessionId) });
         }

@@ -223,6 +223,9 @@ function renderHeader() {
   $("sh-status").textContent = rec.status.replace("_", " ");
   $("sh-status").className = `badge badge-${rec.status}`;
   $("sh-model").textContent = `${rec.model} · ${rec.runtime}`; $("sh-goal").textContent = rec.goal;
+  const running = rec.status === "running" || rec.status === "pending" || rec.status === "waiting_approval";
+  $("stop-btn").hidden = !running;
+  $("resume-btn").hidden = rec.status !== "error";
 }
 function renderSessionList() {
   const list = $("session-list");
@@ -230,6 +233,7 @@ function renderSessionList() {
   if (!state.key) return;
   if (state.sessions.length === 0) { list.append(el("p", "si-meta muted", "No sessions yet — start one above.")); return; }
   for (const s of state.sessions) {
+    const row = el("div", "session-row");
     const item = el("button", `session-item${s.id === state.currentId ? " active" : ""}`);
     item.type = "button";
     const goal = el("span", "si-goal", s.goal);
@@ -238,7 +242,48 @@ function renderSessionList() {
     top.append(goal, el("span", `badge badge-${s.status}`, s.status.replace("_", " ")));
     item.append(top, el("span", "si-meta muted mono", `${s.id} · ${timeAgo(s.createdAt)}`));
     item.addEventListener("click", () => void openSession(s.id));
-    list.append(item);
+    const del = el("button", "icon-btn danger", "Delete");
+    del.type = "button";
+    del.title = `Delete session ${s.id}`;
+    del.setAttribute("aria-label", `Delete session ${s.id}`);
+    del.addEventListener("click", (e) => { e.stopPropagation(); void deleteSession(s.id); });
+    row.append(item, del);
+    list.append(row);
+  }
+}
+/** Delete with confirmation. Resets the view when the open session goes. */
+async function deleteSession(id) {
+  if (!window.confirm(`Delete session ${id}? Transcript, record, and queued work go with it.`)) return;
+  try {
+    await api(`/sessions/${id}`, { method: "DELETE" });
+    state.sessions = state.sessions.filter((s) => s.id !== id);
+    if (state.currentId === id) resetSessionView();
+    else renderSessionList();
+  } catch (err) {
+    if (err.status !== 401) setComposerNote(`delete failed: ${err.message}`);
+  }
+}
+/** Stop the open run (server aborts, even a wedged slot). */
+async function stopCurrent() {
+  if (!state.currentId) return;
+  try {
+    await api(`/sessions/${state.currentId}/abort`, { method: "POST" });
+    await refreshCurrentSession();
+  } catch (err) {
+    if (err.status !== 401) setComposerNote(`stop failed: ${err.message}`);
+  }
+}
+/** Resume a dead run with the same continuation the server uses on boot. */
+async function resumeCurrent() {
+  if (!state.currentId) return;
+  try {
+    // Mirrors the gateway RESUME_PROMPT: continue, don't redo, write incrementally.
+    await api(`/sessions/${state.currentId}/messages`, { method: "POST", body: { text: "Continue where you left off. Do not redo completed work; write files incrementally so partial progress survives another interruption." } });
+    state.terminal = false;
+    ensureStream();
+    await refreshCurrentSession();
+  } catch (err) {
+    if (err.status !== 401) setComposerNote(`resume failed: ${err.message}`);
   }
 }
 function renderConnChip() {
@@ -480,6 +525,8 @@ $("login-form").addEventListener("submit", (e) => {
 });
 $("disconnect-btn").addEventListener("click", () => forgetKey("Disconnected — paste a key to reconnect."));
 $("refresh-btn").addEventListener("click", () => void loadSessions());
+$("stop-btn").addEventListener("click", () => void stopCurrent());
+$("resume-btn").addEventListener("click", () => void resumeCurrent());
 $("new-session-btn").addEventListener("click", () => {
   const form = $("new-session-form");
   form.hidden = !form.hidden;
@@ -496,9 +543,15 @@ $("new-session-form").addEventListener("submit", async (e) => {
   $("new-session-error").textContent = "";
   try {
     const model = $("model-input").value.trim(); // blank = server default
-    const rec = await api("/sessions", { method: "POST", body: model ? { goal, model } : { goal } });
+    const repo = $("repo-input").value.trim();
+    const runtime = $("runtime-input").value.trim();
+    const body = { goal };
+    if (model) body.model = model;
+    if (repo) body.repo = repo;
+    if (runtime) body.runtime = runtime;
+    const rec = await api("/sessions", { method: "POST", body });
     $("new-session-form").hidden = true;
-    $("goal-input").value = ""; $("model-input").value = "";
+    $("goal-input").value = ""; $("model-input").value = ""; $("repo-input").value = ""; $("runtime-input").value = "";
     await loadSessions();
     await openSession(rec.id);
   } catch (err) {

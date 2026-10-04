@@ -35,6 +35,8 @@
         <form id="new-session-form" class="new-session" hidden>
           <textarea id="goal-input" rows="3" placeholder="What should the agent do?" required></textarea>
           <input id="model-input" type="text" placeholder="model (blank = server default)" autocomplete="off" spellcheck="false" />
+          <input id="repo-input" type="text" placeholder="repo URL or path (optional, checked out first)" autocomplete="off" spellcheck="false" />
+          <input id="runtime-input" type="text" placeholder="runtime: pi, goose, dots (blank = pi)" autocomplete="off" spellcheck="false" />
           <p id="new-session-error" class="error" role="alert"></p>
           <span class="row">
             <button class="primary" type="submit">Start session</button>
@@ -55,6 +57,8 @@
             <span id="sh-status" class="badge"></span>
             <span id="sh-model" class="mono muted"></span>
             <span class="spacer"></span>
+            <button id="stop-btn" type="button" title="Stop the running session" hidden>Stop</button>
+            <button id="resume-btn" type="button" title="Resume with a continuation prompt" hidden>Resume</button>
             <span id="follow-chip" class="chip">live</span>
           </div>
           <p id="sh-goal" class="goal"></p>

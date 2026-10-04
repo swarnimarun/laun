@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type {
   AgentEvent,
@@ -441,6 +441,35 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
           // approveExecutorDecision never rejects (catches internally); guard anyway.
         },
       );
+    },
+
+    /**
+     * Delete a session entirely: stop a live run first (best-effort — a
+     * dead executor never blocks deletion), then drop the record, bus,
+     * timers, pending queue entry, and the persisted JSONL log. The sandbox
+     * itself ages out via the executor reaper. 404 unknown id.
+     */
+    async deleteSession(id: string, abortedBy?: string): Promise<void> {
+      const rec = sessions.get(id);
+      if (!rec) throw Object.assign(new Error("session not found"), { status: 404 });
+      if (running.has(id)) {
+        try {
+          await api.abort(id, abortedBy ?? "session deleted");
+        } catch {
+          running.delete(id);
+          pendingQueue.delete(id);
+        }
+      }
+      running.delete(id);
+      pendingQueue.delete(id);
+      lastEventAt.delete(id);
+      buses.delete(id);
+      try {
+        unlinkSync(eventsFile(id));
+      } catch {
+        // Already gone or never created; the record is the source of truth.
+      }
+      sessions.delete(id);
     },
 
     pendingApprovals(sessionId: string) {

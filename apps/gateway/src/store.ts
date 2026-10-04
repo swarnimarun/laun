@@ -61,4 +61,11 @@ export class SessionStore {
     this.persist();
     return rec;
   }
+
+  /** Remove a session record entirely. Event files are the caller's job. */
+  delete(id: string): boolean {
+    const ok = this.sessions.delete(id);
+    if (ok) this.persist();
+    return ok;
+  }
 }
