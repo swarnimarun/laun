@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent } from "@cloudbear/protocol";
@@ -221,6 +221,28 @@ describe("runPiStreaming (stub binaries, no model needed)", () => {
     expect(r.exitCode).toBeNull();
     expect(r.sawError).toBe(true);
     expect(events.some((e) => e.type === "error" && e.message.includes("failed to start"))).toBe(true);
+  });
+
+  test("child stdin is not left open (an open pipe makes pi wait for EOF)", async () => {
+    // Regression: spawn() defaults stdin to a pipe nobody closes, and pi 1.0.2
+    // blocks until EOF — every run hung forever with no output. The stub only
+    // reaches its done event if stdin is already at EOF (i.e. "ignore").
+    const dir = mkdtempSync(join(tmpdir(), "cb-stdin-"));
+    const stub = join(dir, "stub.sh");
+    writeFileSync(stub, '#!/bin/sh\ncat >/dev/null\necho \'{"type":"agent_settled"}\'\nexit 0\n');
+    chmodSync(stub, 0o755);
+    const events: AgentEvent[] = [];
+    const r = await runPiStreaming({
+      ...base,
+      piBin: stub,
+      piSessionDir: dir,
+      workdir: dir,
+      timeoutMs: 8000,
+      onEvent: (e) => events.push(e),
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.sawDone).toBe(true);
+    expect(r.sawError).toBe(false);
   });
 });
 

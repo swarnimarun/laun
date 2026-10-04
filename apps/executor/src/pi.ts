@@ -229,7 +229,14 @@ export async function runPiStreaming(opts: PiRunOptions): Promise<PiRunResult> {
       clearTimeout(timer);
       resolve({ ...r, sawError, sawDone });
     };
-    const child = spawn(cmd!, args, { cwd: opts.workdir, env: process.env });
+    const child = spawn(cmd!, args, {
+      cwd: opts.workdir,
+      env: process.env,
+      // stdin MUST be /dev/null: spawn defaults it to an open pipe nobody ever
+      // closes, and pi waits for EOF on a piped stdin — so every run hung forever
+      // with no output. Confirmed against pi 1.0.2 in the executor image.
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     const timer = setTimeout(() => {
       emit({ type: "error", sessionId: opts.sessionId, message: `run timed out after ${opts.timeoutMs}ms` });
       child.kill("SIGKILL");
