@@ -32,18 +32,21 @@ services:
       # gateway cert carries SAN host.openshell.internal, so TLS verifies
       # properly via extra_hosts below; client mTLS (mounted triple) still
       # authenticates. Gateway binds 0.0.0.0 but stays firewalled + mTLS-gated.
-      OPENSHELL_SDK_GATEWAY: ${OPENSHELL_SDK_GATEWAY:-https://host.openshell.internal:17670}
-      OPENSHELL_SDK_INSECURE: ${OPENSHELL_SDK_INSECURE:-false}
-      OPENSHELL_SDK_CLIENT_CERT_FILE: ${OPENSHELL_SDK_CLIENT_CERT_FILE:-/openshell-mtls/tls.crt}
-      OPENSHELL_SDK_CLIENT_KEY_FILE: ${OPENSHELL_SDK_CLIENT_KEY_FILE:-/openshell-mtls/tls.key}
-      OPENSHELL_SDK_CA_FILE: ${OPENSHELL_SDK_CA_FILE:-/openshell-mtls/ca.crt}
+      # Hardcoded, not env-driven: an env-driven URL rotted here across
+      # redeploys (stale local .env shadowed every fix), breaking every
+      # sandboxed run. Operator choices (provider, approval mode) stay in .env.
+      OPENSHELL_SDK_GATEWAY: https://host.openshell.internal:17670
+      OPENSHELL_SDK_INSECURE: "false"
+      OPENSHELL_SDK_CLIENT_CERT_FILE: /openshell-mtls/tls.crt
+      OPENSHELL_SDK_CLIENT_KEY_FILE: /openshell-mtls/tls.key
+      OPENSHELL_SDK_CA_FILE: /openshell-mtls/ca.crt
       OPENSHELL_SANDBOX_MAX_IDLE_MS: ${OPENSHELL_SANDBOX_MAX_IDLE_MS:-604800000}
       # CLI identity for sandbox lifecycle (create/stop/start/delete): the box
       # CLI's gateway registration + mtls triple, read-only. Combined with the
       # endpoint/insecure envs below, `openshell` works with no other setup.
       # (The executor is already trusted with GATEWAY_TOKEN + pi auth.)
-      OPENSHELL_GATEWAY_ENDPOINT: ${OPENSHELL_GATEWAY_ENDPOINT:-https://host.openshell.internal:17670}
-      OPENSHELL_GATEWAY_INSECURE: ${OPENSHELL_GATEWAY_INSECURE:-false}
+      OPENSHELL_GATEWAY_ENDPOINT: https://host.openshell.internal:17670
+      OPENSHELL_GATEWAY_INSECURE: "false"
       # No model keys here on purpose: pi authenticates from the executor host's
       # ~/.pi/agent/auth.json (see examples/models.md). Never bake keys into images.
     extra_hosts:
