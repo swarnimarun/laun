@@ -154,7 +154,12 @@ Bun.serve({
         }
         if (suffix === "/abort" && req.method === "POST") {
           // Errors here carry {status} and fall through to the handler below.
-          await gw.abort(sessionId, id.kind === "agent" ? id.label : "service");
+          // "not_running" maps to 409 so `stop` on an idle session keeps its
+          // old message and exit code; the executor was still asked (that is
+          // the point: a wedged slot there is reachable even when the local
+          // record says idle).
+          const r = await gw.abort(sessionId, id.kind === "agent" ? id.label : "service");
+          if (r === "not_running") return err("session not running", 409);
           return Response.json({ ok: true });
         }
       }

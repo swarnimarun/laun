@@ -216,39 +216,60 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
     },
 
     /**
-     * Stop an active run. 404 unknown session, 409 when nothing is running —
-     * the CLI maps these to distinct messages. The executor is asked first so
-     * we never claim success for a run we did not actually stop.
+     * Stop an active run. 404 unknown session; "not_running" when neither
+     * side has anything live (the HTTP layer maps it to 409 so `stop` on an
+     * idle session keeps its old message and exit code). The executor is
+     * ALWAYS asked first: it owns the truth about live runs, and a
+gateway/executor desync (record settled here, slot wedged there) once
+     * made `stop` unreachable, because the old code threw 409 off the local
+     * `running` set without ever poking the executor.
+     *
+     * Preserved semantics: `stop` on a stale-but-gone run still succeeds
+     * (the run is gone either way), and an unreachable executor while we
+     * believed running is still a 502 that leaves state untouched.
      */
     async abort(sessionId: string, abortedBy?: string): Promise<"ok" | "not_running"> {
       const rec = sessions.get(sessionId);
       if (!rec) throw Object.assign(new Error("session not found"), { status: 404 });
-      if (!running.has(sessionId)) throw Object.assign(new Error("session not running"), { status: 409 });
+      const believedRunning = running.has(sessionId);
 
       const result = await abortExecutorRun(cfg.executorUrl, cfg.gatewayToken, sessionId);
-      if (!executorKnowsAbort(result)) {
-        // 0 = unreachable, 5xx = refused, 404 with a route-shaped body = this
-        // executor build has no abort endpoint at all. None of them stopped the
-        // run, so none of them may be reported as success.
-        throw Object.assign(
-          new Error(
-            result.status === 0
-              ? "executor unreachable"
-              : result.status === 404
-                ? "this executor build has no abort endpoint — rebuild and redeploy it"
-                : `executor refused abort (${result.status})`,
-          ),
-          { status: 502 },
-        );
+      if (result.status === 200) {
+        publish(sessionId, {
+          type: "status",
+          sessionId,
+          status: "error",
+          message: `aborted${abortedBy ? ` by ${abortedBy}` : ""}`,
+        });
+        running.delete(sessionId);
+        return "ok";
       }
-      publish(sessionId, {
-        type: "status",
-        sessionId,
-        status: "error",
-        message: `aborted${abortedBy ? ` by ${abortedBy}` : ""}`,
-      });
-      running.delete(sessionId);
-      return "ok";
+      if (executorKnowsAbort(result)) {
+        // The executor confirms no live run (409 not-running, or 404 unknown
+        // session on a build that has the route). Clear local state either way.
+        running.delete(sessionId);
+        return believedRunning ? "ok" : "not_running";
+      }
+      if (!believedRunning) {
+        // Executor unreachable, refusing, or without an abort route, while we
+        // believed idle: answer from local state (the same 409 as before),
+        // since there is nothing to kill that we know of.
+        running.delete(sessionId);
+        return "not_running";
+      }
+      // 0 = unreachable, 5xx = refused, 404 with a route-shaped body = this
+      // executor build has no abort endpoint at all. None of them stopped the
+      // run, so none of them may be reported as success.
+      throw Object.assign(
+        new Error(
+          result.status === 0
+            ? "executor unreachable"
+            : result.status === 404
+              ? "this executor build has no abort endpoint — rebuild and redeploy it"
+              : `executor refused abort (${result.status})`,
+        ),
+        { status: 502 },
+      );
     },
 
     log(sessionId: string, since: number): { events: AgentEvent[]; next: number } {

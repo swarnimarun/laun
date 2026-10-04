@@ -43,9 +43,34 @@ describe("gateway abort", () => {
     await expect(gw.abort("missing1")).rejects.toMatchObject({ status: 404 });
   });
 
-  test("an idle session is 409, not a fake success", async () => {
-    const { gw, id } = gwAt(stubExecutor(200).url);
-    await expect(gw.abort(id)).rejects.toMatchObject({ status: 409 });
+  test("an idle session asks the executor and reports not_running", async () => {
+    // Changed semantics: the old code threw 409 off the local `running` set
+    // without ever asking, which made a wedged executor slot unreachable.
+    // Now the executor is always poked; "not_running" (HTTP 409, same CLI
+    // message as before) means both sides agree nothing is live.
+    const stub = stubExecutor(409, JSON.stringify({ error: "session not running" }));
+    const { gw, id } = gwAt(stub.url);
+    expect(await gw.abort(id)).toBe("not_running");
+    expect(stub.calls).toHaveLength(1);
+    expect(JSON.parse(stub.calls[0]!)).toEqual({ sessionId: id });
+  });
+
+  test("a wedged executor slot is reachable even when the record says idle", async () => {
+    // Regression for the 41bb1ac8 wedge: the run timed out here (record
+    // `error`, nothing in `running`) while the executor still held the slot
+    // and answered 409 "already running" to every new run. `stop` used to
+    // refuse without asking; now the executor kill goes through.
+    const stub = stubExecutor(200);
+    const { gw, id } = gwAt(stub.url);
+    gw.sessions.setStatus(id, "error");
+    expect(gw.running.has(id)).toBe(false);
+    expect(await gw.abort(id, "tester")).toBe("ok");
+    expect(stub.calls).toHaveLength(1);
+    const log = gw.log(id, 0);
+    const abortEvent = log.events.find(
+      (e) => e.type === "status" && e.status === "error" && (e.message ?? "").includes("aborted by tester"),
+    );
+    expect(abortEvent).toBeDefined();
   });
 
   test("a running session stops and reports who aborted it", async () => {
