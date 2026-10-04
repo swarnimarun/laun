@@ -87,9 +87,24 @@ if command -v systemctl >/dev/null 2>&1; then
 elif command -v service >/dev/null 2>&1; then
   $SUDO service docker start >/dev/null 2>&1 || warn "could not start docker through service"
 fi
-INVOKING_USER="${SUDO_USER:-}"
-if [ -n "$INVOKING_USER" ]; then
-  $SUDO usermod -aG docker "$INVOKING_USER" >/dev/null 2>&1 || true
+# Add the invoking user to the docker group.
+# SUDO_USER is only set when this script runs *under* sudo. When a normal login
+# user runs it directly — the common case — it is empty, and skipping this left
+# the user without docker socket access. On a real VPS that made OpenShell's
+# gateway fail with "no compute driver configured and auto-detection found",
+# because it could not reach the docker socket to detect the driver at all.
+if [ "$(id -u)" -ne 0 ]; then
+  INVOKING_USER="${SUDO_USER:-$(id -un)}"
+  if $SUDO usermod -aG docker "$INVOKING_USER" >/dev/null 2>&1; then
+    log "added $INVOKING_USER to the docker group"
+  else
+    warn "could not add $INVOKING_USER to the docker group — docker commands may need sudo"
+  fi
+  # Group membership is fixed at session start, so anything already running
+  # (systemd user services in particular) keeps the old, access-less set.
+  if ! id -nG | tr ' ' '\n' | grep -qx docker; then
+    warn "this session predates the group change: re-login, and restart user services, for docker access to take effect"
+  fi
 fi
 
 # --- bun ------------------------------------------------------------------------

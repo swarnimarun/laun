@@ -9,7 +9,33 @@ export interface RunOptions {
   stdin?: string;
   /** "inherit" streams straight to the terminal (docker builds); "pipe" captures. */
   stdio?: "inherit" | "pipe";
+  /**
+   * While capturing (needed for parsing), also forward chunks to this process's
+   * terminal as they arrive. Without it a remote bootstrap — apt, bun install,
+   * tsc, docker compose build — produces several minutes of *nothing* on screen
+   * and looks hung. Output is still returned in full, so key parsing works.
+   */
+  echo?: boolean;
   env?: Record<string, string>;
+}
+
+/** Read a stream to completion, optionally echoing each chunk as it arrives. */
+async function drain(
+  stream: ReadableStream<Uint8Array> | null | undefined,
+  onChunk?: (text: string) => void,
+): Promise<string> {
+  if (!stream) return "";
+  const reader = stream.getReader();
+  const dec = new TextDecoder();
+  let out = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const text = dec.decode(value, { stream: true });
+    out += text;
+    if (onChunk) onChunk(text);
+  }
+  return out;
 }
 
 export type CommandRunner = (argv: string[], opts?: RunOptions) => Promise<CommandResult>;
@@ -17,6 +43,7 @@ export type CommandRunner = (argv: string[], opts?: RunOptions) => Promise<Comma
 /** Default runner: Bun.spawn, so no shell is involved and quoting is explicit. */
 export const bunRunner: CommandRunner = async (argv, opts = {}) => {
   const stdio = opts.stdio ?? "pipe";
+  const echo = opts.echo === true && stdio === "pipe";
   const proc = Bun.spawn(argv, {
     stdin: opts.stdin !== undefined ? new Blob([opts.stdin]) : stdio === "inherit" ? "inherit" : "ignore",
     stdout: stdio === "inherit" ? "inherit" : "pipe",
@@ -24,8 +51,12 @@ export const bunRunner: CommandRunner = async (argv, opts = {}) => {
     env: opts.env ? { ...Bun.env, ...opts.env } : Bun.env,
   });
   const [stdout, stderr] = await Promise.all([
-    stdio === "inherit" ? Promise.resolve("") : new Response(proc.stdout).text(),
-    stdio === "inherit" ? Promise.resolve("") : new Response(proc.stderr).text(),
+    stdio === "inherit"
+      ? Promise.resolve("")
+      : drain(proc.stdout, echo ? (t) => process.stdout.write(t) : undefined),
+    stdio === "inherit"
+      ? Promise.resolve("")
+      : drain(proc.stderr, echo ? (t) => process.stderr.write(t) : undefined),
   ]);
   const code = await proc.exited;
   return { code, stdout, stderr };
@@ -85,13 +116,16 @@ export async function runRemoteSetup(opts: RemoteSetupOptions): Promise<RemoteSe
   const run = opts.runner ?? bunRunner;
   const dir = shQuote(opts.remoteDir);
 
+  // Every remote step echoes: a silent multi-minute bootstrap reads as "stuck".
+  const show = { echo: true } as const;
+
   // Creating a path like /opt/cloudbear needs root on a stock Ubuntu box, but
   // /home/<user>/cloudbear does not — try plainly first, then passwordless sudo,
   // and always hand the dir back to the calling user so the env write works.
   const mkdirCmd =
     `{ mkdir -p ${dir} && chmod 700 ${dir}; } 2>/dev/null || ` +
     `{ sudo -n mkdir -p ${dir} && sudo -n chown "$(id -u):$(id -g)" ${dir} && sudo -n chmod 700 ${dir}; }`;
-  const mkdir = await run(sshArgv(opts, mkdirCmd));
+  const mkdir = await run(sshArgv(opts, mkdirCmd), show);
   if (mkdir.code !== 0) {
     const why = mkdir.stderr.trim();
     throw new Error(
@@ -102,11 +136,12 @@ export async function runRemoteSetup(opts: RemoteSetupOptions): Promise<RemoteSe
 
   const writeEnv = await run(sshArgv(opts, `cat > ${dir}/.env && chmod 600 ${dir}/.env`), {
     stdin: opts.envContent,
+    echo: true,
   });
   if (writeEnv.code !== 0) throw new Error(`ssh env write failed (${writeEnv.code}): ${writeEnv.stderr.trim()}`);
 
   const bootstrapCmd = `${opts.noStart ? "CB_NO_START=true " : ""}bash -s -- ${dir}${opts.repoUrl ? ` ${shQuote(opts.repoUrl)}` : ""}`;
-  const boot = await run(sshArgv(opts, bootstrapCmd), { stdin: opts.bootstrapScript });
+  const boot = await run(sshArgv(opts, bootstrapCmd), { stdin: opts.bootstrapScript, echo: true });
   const key = lastMatch(boot.stdout, /^CLOUDBEAR_KEY=(cb_[0-9a-f]{8,32}_[A-Za-z0-9_-]{20,128})\s*$/m);
   if (boot.code !== 0 || !key) {
     const tail = boot.stderr.trim() || boot.stdout.trim();

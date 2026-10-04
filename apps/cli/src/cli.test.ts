@@ -6,7 +6,7 @@ import { parseAgentKey } from "@cloudbear/protocol";
 import { UsageError, flagBool, flagString, parseArgs, requiredArg } from "./args.js";
 import { loadTarget, resolveTarget, saveTarget, targetUrl } from "./config.js";
 import { ensureEnv, parseSshTarget, readEnvValue, upsertEnv } from "./setup.js";
-import { lastMatch, runRemoteSetup, shQuote, sshArgv, type CommandRunner } from "./ssh.js";
+import { bunRunner, lastMatch, runRemoteSetup, shQuote, sshArgv, type CommandRunner } from "./ssh.js";
 
 describe("args", () => {
   test("parses values, booleans, equals form, and --", () => {
@@ -157,6 +157,51 @@ describe("ssh layer", () => {
     await expect(
       runRemoteSetup({ ...spec, remoteDir: "/d", envContent: "x", bootstrapScript: "y", runner }),
     ).rejects.toThrow(/ssh mkdir failed.*Permission denied/s);
+  });
+
+  test("echo streams to the terminal AND still returns the full output", async () => {
+    // Regression: setup ssh used to pipe the remote bootstrap silently, so a
+    // 3-10 minute apt/build sequence looked like a hang. Echoing must not cost
+    // us the captured text the key is parsed from.
+    const origOut = process.stdout.write.bind(process.stdout);
+    const origErr = process.stderr.write.bind(process.stderr);
+    let seen = "";
+    let r: Awaited<ReturnType<typeof bunRunner>> | null = null;
+    (process.stdout as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+      seen += s;
+      return true;
+    };
+    (process.stderr as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+      seen += s;
+      return true;
+    };
+    try {
+      r = await bunRunner(["sh", "-c", "echo streamed-out; echo streamed-err >&2"], { echo: true });
+    } finally {
+      (process.stdout as unknown as { write: unknown }).write = origOut;
+      (process.stderr as unknown as { write: unknown }).write = origErr;
+    }
+    expect(r?.code).toBe(0);
+    expect(r?.stdout.trim()).toBe("streamed-out"); // captured for parsing
+    expect(seen).toContain("streamed-out"); // shown to the operator
+    expect(seen).toContain("streamed-err");
+  });
+
+  test("without echo nothing is written to our own streams", async () => {
+    const origOut = process.stdout.write.bind(process.stdout);
+    let seen = "";
+    (process.stdout as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+      seen += s;
+      return true;
+    };
+    let r: Awaited<ReturnType<typeof bunRunner>> | null = null;
+    try {
+      r = await bunRunner(["sh", "-c", "echo quiet"]);
+    } finally {
+      (process.stdout as unknown as { write: unknown }).write = origOut;
+    }
+    expect(r?.stdout.trim()).toBe("quiet");
+    expect(seen).toBe("");
   });
 
   test("lastMatch returns the final occurrence", () => {
