@@ -79,11 +79,14 @@ describe("event persistence + boot recovery", () => {
     gw1.publish(rec.id, { type: "approval_request", sessionId: rec.id, requestId: "r1", reason: "need x" });
 
     const gw2 = gwAt(dir);
-    // boot recovery marked the waiting_approval session errored (its run died with gw1),
-    // but the approval request itself still replays as pending.
-    expect(gw2.sessions.get(rec.id)?.status).toBe("error");
+    // Boot recovery resumes the waiting_approval session (its run died with
+    // gw1, but pi resumes from session files): status back to running with a
+    // resume note, and the approval request itself still replays as pending.
+    // (All synchronous above, so gw1's own failing run cannot interleave.)
+    expect(gw2.sessions.get(rec.id)?.status).toBe("running");
     const log = gw2.log(rec.id, 0);
-    expect(log.events.length).toBe(3);
+    expect(log.events.length).toBe(4);
+    expect(log.events.some((e) => e.type === "status" && (e.message ?? "").includes("resuming where it left off"))).toBe(true);
     expect(gw2.pendingApprovals(rec.id).map((a) => a.requestId)).toEqual(["r1"]);
     // decided approvals are not resurrected
     gw2.decideApproval(rec.id, { requestId: "r1", decision: "approve" });
@@ -91,13 +94,39 @@ describe("event persistence + boot recovery", () => {
     expect(gw3.pendingApprovals(rec.id)).toEqual([]);
   });
 
-  test("stale running sessions become errors on boot", () => {
+  test("stale running sessions resume on boot by default", async () => {
     const dir = mkdtempSync(join(tmpdir(), "laun-stale-"));
     const gw1 = gwAt(dir);
     const rec = gw1.sessions.create({ goal: "g", model: "m", runtime: "pi" });
     gw1.sessions.setStatus(rec.id, "running");
 
     const gw2 = gwAt(dir);
+    // Resumed, not errored: resume note published synchronously.
+    expect(gw2.sessions.get(rec.id)?.status).toBe("running");
+    expect(
+      gw2.log(rec.id, 0).events.some((e) => e.type === "status" && (e.message ?? "").includes("resuming where it left off")),
+    ).toBe(true);
+    // The executor is unreachable here (bad URL), so the resumed run fails
+    // asynchronously exactly like any other failed run.
+    const start = Date.now();
+    while (gw2.sessions.get(rec.id)?.status === "running" && Date.now() - start < 5000) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(gw2.sessions.get(rec.id)?.status).toBe("error");
+  });
+
+  test("autoResume:false keeps the old mark-error behavior", () => {
+    const dir = mkdtempSync(join(tmpdir(), "laun-aged-"));
+    const mk = (extra: Record<string, unknown>) =>
+      createGateway(
+        { port: 8080, gatewayToken: "t", executorUrl: "http://localhost:9", dataDir: dir, publicDir: dir, ...extra },
+        new SessionStore(dir),
+      );
+    const gw1 = mk({});
+    const rec = gw1.sessions.create({ goal: "g", model: "m", runtime: "pi" });
+    gw1.sessions.setStatus(rec.id, "running");
+
+    const gw2 = mk({ autoResume: false });
     expect(gw2.sessions.get(rec.id)?.status).toBe("error");
     expect(
       gw2.log(rec.id, 0).events.some((e) => e.type === "error" && e.message.includes("restarted")),

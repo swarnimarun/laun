@@ -3,6 +3,12 @@ import { fileURLToPath } from "node:url";
 
 export const DEFAULT_MAX_CONCURRENT_RUNS = 4;
 export const DEFAULT_MAX_SESSION_TOKENS = 0;
+export const DEFAULT_AUTO_RESUME = true;
+export const DEFAULT_AUTO_RESUME_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+export const DEFAULT_STALL_MS = 45 * 60 * 1000;
+/** Prompt a resumed run continues with — mirrors the operator runbook. */
+export const RESUME_PROMPT =
+  "Continue where you left off. Do not redo completed work; write files incrementally so partial progress survives another interruption.";
 
 export interface GatewayConfig {
   port: number;
@@ -25,6 +31,26 @@ export interface GatewayConfig {
    * Optional — defaults to DEFAULT_MAX_SESSION_TOKENS.
    */
   maxSessionTokens?: number;
+  /**
+   * Resume interrupted runs after a restart (default on). A restarted
+   * gateway no longer abandons in-flight work: pi resumes from its session
+   * files, so the continuation just needs sending. Aged-out interruptions
+   * (older than the max age) still go to error for a human to triage.
+   * Optional — defaults to DEFAULT_AUTO_RESUME.
+   */
+  autoResume?: boolean;
+  /**
+   * Max age of an interruption that still auto-resumes (0 = no limit).
+   * Optional — defaults to DEFAULT_AUTO_RESUME_MAX_AGE_MS.
+   */
+  autoResumeMaxAgeMs?: number;
+  /**
+   * Silence ceiling per running session (0 = no sweeper). A live run that
+   * emits nothing for this long is aborted as stalled — but only once the
+   * abort verifiably lands; an unreachable executor leaves the record
+   * alone for the next sweep. Optional — defaults to DEFAULT_STALL_MS.
+   */
+  stallMs?: number;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -45,6 +71,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
   if (!Number.isInteger(maxSessionTokens) || maxSessionTokens < 0) {
     throw new Error("MAX_SESSION_TOKENS must be an integer >= 0 (0 = unlimited)");
   }
+  const autoResumeRaw = (env["AUTO_RESUME"] ?? "").trim().toLowerCase();
+  if (autoResumeRaw !== "" && autoResumeRaw !== "true" && autoResumeRaw !== "false") {
+    throw new Error('AUTO_RESUME must be "true" or "false"');
+  }
+  const autoResume = autoResumeRaw === "" ? DEFAULT_AUTO_RESUME : autoResumeRaw === "true";
+  const autoResumeMaxAgeMs = Number(env["AUTO_RESUME_MAX_AGE_MS"] ?? DEFAULT_AUTO_RESUME_MAX_AGE_MS);
+  if (!Number.isFinite(autoResumeMaxAgeMs) || autoResumeMaxAgeMs < 0) {
+    throw new Error("AUTO_RESUME_MAX_AGE_MS must be >= 0 (0 = no limit)");
+  }
+  const stallMs = Number(env["RUN_STALL_MS"] ?? DEFAULT_STALL_MS);
+  if (!Number.isFinite(stallMs) || stallMs < 0) {
+    throw new Error("RUN_STALL_MS must be >= 0 (0 = no sweeper)");
+  }
   return {
     port,
     gatewayToken: required(env, "GATEWAY_TOKEN"),
@@ -54,5 +93,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
     publicDir: env["PUBLIC_DIR"] ?? join(dirname(fileURLToPath(import.meta.url)), "..", "public"),
     maxConcurrentRuns,
     maxSessionTokens,
+    autoResume,
+    autoResumeMaxAgeMs,
+    stallMs,
   };
 }

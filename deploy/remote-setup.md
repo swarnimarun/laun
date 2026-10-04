@@ -172,6 +172,26 @@ sudo docker exec deploy-gateway-1 grep -c believedRunning /app/apps/gateway/src/
 Session history and workdirs live on the `/data` volume and survive
 redeploys; in-flight runs do not — stop or settle sessions first.
 
+## Backups (the `/data` volume)
+
+Everything durable lives in one Docker volume (`laun-data`: pi session
+files, gateway `index.json`, per-session JSONL logs, key hashes). Back it up
+before upgrades and on a schedule:
+
+```bash
+# backup to /tmp/laun-data-<date>.tar.gz on the box
+sudo docker run --rm -v laun-data:/data -v /tmp:/backup busybox \
+  tar -czf /backup/laun-data-$(date -u +%F).tar.gz -C / data
+# restore into a fresh volume (stop the stack first)
+cd /opt/laun && sudo docker compose down
+sudo docker run --rm -v laun-data:/data -v /tmp:/backup busybox \
+  tar -xzf /backup/laun-data-<date>.tar.gz -C /
+sudo docker compose -f deploy/docker-compose.yml --env-file .env up -d
+```
+
+Interrupted runs come back via boot auto-resume (`AUTO_RESUME`, on by
+default); a reboot with the daemon starting at boot is the whole story.
+
 ## Troubleshooting
 
 **`docker: permission denied`** — the invoking user was added to the `docker`

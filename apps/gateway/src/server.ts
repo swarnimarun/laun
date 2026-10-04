@@ -9,7 +9,14 @@ import type {
 } from "@laun/protocol";
 import { bearerToken, checkBearer, normalizeCreateSession } from "@laun/protocol";
 import type { GatewayConfig } from "./config.js";
-import { DEFAULT_MAX_CONCURRENT_RUNS, DEFAULT_MAX_SESSION_TOKENS } from "./config.js";
+import {
+  DEFAULT_AUTO_RESUME,
+  DEFAULT_AUTO_RESUME_MAX_AGE_MS,
+  DEFAULT_MAX_CONCURRENT_RUNS,
+  DEFAULT_MAX_SESSION_TOKENS,
+  DEFAULT_STALL_MS,
+  RESUME_PROMPT,
+} from "./config.js";
 import { streamExecutorRun, abortExecutorRun, executorKnowsAbort, steerExecutorRun, executorKnowsSteer } from "./executorClient.js";
 import { AgentKeyStore } from "./keys.js";
 import { SessionStore } from "./store.js";
@@ -42,6 +49,11 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
   const pendingQueue = new Map<string, string>();
   const maxConcurrentRuns = cfg.maxConcurrentRuns ?? DEFAULT_MAX_CONCURRENT_RUNS;
   const maxSessionTokens = cfg.maxSessionTokens ?? DEFAULT_MAX_SESSION_TOKENS;
+  const autoResume = cfg.autoResume ?? DEFAULT_AUTO_RESUME;
+  const autoResumeMaxAgeMs = cfg.autoResumeMaxAgeMs ?? DEFAULT_AUTO_RESUME_MAX_AGE_MS;
+  const stallMs = cfg.stallMs ?? DEFAULT_STALL_MS;
+  /** Last observed event per session (stall sweeper clock). */
+  const lastEventAt = new Map<string, number>();
   /** Sessions with a budget-abort already in flight (reentrancy guard). */
   const budgetAborting = new Set<string>();
 
@@ -101,6 +113,7 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
   function publish(sessionId: string, e: AgentEvent): void {
     const b = busFor(sessionId);
     b.events.push(e);
+    lastEventAt.set(sessionId, Date.now());
     if (b.events.length > MAX_EVENTS_PER_SESSION) b.events.splice(0, b.events.length - MAX_EVENTS_PER_SESSION);
     try {
       appendFileSync(eventsFile(sessionId), JSON.stringify(e) + "\n");
@@ -205,16 +218,62 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
     }
   }
 
-  // Boot recovery: runs interrupted by a restart must not stay "running" forever.
+  // Boot recovery: resume recently-interrupted runs instead of abandoning
+  // them. pi resumes from its session files, so the continuation just needs
+  // sending. Aged-out interruptions still go to error for human triage.
   for (const rec of sessions.list()) {
     if (rec.status === "running" || rec.status === "waiting_approval") {
-      sessions.setStatus(rec.id, "error");
-      publish(rec.id, {
-        type: "error",
-        sessionId: rec.id,
-        message: "gateway restarted during run — send a new message to retry",
-      });
+      const ageMs = Date.now() - Date.parse(rec.updatedAt);
+      if (autoResume && (autoResumeMaxAgeMs <= 0 || ageMs <= autoResumeMaxAgeMs)) {
+        publish(rec.id, {
+          type: "status",
+          sessionId: rec.id,
+          status: "running",
+          message: "gateway restarted during run — resuming where it left off",
+        });
+        void runAgent(rec.id, RESUME_PROMPT, rec.model);
+      } else {
+        sessions.setStatus(rec.id, "error");
+        publish(rec.id, {
+          type: "error",
+          sessionId: rec.id,
+          message: autoResume
+            ? "gateway restarted during run — interruption too old to resume, send a new message to retry"
+            : "gateway restarted during run — send a new message to retry",
+        });
+      }
     }
+  }
+
+  // Stall sweeper: a live run silent past the ceiling is aborted — but only
+  // once the abort verifiably lands. An unreachable executor leaves the
+  // record alone for the next sweep instead of stranding a live run's record.
+  // Unref'd so tests and idle processes exit cleanly.
+  if (stallMs > 0) {
+    const sweepTimer = setInterval(() => {
+      const now = Date.now();
+      for (const id of [...running]) {
+        const last = lastEventAt.get(id) ?? now;
+        if (now - last < stallMs) continue;
+        void api
+          .abort(id, "stall sweeper")
+          .then((r) => {
+            if (r === "ok") {
+              publish(id, {
+                type: "status",
+                sessionId: id,
+                status: "error",
+                message: `run stalled (no events for ${Math.round(stallMs / 1000)}s) — aborted`,
+              });
+            }
+          })
+          .catch(() => {
+            // Executor unreachable/refusing: leave the record for the next
+            // sweep rather than marking a possibly-live run dead.
+          });
+      }
+    }, Math.min(60_000, Math.max(1_000, stallMs)));
+    (sweepTimer as unknown as { unref?: () => void }).unref?.();
   }
 
   /**
