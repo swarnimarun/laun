@@ -103,7 +103,7 @@ Bun.serve({
       if (path === "/sessions" && req.method === "GET") {
         return Response.json({ sessions: gw.sessions.list() });
       }
-      const m = path.match(/^\/sessions\/([A-Za-z0-9_-]{1,64})(\/messages|\/events|\/log|\/approvals)?$/);
+      const m = path.match(/^\/sessions\/([A-Za-z0-9_-]{1,64})(\/messages|\/events|\/log|\/approvals|\/abort)?$/);
       if (m) {
         const sessionId = m[1];
         const suffix = m[2] ?? "";
@@ -148,6 +148,11 @@ Bun.serve({
           const body = await req.json().catch(() => null);
           if (!body || typeof body !== "object") return err("invalid JSON body", 400);
           gw.decideApproval(sessionId, body as never, id.kind === "agent" ? id.label : "service");
+          return Response.json({ ok: true });
+        }
+        if (suffix === "/abort" && req.method === "POST") {
+          // Errors here carry {status} and fall through to the handler below.
+          await gw.abort(sessionId, id.kind === "agent" ? id.label : "service");
           return Response.json({ ok: true });
         }
       }

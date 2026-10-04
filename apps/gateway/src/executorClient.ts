@@ -55,3 +55,26 @@ function parseEventLine(line: string): AgentEvent | null {
     return null;
   }
 }
+
+/**
+ * Ask the executor to kill an active run. Returns the executor's HTTP status,
+ * or 0 when it could not be reached — callers decide what that means for the
+ * session, because the gateway must not report success for a run it never
+ * stopped.
+ */
+export async function abortExecutorRun(
+  executorUrl: string,
+  token: string,
+  sessionId: string,
+): Promise<number> {
+  try {
+    const res = await fetch(`${executorUrl}/abort`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ sessionId }),
+    });
+    return res.status;
+  } catch {
+    return 0;
+  }
+}
