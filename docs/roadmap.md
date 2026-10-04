@@ -5,7 +5,93 @@ that a feature is actually missing and a definition of done for each. Read this
 alongside `DEVELOPMENT.md` (how to run it, and the lane/worker/validator workflow).
 
 **Status legend:** *missing* = not in the code at all · *stub* = present but not
-doing the real job · *unverified* = built but never proven in the real world.
+doing the real job · *unverified* = built but never proven in the real world ·
+*done* = landed, gated, and proven live where stated.
+
+---
+
+## DONE (all landed 2026-10-04 unless noted, gates green at every landing)
+
+- RPC executor: one long-lived `pi --mode rpc` child per session, abort,
+  completion on `agent_settled` only.
+- CLI: stop/continue/aliases, `agent watch` (exit 0/1/2, live-proven), `doctor`
+  (live-proven), named targets, thinking render.
+- Executor recovery: own retry with shared wall-clock deadline; `retrying (`
+  visible; timeouts intentionally not retryable.
+- Run-slot wedge class fixed (observed live, restart required): timeout/abort/
+  error always free every slot (wedged children SIGKILLed, generation guard
+  against `finally` clobbering, sync throws become 500); gateway `stop`
+  always pokes the executor. Markers verified inside the running containers.
+- Thinking + usage emission (coalesced, flood-tested) with CLI and bridge
+  render; thinking events observed live end-to-end.
+- Telegram bridge: disabled-by-default exit 0 (stack all-healthy), `/log`,
+  actionable busy reply, cap notice.
+- OpenShell policy layer: real YAML schema + validator, provider profiles,
+  bring-up script with provider create, scoped `--approval-mode auto`,
+  `OS_GRANTED` audit, key-absent-in-sandbox probe design.
+- Executor sandbox wiring (CLI path): per-session sandbox create/exec/delete
+  routing, fail-closed config. Proven live through one-shot exec + real
+  policy denial + pi running inside — but NOT enabled (see NOW #1–2).
+- Packaging: `bun` + `types` export conditions so clean checkouts resolve
+  without `dist` (fixed a total deploy crash-loop).
+- Rename cloudbear → laun; secrets hunt clean across tree + full history
+  (one doc example scrubbed); fresh `/opt/laun` stack live; `v1` pushed.
+
+---
+
+## NOW: the RPC-long-lived track (ordered — each unlocks the next)
+
+### 1. SDK transport for rpc (lane: `apps/executor`)
+
+CLI `sandbox exec` streams nothing incrementally (proven live, three
+witnesses) — it serves one-shot json only. Long-lived rpc needs the SDK's
+`execInteractive` (documented streaming transport). `@nvidia/openshell-sdk`
+lives on GitHub Packages (not npm): install with a `gh auth token`-minted
+credential that is never printed, pin the version against gateway 0.1.2.
+Contract: keep the `SandboxRunner.spawnInteractive` SHAPE (stdin/stdout/
+stderr pipes); back it with an `execInteractive` session
+(write/closeInput/output/done). **Done when:** the 3-writes-over-time test
+passes against the REAL gateway (VPS throwaway sandbox), unit tests run on
+fakes, no new failures elsewhere.
+
+### 2. Sandbox-per-session lifecycle + workdir mapping (same lane, second)
+
+Host `/data` is invisible inside sandboxes (proven live), so pi session files
+and workdirs must live sandbox-side: create `laun-<sessionId>` on first run,
+**STOP (not delete)** on idle reap so the workspace persists (= session
+continuity), START on the next run. Upload repo/goal context on create.
+There is no gateway session-delete API, so deletion is time-based:
+`OPENSHELL_SANDBOX_MAX_IDLE_MS` (default 7d) reaper deletes stopped
+sandboxes past their age. **Done when:** two runs share pi session files
+across a stop/start cycle on the VPS; aged-out sandboxes disappear; host
+workdir assumptions are gone from the executor.
+
+### 3. Provider key, then enable (human step, then integrator)
+
+Without a provider, pi inside a sandbox has no model auth — enabling first
+would break every run. Order: user provisions `MODEL_API_KEY` on the box →
+provider create → one full session proves model access with the key absent
+inside → `OPENSHELL_ENABLED=true` + redeploy → default-on. Auto-approve flag
+rides along (already in the bring-up script).
+
+### 4. Steer / queue while busy (executor lane + integrator gateway)
+
+RPC already supports steering; the gateway 409s instead. Contract (both
+sides build to this): `RpcManager.steer(sessionId, text): boolean` (false
+when no live run); single pending queue slot per session (newer replaces
+older, replacement noted in the log); gateway `POST /messages` honors
+`mode` (`steer` → rpc steer, `queue` → pending slot, 409 only when both the
+run and the slot are occupied); CLI gains `--steer`/`--queue` on `say`.
+**Done when:** say-while-busy steers visibly mid-run in the log, queue
+ordering is test-covered, busy error text points at the new flags.
+
+### 5. Resume after reboot + run lease/heartbeat (integrator, gateway-owned)
+
+With #2 done, resume = start the stopped sandbox + new rpc child on the same
+pi `--session-id` (session files persisted in the sandbox workspace). Lease:
+gateway heartbeat per active run; a dead executor/gateway cannot leave a
+session `running` forever. Definitions of done stay as written in P1 #9 and
+the M2.4 row — this item is the scheduling, not a rewrite.
 
 ---
 
@@ -135,7 +221,7 @@ stdin/stdout attached, and one full session completes that way on the VPS.
 
 ## P1 — needed for long, unattended work
 
-### 5. Model thinking is invisible *(missing)*
+### 6. Model thinking is invisible *(missing)*
 
 `parsePiJsonLine` maps only `text_delta` and `error`; every `thinking_*` event
 is discarded. For a tool-heavy job the reasoning is the only sign of life, so
@@ -153,7 +239,7 @@ long reasoning block does not evict the surrounding `done`/`error` events.
 > render it. Still open: gateway forwarding of the new event kinds through the
 > ring + browser UI render — integrator Phase-2 work.
 
-### 6. No completion notification *(missing)*
+### 7. No completion notification *(missing)*
 
 You must poll or hold `--follow`. There is no way to say "tell me when this
 finishes".
@@ -166,16 +252,14 @@ cloud agent that wants to block on a job.
 > exits 0/1/2 (done/error/timeout-or-usage), proven against the VPS over the
 > tunnel (`watch 7031451e` → `✅ done`, exit 0). Needs no new gateway routes.
 
-### 7. Follow-ups are rejected while a run is active *(stub)*
+### 8. Follow-ups are rejected while a run is active *(stub — NOW #4 owns this)*
 
 `POST /messages` returns 409 during a run, so work cannot be queued. RPC mode
 already supports `steer` and `follow_up`; the gateway and CLI never use them.
+The build order and contract live in NOW #4 above; this section keeps only
+the original evidence. Done-when from NOW #4 applies.
 
-**Done when:** `laun agent say <id> "..."` on a busy session queues a
-`steer` (or `follow_up`) instead of failing, with `--queue`/`--steer` choosing
-behaviour, and a test asserts ordering.
-
-### 8. A reboot abandons in-flight work *(stub)*
+### 9. A reboot abandons in-flight work *(stub — NOW #5 owns this)*
 
 Boot recovery marks interrupted runs `error` — correct, but destructive: the
 work is thrown away rather than resumed.
@@ -184,7 +268,7 @@ work is thrown away rather than resumed.
 from pi's session file (or is offered `continue` automatically) instead of
 being terminally `error`.
 
-### 9. Recovery cannot save a timeout *(stub, by design)*
+### 10. Recovery cannot save a timeout *(stub, by design)*
 
 `RUN_RECOVERY_ATTEMPTS` shares one wall-clock deadline, so a run killed by
 `RUN_TIMEOUT_MS` cannot be retried. That is correct for bounding retries, but it

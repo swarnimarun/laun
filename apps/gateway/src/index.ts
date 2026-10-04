@@ -118,8 +118,11 @@ Bun.serve({
         if (suffix === "/messages" && req.method === "POST") {
           const body = await req.json().catch(() => null);
           if (!body || typeof body !== "object") return err("invalid JSON body", 400);
-          gw.sendMessage(sessionId, body as never);
-          return Response.json({ accepted: true, sessionId });
+          // sendMessage validates synchronously (404/400/409 surface as
+          // throws); steer/queue outcomes ride along additively so old
+          // clients ignoring the field see no change.
+          const out = await gw.sendMessage(sessionId, body as never);
+          return Response.json({ accepted: true, sessionId, outcome: out.outcome });
         }
         if (suffix === "/log" && req.method === "GET") {
           const since = Number(url.searchParams.get("since") ?? 0);

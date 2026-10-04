@@ -89,3 +89,39 @@ export function executorKnowsAbort(result: { status: number; body: string }): bo
   if (result.status !== 404) return false;
   return /unknown session/i.test(result.body);
 }
+
+/**
+ * Ask a busy executor to steer its live run with new direction.
+ *
+ * Executor-side contract (implemented by the executor; the gateway never
+ * assumes it): `POST /steer {sessionId, text}` → 200 when a live run
+ * consumed the text, 409 when the session exists but has no live run,
+ * 404 `{"error":"unknown session"}` for unknown ids. A 404 with a
+ * route-shaped body means the build has no steer endpoint at all (same
+ * disambiguation as abort). Steer never starts a run — only redirects one.
+ */
+export async function steerExecutorRun(
+  executorUrl: string,
+  token: string,
+  sessionId: string,
+  text: string,
+): Promise<{ status: number; body: string }> {
+  try {
+    const res = await fetch(`${executorUrl}/steer`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ sessionId, text }),
+    });
+    const body = await res.text().catch(() => "");
+    return { status: res.status, body };
+  } catch {
+    return { status: 0, body: "" };
+  }
+}
+
+/** True when the response proves a steer endpoint exists (any run state). */
+export function executorKnowsSteer(result: { status: number; body: string }): boolean {
+  if (result.status === 200 || result.status === 409) return true;
+  if (result.status !== 404) return false;
+  return /unknown session/i.test(result.body);
+}

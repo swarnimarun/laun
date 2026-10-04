@@ -9,7 +9,7 @@ import type {
 } from "@laun/protocol";
 import { bearerToken, checkBearer, normalizeCreateSession } from "@laun/protocol";
 import type { GatewayConfig } from "./config.js";
-import { streamExecutorRun, abortExecutorRun, executorKnowsAbort } from "./executorClient.js";
+import { streamExecutorRun, abortExecutorRun, executorKnowsAbort, steerExecutorRun, executorKnowsSteer } from "./executorClient.js";
 import { AgentKeyStore } from "./keys.js";
 import { SessionStore } from "./store.js";
 
@@ -33,6 +33,12 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
   const keys = keyStore ?? new AgentKeyStore(cfg.dataDir);
   const buses = new Map<string, SessionBus>();
   const running = new Set<string>();
+  /**
+   * Single pending follow-up per session (set by sendMessage mode "queue",
+   * consumed by runAgent's finally as one fresh run). Newer replaces older.
+   * Cleared by a successful abort — abort cancels all intent.
+   */
+  const pendingQueue = new Map<string, string>();
 
   // A key minted before the gateway started (setup writes it into .env).
   if (cfg.bootstrapKey) {
@@ -136,6 +142,15 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
       setStatus(sessionId, "error");
     } finally {
       running.delete(sessionId);
+      // Drain one queued follow-up, if any, as a fresh run. Chained via
+      // void (never awaited) so queue depth cannot grow the call stack;
+      // each drain consumes exactly one slot.
+      const next = pendingQueue.get(sessionId);
+      if (next !== undefined) {
+        pendingQueue.delete(sessionId);
+        const rec = sessions.get(sessionId);
+        if (rec) void runAgent(sessionId, next, rec.model);
+      }
     }
   }
 
@@ -179,14 +194,76 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
       return rec;
     },
 
-    sendMessage(sessionId: string, input: SendMessageRequest): void {
+    sendMessage(sessionId: string, input: SendMessageRequest): Promise<{ outcome: "started" | "steered" | "queued" }> {
       const rec = sessions.get(sessionId);
       if (!rec) throw Object.assign(new Error("session not found"), { status: 404 });
       const text = (input.text ?? "").trim();
       if (!text) throw Object.assign(new Error("text is required"), { status: 400 });
       if (text.length > 8000) throw Object.assign(new Error("text too long (max 8000 chars)"), { status: 400 });
-      if (running.has(sessionId)) throw Object.assign(new Error("session already running"), { status: 409 });
-      void runAgent(sessionId, text, rec.model);
+      const mode = (input as { mode?: unknown }).mode;
+      if (mode !== undefined && mode !== "steer" && mode !== "queue") {
+        throw Object.assign(new Error('mode must be "steer" or "queue"'), { status: 400 });
+      }
+      if (!running.has(sessionId)) {
+        void runAgent(sessionId, text, rec.model);
+        return Promise.resolve({ outcome: "started" as const });
+      }
+      if (mode === "steer") return this.steerRunning(sessionId, text);
+      if (mode === "queue") {
+        const replaced = pendingQueue.has(sessionId);
+        pendingQueue.set(sessionId, text);
+        publish(sessionId, {
+          type: "status",
+          sessionId,
+          status: "running",
+          message: replaced ? "queued follow-up (replaces older)" : "queued follow-up",
+        });
+        return Promise.resolve({ outcome: "queued" as const });
+      }
+      throw Object.assign(new Error("session already running"), { status: 409 });
+    },
+
+    /**
+     * Steer the live run via the executor. A 409/unknown-session answer
+     * means desync (we thought busy, nothing live there): clear local state
+     * and start the text as a fresh run rather than stranding the user the
+     * way the old wedge did. A missing steer route is a 502 — explicit
+     * steering must never silently degrade.
+     */
+    async steerRunning(sessionId: string, text: string): Promise<{ outcome: "started" | "steered" | "queued" }> {
+      const result = await steerExecutorRun(cfg.executorUrl, cfg.gatewayToken, sessionId, text);
+      if (result.status === 200) {
+        publish(sessionId, {
+          type: "status",
+          sessionId,
+          status: "running",
+          message: `steered: ${text.slice(0, 200)}`,
+        });
+        return { outcome: "steered" as const };
+      }
+      if (executorKnowsSteer(result)) {
+        running.delete(sessionId);
+        const rec = sessions.get(sessionId);
+        if (!rec) throw Object.assign(new Error("session not found"), { status: 404 });
+        publish(sessionId, {
+          type: "status",
+          sessionId,
+          status: "running",
+          message: "executor had no live run; started fresh",
+        });
+        void runAgent(sessionId, text, rec.model);
+        return { outcome: "started" as const };
+      }
+      throw Object.assign(
+        new Error(
+          result.status === 0
+            ? "executor unreachable"
+            : result.status === 404
+              ? "this executor build has no steer endpoint — rebuild and redeploy it"
+              : `executor refused steer (${result.status})`,
+        ),
+        { status: 502 },
+      );
     },
 
     /** v1 semantics: records the human decision + broadcasts it. Hard enforcement lives in OpenShell policy. */
@@ -242,12 +319,14 @@ gateway/executor desync (record settled here, slot wedged there) once
           message: `aborted${abortedBy ? ` by ${abortedBy}` : ""}`,
         });
         running.delete(sessionId);
+        pendingQueue.delete(sessionId);
         return "ok";
       }
       if (executorKnowsAbort(result)) {
         // The executor confirms no live run (409 not-running, or 404 unknown
         // session on a build that has the route). Clear local state either way.
         running.delete(sessionId);
+        pendingQueue.delete(sessionId);
         return believedRunning ? "ok" : "not_running";
       }
       if (!believedRunning) {
