@@ -52,10 +52,12 @@ doing the real job · *unverified* = built but never proven in the real world ·
   differs from the raw key), policy denials still enforced, no pending
   rules. Key never printed, never committed, never crossed the network.
 - SDK transport + sandbox-per-session lifecycle in the executor (stop/start,
-  max-age reaper, workdir mapping): unit-proven, NOT yet enabled on the box.
-  Enablement needs: provider live (done above) + SDK→gateway reachability
-  from inside the executor container (open: host loopback is unreachable
-  there) + one full executor-driven sandboxed session.
+  max-age reaper, workdir mapping): unit-proven, deployed dormant (2026-10-04
+  redeploy) alongside a vendored SDK + Dockerfile vendor copy (registry 401s
+  made installs impossible otherwise). Enablement needs: provider live (done
+  above) + SDK→gateway reachability from inside the executor container (open:
+  host loopback is unreachable there) + one full executor-driven sandboxed
+  session.
 
 ---
 
