@@ -53,6 +53,11 @@ doing the real job · *unverified* = built but never proven in the real world ·
   chunk coalescing, cancel, tolerant permission mapping — verified live
   against goose 1.53.0, stub-tested otherwise. Executor wiring is the next
   lane, not this one.
+- Browser UI rebuilt: hash routing, cursor-resumed SSE, merged transcript
+  (reasoning blocks, compact tool rows, usage footer), zero emojis.
+- Notify-on-grant: denial-shaped tool failures arm a bounded watcher on
+  `rule history`; new grants steer the live run to retry (works for human
+  approvals too).
 - Model via OpenShell provider, LIVE on the box: `opencode-go` custom profile
   (Bearer, endpoint-locked to opencode.ai/zen/go) + `laun-model` provider
   backed by pi's own key (same model, no new account). Proven: full
