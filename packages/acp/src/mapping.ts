@@ -63,6 +63,38 @@ export class TextCoalescer {
   }
 }
 
+/**
+ * Per-run accumulator for agent reasoning (agent_thought_chunk), mirroring
+ * the executor's ThinkingCoalescer: >=300-char chunks, flush the remainder
+ * before completion/abort/timeout.
+ */
+export class ThinkingCoalescer {
+  private buf = "";
+  constructor(private sessionId: string) {}
+  /** Feed raw reasoning text; returns the coalesced events now due. */
+  push(text: string): AgentEvent[] {
+    if (!text) return [];
+    this.buf += text;
+    const out: AgentEvent[] = [];
+    while (this.buf.length >= TEXT_FLUSH_CHARS) {
+      out.push({ type: "thinking", sessionId: this.sessionId, delta: this.buf.slice(0, TEXT_FLUSH_CHARS) });
+      this.buf = this.buf.slice(TEXT_FLUSH_CHARS);
+    }
+    return out;
+  }
+  /** Release the buffered remainder (null when empty). Idempotent. */
+  flush(): AgentEvent | null {
+    if (!this.buf) return null;
+    const delta = this.buf;
+    this.buf = "";
+    return { type: "thinking", sessionId: this.sessionId, delta };
+  }
+  /** Chars still buffered (for tests). */
+  get pending(): number {
+    return this.buf.length;
+  }
+}
+
 /** A streamed text chunk and which stream it belongs to. */
 export interface StreamChunk {
   kind: "text" | "thinking";
