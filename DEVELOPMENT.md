@@ -171,6 +171,28 @@ jj status                        # clean tree
 jj log --no-graph -n 5           # what just landed
 ```
 
+## Releasing
+
+Releases are tag-driven; nothing is published by hand. Full design and
+runbook: [`docs/releases.md`](docs/releases.md).
+
+```bash
+# on the release commit, with package.json's version matching the tag
+git tag -a v0.1.0 -m "laun 0.1.0"
+git push origin v0.1.0     # human action — agents never push
+```
+
+The tag runs `.github/workflows/release.yml`: multi-arch `laun` (gateway +
+executor + bridge in one image) and `laun-pi-agent` images to GHCR, CLI
+binaries for linux/darwin amd64+arm64 and windows amd64, and a GitHub Release
+with generated notes. Rehearse a CLI build locally with:
+
+```bash
+bun build --compile --minify --target=bun-darwin-arm64 \
+  --define "process.env.LAUN_VERSION=\"0.1.0\"" \
+  apps/laun/src/index.ts --outfile /tmp/laun && /tmp/laun --version
+```
+
 ## Remote / VPS
 
 See `deploy/remote-setup.md` for provisioning a host

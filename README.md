@@ -87,6 +87,24 @@ Containers restart automatically (`unless-stopped`) — that plus the Docker
 daemon starting at boot is the whole 24/7 story. Sessions live in the
 `laun-data` volume (`/data/sessions` + gateway `index.json`).
 
+### Deploy a release
+
+Tagged releases publish multi-arch images to GHCR and CLI binaries on the
+GitHub Release (design + runbook: [`docs/releases.md`](docs/releases.md)). Pin
+the version and let compose pull instead of build:
+
+```bash
+cp deploy/.env.example .env          # fill in tokens
+echo "LAUN_TAG=0.1.0" >> .env        # stays pinned for later compose runs
+LAUN_TAG=0.1.0 ./deploy/install.sh   # or: docker compose ... pull && up -d
+```
+
+GHCR packages are private for personal accounts by default: either flip both
+packages to public in their package settings, or log the box in once
+(`docker login ghcr.io -u <user> -p <PAT with read:packages>`). The OpenShell
+sandbox image ships on the same tags; fetch it when enabling sandboxing with
+`docker compose --profile sandbox pull`.
+
 Useful:
 
 ```bash

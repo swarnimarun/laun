@@ -30,7 +30,9 @@ import {
 } from "./config.js";
 import { connectionBlock, localSetup, parseSshTarget, remoteSetup } from "./setup.js";
 
-export const CLI_VERSION = "0.1.0";
+// Release builds inject the tag with `bun build --define process.env.LAUN_VERSION=...`
+// (see .github/workflows/release.yml); the fallback is for dev runs from source.
+export const CLI_VERSION = process.env.LAUN_VERSION ?? "0.1.0";
 
 const HELP = `laun — self-hosted remote agent control
 

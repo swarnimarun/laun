@@ -1,0 +1,282 @@
+# Tag-triggered release: OCI images to GHCR, CLI binaries, GitHub Release.
+# Design and runbook: docs/releases.md.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)release, e.g. v0.1.0"
+        required: true
+        type: string
+
+# Never cancel a release in flight; re-runs target the same tag.
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      minor: ${{ steps.meta.outputs.minor }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      image_prefix: ${{ steps.meta.outputs.image_prefix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - id: meta
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "not a release tag: $tag (expected vX.Y.Z[-prerelease])" >&2
+            exit 1
+          fi
+          version="${tag#v}"
+          stable="${version%%-*}"
+          pkg="$(jq -r .version package.json)"
+          if [ "$version" != "$pkg" ]; then
+            echo "tag $tag does not match package.json version $pkg" >&2
+            exit 1
+          fi
+          case "$version" in
+            *-*) prerelease=true ;;
+            *)   prerelease=false ;;
+          esac
+          {
+            printf 'tag=%s\n' "$tag"
+            printf 'version=%s\n' "$version"
+            printf 'minor=%s\n' "${stable%.*}"
+            printf 'prerelease=%s\n' "$prerelease"
+            printf 'image_prefix=%s\n' "$REGISTRY/${GITHUB_REPOSITORY_OWNER,,}"
+          } >>"$GITHUB_OUTPUT"
+
+  images:
+    needs: verify
+    # Native runners, no QEMU: ubuntu-24.04-arm is available for public repos.
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        image:
+          # Comprehensive service image (gateway + executor + telegram-bridge).
+          - name: laun
+            dockerfile: deploy/Dockerfile
+          # OpenShell sandbox image, launched by the executor, not by compose.
+          - name: laun-pi-agent
+            dockerfile: deploy/openshell/Dockerfile.pi
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ needs.verify.outputs.image_prefix }}/${{ matrix.image.name }}
+          flavor: latest=false
+          tags: type=raw,value=${{ needs.verify.outputs.version }}-${{ matrix.arch }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image.name }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}-${{ matrix.arch }}
+          # Attestations would have to survive the imagetools merge below;
+          # turn both on when that is set up. See docs/releases.md follow-ups.
+          provenance: false
+          sbom: false
+
+  merge:
+    needs: [verify, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [laun, laun-pi-agent]
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Join per-arch manifests
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          MINOR: ${{ needs.verify.outputs.minor }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          img="${{ needs.verify.outputs.image_prefix }}/${{ matrix.image }}"
+          tags=(-t "$img:$VERSION")
+          # Floating tags only point at stable releases; a prerelease must
+          # never move `X.Y` or `latest`.
+          if [ "$PRERELEASE" = "false" ]; then
+            tags+=(-t "$img:$MINOR" -t "$img:latest")
+          fi
+          docker buildx imagetools create "${tags[@]}" "$img:$VERSION-amd64" "$img:$VERSION-arm64"
+
+  smoke:
+    needs: [verify, merge]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Boot gateway and executor from the released image
+        env:
+          IMG: ${{ needs.verify.outputs.image_prefix }}/laun:${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          trap 'docker rm -f laun-smoke-gateway laun-smoke-executor >/dev/null 2>&1 || true' EXIT
+          docker pull "$IMG"
+
+          # Executor tooling must be present, not just the three services.
+          docker run --rm "$IMG" pi --version
+          docker run --rm "$IMG" sh -c 'command -v openshell || echo "openshell not on PATH (optional)"'
+
+          docker run -d --name laun-smoke-executor \
+            -e GATEWAY_TOKEN=smoke -e SESSION_DIR=/tmp/sessions -p 18081:8081 \
+            "$IMG" bun apps/executor/src/index.ts
+          docker run -d --name laun-smoke-gateway \
+            -e GATEWAY_TOKEN=smoke -p 18080:8080 \
+            "$IMG" bun apps/gateway/src/index.ts
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/health >/dev/null 2>&1 \
+               && curl -fsS http://127.0.0.1:18081/health >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          docker logs laun-smoke-gateway || true
+          docker logs laun-smoke-executor || true
+          curl -fsS http://127.0.0.1:18080/health >/dev/null
+          curl -fsS http://127.0.0.1:18081/health >/dev/null
+
+  cli:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: bun-linux-x64,    os: linux,  arch: amd64 }
+          - { target: bun-linux-arm64,  os: linux,  arch: arm64 }
+          - { target: bun-darwin-x64,   os: darwin, arch: amd64 }
+          - { target: bun-darwin-arm64, os: darwin, arch: arm64 }
+          - { target: bun-windows-x64,  os: windows, arch: amd64, ext: .exe }
+    env:
+      LAUN_VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - name: Compile
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          bun build --compile --minify \
+            --target=${{ matrix.target }} \
+            --define "process.env.LAUN_VERSION=\"$LAUN_VERSION\"" \
+            apps/laun/src/index.ts \
+            --outfile "dist/laun${{ matrix.ext }}"
+      - name: Check reported version
+        if: matrix.target == 'bun-linux-x64'
+        run: ./dist/laun --version | grep -qx "laun $LAUN_VERSION"
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="laun_${LAUN_VERSION}_${{ matrix.os }}_${{ matrix.arch }}"
+          cd dist
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            zip "../${name}.zip" "laun.exe"
+          else
+            tar -czf "../${name}.tar.gz" laun
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            laun_*.tar.gz
+            laun_*.zip
+          if-no-files-found: error
+
+  release:
+    needs: [verify, smoke, cli]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: cli-*
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd artifacts
+          sha256sum laun_* > checksums.txt
+          cat checksums.txt
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          flags=(--title "laun $TAG" --generate-notes)
+          if [ "$PRERELEASE" = "true" ]; then
+            flags+=(--prerelease)
+          else
+            flags+=(--latest)
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Re-run: refresh assets and regenerate the changelog.
+            gh release upload "$TAG" artifacts/* --clobber
+            gh release edit "$TAG" "${flags[@]}"
+          else
+            gh release create "$TAG" artifacts/* "${flags[@]}"
+          fi

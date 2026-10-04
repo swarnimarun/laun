@@ -1,10 +1,17 @@
+# One comprehensive image for every service: either pulled from GHCR
+# (LAUN_TAG=0.1.0) or built from this checkout (`up -d --build`). Both paths
+# tag the same reference, so service config never changes between them.
+# See docs/releases.md.
+x-laun-image: &laun-image
+  image: ${LAUN_IMAGE:-ghcr.io/swarnimarun/laun}:${LAUN_TAG:-latest}
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+
 services:
   executor:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
-      args:
-        APP: apps/executor
+    <<: *laun-image
+    command: ["bun", "apps/executor/src/index.ts"]
     ports:
       - "${EXECUTOR_PORT:-8081}:8081"
     environment:
@@ -23,7 +30,7 @@ services:
       OPENSHELL_PREFIX: ${OPENSHELL_PREFIX:-}
       # Per-session sandboxing (needs OPENSHELL_ENABLED=true). Image + policy
       # are baked/shipped, never secret; the provider key stays server-side.
-      OPENSHELL_SANDBOX_IMAGE: ${OPENSHELL_SANDBOX_IMAGE:-pi-agent:local}
+      OPENSHELL_SANDBOX_IMAGE: ${OPENSHELL_SANDBOX_IMAGE:-ghcr.io/swarnimarun/laun-pi-agent:${LAUN_TAG:-latest}}
       OPENSHELL_POLICY: ${OPENSHELL_POLICY:-/openshell/policy.yaml}
       OPENSHELL_PROVIDER: ${OPENSHELL_PROVIDER:-}
       OPENSHELL_APPROVAL_MODE: ${OPENSHELL_APPROVAL_MODE:-manual}
@@ -82,11 +89,8 @@ services:
       retries: 3
 
   gateway:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
-      args:
-        APP: apps/gateway
+    <<: *laun-image
+    command: ["bun", "apps/gateway/src/index.ts"]
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
     environment:
@@ -110,11 +114,8 @@ services:
       retries: 3
 
   telegram-bridge:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
-      args:
-        APP: apps/telegram-bridge
+    <<: *laun-image
+    command: ["bun", "apps/telegram-bridge/src/index.ts"]
     environment:
       # Empty or placeholder = log one line and exit 0 (disabled-by-default).
       # Intentionally `:-`, not `:?`: a missing token must be a clean exit,
@@ -152,6 +153,15 @@ services:
   #     gateway:
   #       condition: service_started
   #   restart: unless-stopped
+
+  # Pull-only: the OpenShell sandbox image is launched by the executor through
+  # the host Docker socket, never by compose. `docker compose --profile sandbox
+  # pull` fetches it alongside the stack when OPENSHELL_ENABLED=true.
+  pi-agent:
+    image: ${OPENSHELL_SANDBOX_IMAGE:-ghcr.io/swarnimarun/laun-pi-agent:${LAUN_TAG:-latest}}
+    profiles: ["sandbox"]
+    entrypoint: ["/bin/true"]
+    restart: "no"
 
 volumes:
   laun-data:
