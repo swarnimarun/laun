@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { AgentEvent } from "@cloudbear/protocol";
 import { handlePiLine, ThinkingCoalescer, parsePiJsonLine } from "./pi.js";
+import { sandboxNameForSession, type SandboxRunner } from "./sandbox.js";
 
 export function buildRpcArgs(o: { sessionId: string; piSessionDir: string; model: string }): string[] {
   return ["--mode", "rpc", "--session-id", o.sessionId, "--session-dir", o.piSessionDir, "--model", o.model];
@@ -41,6 +42,8 @@ interface ActiveRun {
 
 interface SessionState {
   sessionId: string;
+  /** Sandbox holding the rpc child, or null for a direct host spawn. */
+  sandboxName: string | null;
   piSessionDir: string;
   workdir: string;
   model: string;
@@ -85,6 +88,11 @@ export interface RpcManagerOptions {
   piBin: string;
   openshellPrefix: string[];
   idleTtlMs: number;
+  /**
+   * When set, pi spawns inside a per-session sandbox (created on first run,
+   * removed when the child dies or is reaped). Unset spawns directly.
+   */
+  sandboxRunner?: SandboxRunner;
 }
 
 /**
@@ -120,7 +128,7 @@ export class RpcManager {
   }
 
   async run(o: RpcRunOptions): Promise<RpcRunResult> {
-    let session = this.ensureSession(o.sessionId, o.piSessionDir, o.workdir, o.model);
+    let session = await this.ensureSession(o.sessionId, o.piSessionDir, o.workdir, o.model);
     if (session.currentRun) {
       throw new Error("session already running");
     }
@@ -132,7 +140,7 @@ export class RpcManager {
       await this.waitForSettled(session, SETTLE_WAIT_MS);
       const fresh = this.sessions.get(o.sessionId);
       if (!fresh || fresh.exited || fresh.child.exitCode !== null) {
-        session = this.ensureSession(o.sessionId, o.piSessionDir, o.workdir, o.model);
+        session = await this.ensureSession(o.sessionId, o.piSessionDir, o.workdir, o.model);
       } else {
         session = fresh;
       }
@@ -341,6 +349,8 @@ export class RpcManager {
         clearTimeout(session.idleTimer);
         session.idleTimer = null;
       }
+      // Sandbox lifetime == child lifetime: teardown removes it too.
+      this.removeSandbox(session.sandboxName);
       for (const [, resolve] of session.pendingState) resolve(null);
       session.pendingState.clear();
       this.clearSettling(session);
@@ -354,7 +364,7 @@ export class RpcManager {
     }
   }
 
-  private ensureSession(sessionId: string, piSessionDir: string, workdir: string, model: string): SessionState {
+  private async ensureSession(sessionId: string, piSessionDir: string, workdir: string, model: string): Promise<SessionState> {
     const existing = this.sessions.get(sessionId);
     if (existing && !existing.exited) {
       if (existing.child.exitCode !== null) {
@@ -376,12 +386,43 @@ export class RpcManager {
     return this.spawnSession(sessionId, piSessionDir, workdir, model);
   }
 
-  private spawnSession(sessionId: string, piSessionDir: string, workdir: string, model: string): SessionState {
-    const argv = [...this.opts.openshellPrefix, this.opts.piBin, ...buildRpcArgs({ sessionId, piSessionDir, model })];
-    const [cmd, ...args] = argv;
-    const child = spawn(cmd!, args, { cwd: workdir, env: process.env, stdio: ["pipe", "pipe", "pipe"] });
+  /** Best-effort sandbox delete: never throws, safe on reap/teardown paths. */
+  private removeSandbox(sandboxName: string | null): void {
+    if (!sandboxName || !this.opts.sandboxRunner) return;
+    try {
+      void this.opts.sandboxRunner.remove(sandboxName).catch(() => {
+        // remove() is best-effort by contract; this guards fakes too.
+      });
+    } catch {
+      // synchronous throws from a runner must never wedge run slots.
+    }
+  }
+
+  private async spawnSession(sessionId: string, piSessionDir: string, workdir: string, model: string): Promise<SessionState> {
+    const sandboxName = this.opts.sandboxRunner ? sandboxNameForSession(sessionId) : null;
+    if (sandboxName) {
+      // Fail loudly, never silently unsandboxed: a failed create rejects
+      // the run before any child exists. Best-effort cleanup first so a
+      // half-made sandbox does not leak.
+      try {
+        await this.opts.sandboxRunner!.create({ name: sandboxName });
+      } catch (e) {
+        this.removeSandbox(sandboxName);
+        throw e;
+      }
+    }
+    const piArgv = [this.opts.piBin, ...buildRpcArgs({ sessionId, piSessionDir, model })];
+    let child: ChildProcess;
+    if (sandboxName) {
+      child = this.opts.sandboxRunner!.spawnInteractive(sandboxName, piArgv, { cwd: workdir, env: process.env });
+    } else {
+      const argv = [...this.opts.openshellPrefix, ...piArgv];
+      const [cmd, ...args] = argv;
+      child = spawn(cmd!, args, { cwd: workdir, env: process.env, stdio: ["pipe", "pipe", "pipe"] });
+    }
     const session: SessionState = {
       sessionId,
+      sandboxName,
       piSessionDir,
       workdir,
       model,
@@ -420,6 +461,8 @@ export class RpcManager {
       for (const [, resolve] of session.pendingState) resolve(null);
       session.pendingState.clear();
       this.sessions.delete(sessionId);
+      // The child never started: its sandbox (if any) must not leak.
+      this.removeSandbox(session.sandboxName);
     });
     child.on("close", (code) => {
       if (session.exited && !session.currentRun && !this.sessions.has(sessionId)) return;
@@ -452,6 +495,9 @@ export class RpcManager {
         this.finishRun(session, { aborted: false, timedOut: false });
       }
       this.sessions.delete(sessionId);
+      // Sandbox lifetime == child lifetime: the child is gone, remove it.
+      // Covers crashes, idle reap kills, and settle-grace kills alike.
+      this.removeSandbox(session.sandboxName);
     });
     // Enable self-healing retries; fire-and-forget (no id, no response).
     this.writeJson(session, { type: "set_auto_retry", enabled: true });
@@ -627,6 +673,7 @@ export class RpcManager {
     if (session.streaming || session.currentRun) return; // never reap a live run
     if (session.child.exitCode !== null) {
       this.sessions.delete(sessionId);
+      this.removeSandbox(session.sandboxName);
       return;
     }
     // Guard against double-kill: mark first, signal once.
