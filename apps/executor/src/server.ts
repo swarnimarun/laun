@@ -4,6 +4,7 @@ import { checkBearer } from "@cloudbear/protocol";
 import type { ExecutorConfig, ExecutorMode } from "./config.js";
 import { clampTimeout, ensureWorkdir, resolveSessionDir, resolveWorkdir, assertValidPrompt, assertValidSessionId } from "./paths.js";
 import { runPiStreaming } from "./pi.js";
+import { CliSandboxRunner, type SandboxRunner } from "./sandbox.js";
 import {
   DEFAULT_RECOVERY_ATTEMPTS,
   DEFAULT_RECOVERY_BACKOFF_MS,
@@ -35,7 +36,18 @@ export function createHandler(cfg: ExecutorConfig) {
   const busyGen = new Map<string, object>();
   const mode: ExecutorMode = (cfg as Partial<ExecutorConfig>).executorMode ?? "json";
   const rpcIdleTtlMs = (cfg as Partial<ExecutorConfig>).rpcIdleTtlMs ?? 300_000;
-  const rpc = new RpcManager({ piBin: cfg.piBin, openshellPrefix: cfg.openshellPrefix, idleTtlMs: rpcIdleTtlMs });
+  // Sandbox mode: one sandbox per session, pi spawned inside it. Disabled
+  // passes undefined and every spawn stays a direct host child (unchanged).
+  const sandboxRunner: SandboxRunner | undefined = cfg.openshellEnabled
+    ? new CliSandboxRunner({
+        bin: cfg.openshellBin ?? "openshell",
+        image: cfg.sandboxImage ?? "",
+        policyFile: cfg.sandboxPolicyFile ?? "",
+        providers: cfg.sandboxProviders ?? [],
+        approvalMode: cfg.sandboxApprovalMode ?? "",
+      })
+    : undefined;
+  const rpc = new RpcManager({ piBin: cfg.piBin, openshellPrefix: cfg.openshellPrefix, idleTtlMs: rpcIdleTtlMs, sandboxRunner });
   const jsonActive = new Map<string, JsonActive>();
   const rpcActive = new Map<string, RpcActive>();
   // Additive recovery config: absent fields (older callers/tests) fall back
@@ -162,6 +174,7 @@ export function createHandler(cfg: ExecutorConfig) {
                 piBin: cfg.piBin,
                 openshellPrefix: cfg.openshellPrefix,
                 timeoutMs: budget,
+                sandboxRunner,
                 onEvent: (e) => {
                   if (e.type === "error" && firstError === null) firstError = e.message;
                   send(e);
