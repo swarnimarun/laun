@@ -69,6 +69,12 @@ export function createTranscript(io: TranscriptIo, asJson = false): (e: AgentEve
 
 export interface FollowOptions {
   since?: number;
+  /**
+   * Start from the end of the log instead of replaying it. Needed because a
+   * session's history usually already contains a done/error event, which would
+   * otherwise end the follow immediately and hide the run you asked to watch.
+   */
+  fromLatest?: boolean;
   pollMs?: number;
   maxMs?: number;
   sleep?: (ms: number) => Promise<void>;
@@ -91,6 +97,14 @@ export async function follow(
   const deadline = Date.now() + maxMs;
   let since = opts.since ?? 0;
   let idle = 0;
+  if (opts.fromLatest) {
+    try {
+      const head = await client.log(sessionId, since);
+      since = head.next;
+    } catch {
+      // gateway hiccup: fall back to replaying from `since`
+    }
+  }
   for (;;) {
     let log: { events: AgentEvent[]; next: number };
     try {

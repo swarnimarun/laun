@@ -165,13 +165,18 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
   if (sub === "log") {
     const parsed = parseArgs(rest, { boolean: ["follow", "json"], value: ["since"] });
     const id = requiredArg(parsed.positionals, 0, "session id", "cloudbear agent log <id> [--follow]");
-    const since = Number(flagString(parsed.flags, "since") ?? 0);
+    const since = flagString(parsed.flags, "since");
     const asJson = flagBool(parsed.flags, "json");
     const emit = createTranscript(io, asJson);
     if (flagBool(parsed.flags, "follow")) {
-      await follow(client, id, { since, onEvent: emit });
+      // Follow from now unless the caller pinned an explicit cursor.
+      await follow(client, id, {
+        since: since === undefined ? 0 : Number(since),
+        fromLatest: since === undefined,
+        onEvent: emit,
+      });
     } else {
-      const log = await client.log(id, since);
+      const log = await client.log(id, Number(since ?? 0));
       for (const e of log.events) emit(e);
     }
     return 0;

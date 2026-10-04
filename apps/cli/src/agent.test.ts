@@ -153,6 +153,44 @@ describe("agent rendering + follow", () => {
     expect(await follow(fake, "s1")).toBe(1);
   });
 
+  test("fromLatest skips history that already ends in a terminal event", async () => {
+    // Regression: a session's log usually already contains a done/error from an
+    // earlier run, so following from 0 stopped instantly and never showed the
+    // run you actually asked to watch.
+    const fake = {
+      log: async (_id: string, since: number) =>
+        since === 0
+          ? {
+              sessionId: "s1",
+              events: [
+                { type: "text", sessionId: "s1", delta: "old" },
+                { type: "error", sessionId: "s1", message: "previous failure" },
+              ] as AgentEvent[],
+              next: 2,
+            }
+          : {
+              sessionId: "s1",
+              events: [
+                { type: "text", sessionId: "s1", delta: "fresh" },
+                { type: "done", sessionId: "s1" },
+              ] as AgentEvent[],
+              next: 4,
+            },
+    } as unknown as GatewayClient;
+
+    const seen: AgentEvent[] = [];
+    const next = await follow(fake, "s1", {
+      fromLatest: true,
+      pollMs: 0,
+      maxMs: 5000,
+      sleep: async () => {},
+      onEvent: (e) => seen.push(e),
+    });
+    expect(next).toBe(4);
+    expect(seen.map((e) => e.type)).toEqual(["text", "done"]);
+    expect(seen.some((e) => e.type === "error")).toBe(false);
+  });
+
   test("follow gives up after maxMs instead of hanging", async () => {
     let calls = 0;
     const fake = {
