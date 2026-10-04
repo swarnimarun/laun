@@ -1,6 +1,6 @@
 # Roadmap — what is not built yet
 
-What cloudbear is missing, in the order it should be built, with the evidence
+What laun is missing, in the order it should be built, with the evidence
 that a feature is actually missing and a definition of done for each. Read this
 alongside `PLAN.md` (architecture and the lane workflow) and `DEVELOPMENT.md`
 (how to run it).
@@ -29,6 +29,16 @@ the agent inside a sandbox, and `OPENSHELL_ENABLED=true` is the shipped default.
 The bring-up script and real YAML policy layer already exist (Lane P, landed);
 the missing piece is executor ↔ sandbox wiring via
 `@nvidia/openshell-sdk`'s `sandbox.execInteractive` for `pi --mode rpc`.
+
+> Lane-sandbox landed 2026-10-04 (code; NOT enabled on the box): executor
+> creates a per-session sandbox and routes spawns through `sandbox exec`.
+> VPS-proven live: create with policy, real `/etc` denial, pi 1.0.2 runs
+> inside, one-shot piped exec works. Two blockers before enabling: (1) CLI
+> `exec` does not stream incrementally (three independent witnesses) —
+> long-lived rpc needs the SDK's `execInteractive`, not the CLI; (2) host
+> `/data` is invisible inside the sandbox, so pi session files/workdirs need
+> a sync-or-mount design before sessions can survive there. Next lanes:
+> SDK transport, then workdir mapping, then enable + redeploy.
 
 ### 2. Model access does not go through OpenShell *(missing — plan below)*
 
@@ -149,7 +159,7 @@ long reasoning block does not evict the surrounding `done`/`error` events.
 You must poll or hold `--follow`. There is no way to say "tell me when this
 finishes".
 
-**Done when:** `cloudbear agent watch <id>` (or an equivalent) exits when the
+**Done when:** `laun agent watch <id>` (or an equivalent) exits when the
 run settles and returns its status code from the run's outcome — usable by a
 cloud agent that wants to block on a job.
 
@@ -162,7 +172,7 @@ cloud agent that wants to block on a job.
 `POST /messages` returns 409 during a run, so work cannot be queued. RPC mode
 already supports `steer` and `follow_up`; the gateway and CLI never use them.
 
-**Done when:** `cloudbear agent say <id> "..."` on a busy session queues a
+**Done when:** `laun agent say <id> "..."` on a busy session queues a
 `steer` (or `follow_up`) instead of failing, with `--queue`/`--steer` choosing
 behaviour, and a test asserts ordering.
 
@@ -211,8 +221,8 @@ knows how to resume one.
 | 14 | **No budget limits** | only the 30-min `RUN_TIMEOUT_MS` cap | per-session max time and max tokens, enforced, reported |
 | 15 | **No global concurrency cap** | sessions run in parallel unbounded | a configurable ceiling, with a queue or a clear rejection |
 | 16 | **Keys are all-or-nothing** | one key grants every session | scopes (per repo/target), revocation that is immediate and testable |
-| 17 | **Single host only** | one saved target in `~/.cloudbear/auth.json` | named targets, `cloudbear --target <name>` |
-| 18 | **No stack self-check** | you must know the ssh/docker commands by hand | `cloudbear doctor` reports health, config, version drift and the common failure modes |
+| 17 | **Single host only** | one saved target in `~/.laun/auth.json` | named targets, `laun --target <name>` |
+| 18 | **No stack self-check** | you must know the ssh/docker commands by hand | `laun doctor` reports health, config, version drift and the common failure modes |
 | 19 | **Telegram bridge crash-loops** | placeholder `TELEGRAM_BOT_TOKEN` on the box | ships disabled-by-default when unset, so the stack is all-healthy — **landed 2026-10-04** (exit 0 + `/log` + actionable busy reply proven locally; `Restarting (1)` on the box clears on next redeploy) |
 | 20 | **No TLS path** | plain HTTP behind a tunnel; docs say "put a proxy in front" | a documented Caddy/nginx recipe with an example config in `deploy/` |
 
@@ -231,7 +241,7 @@ knows how to resume one.
   of approvals and policy changes.
 - **Timing-sensitive tests** — two were de-flaked this session; the class
   remains, so new spawn-heavy tests need explicit timeouts.
-- **Stale `cloudbear-launch` skill** in `~/.pi` targets a different (Portainer)
+- **Stale `laun-launch` skill** in `~/.pi` targets a different (Portainer)
   system that does not exist in this repo.
 
 ---
@@ -264,6 +274,6 @@ branding (talk ACP to `goose serve` instead). See `PLAN.md` for the reasoning.
 | ACP adapter (goose/dots) | missing | P2 |
 | Budgets + concurrency cap | missing | P2 |
 | Key scopes, multi-target | missing | P2 |
-| `cloudbear doctor` | landed + live-proven | P2 |
+| `laun doctor` | landed + live-proven | P2 |
 | Bridge disabled without a token | live: stack all-healthy, Exited (0) | P2 |
 | TLS recipe | partial | P2 |

@@ -1,6 +1,6 @@
 # Development
 
-How to build, test, and run cloudbear locally. Every command below has been run
+How to build, test, and run laun locally. Every command below has been run
 on this checkout; counts and timings are measured, not aspirational.
 
 ## Prerequisites
@@ -20,12 +20,12 @@ bun run build        # tsc -b, also what CI runs
 ## Tests
 
 ```bash
-bun run test         # 284 tests, 15 files, ~45s
+bun run test         # 303 tests, 16 files, ~65s
 ```
 
 **Always use `bun run test`, never bare `bun test`.** Bare `bun test` also picks
-up the compiled copies under `dist/` and runs the suite **twice (568 tests,
-30 files)**. The script scopes the glob to `*/src`.
+up the compiled copies under `dist/` and runs the suite **twice (606 tests,
+32 files)**. The script scopes the glob to `*/src`.
 
 Per package:
 
@@ -33,10 +33,10 @@ Per package:
 | --- | --- | --- | --- |
 | `packages/protocol` | 8 | 1 | types, key format, bearer checks |
 | `packages/policy` | 60 | 4 | OpenShell YAML schema limits, provider secrets, auto-approve scoping |
-| `apps/executor` | 85 | 2 | **~45s** — spawns stub binaries, one test holds a stream open past Bun's 10s idle window; incl. thinking coalescing + usage emission, wedged-slot release |
+| `apps/executor` | 104 | 3 | spawns stub binaries; incl. thinking coalescing + usage emission, wedged-slot release, sandbox runner |
 | `apps/gateway` | 26 | 5 | auth, abort, sessions, SSE; abort always pokes the executor |
 | `apps/telegram-bridge` | 18 | 1 | formatting + allowlist, disabled exit, `/log`, busy-409 reply |
-| `apps/cli` | 87 | 2 | flags, exit codes, ssh argv, recovery ergonomics, `watch`, `doctor`, named targets, thinking render |
+| `apps/laun` | 87 | 2 | flags, exit codes, ssh argv, recovery ergonomics, `watch`, `doctor`, named targets, thinking render |
 
 ### Tests need no network, no model, no pi
 
@@ -49,7 +49,7 @@ be fully verified offline.
 ```bash
 bun test packages/policy/src           # one package
 bun test apps/executor/src/index.test.ts
-bun test apps/cli/src -t "staging"     # by name
+bun test apps/laun/src -t "staging"     # by name
 bun test apps/executor/src -t "" --timeout 60000   # longer budget
 ```
 
@@ -69,10 +69,10 @@ bun test apps/executor/src -t "" --timeout 60000   # longer budget
 ### 1. Make an env file
 
 ```bash
-bun run cli -- setup --no-start
+bun run laun -- setup --no-start
 ```
 
-This writes `.env` with a fresh `GATEWAY_TOKEN` and `CLOUDBEAR_KEY` (it never
+This writes `.env` with a fresh `GATEWAY_TOKEN` and `LAUN_KEY` (it never
 overwrites existing values), and **does not** start Docker. Pass
 `--env-file <path>` to write somewhere else (note the file must be named `.env`
 if you want the next step to pick it up).
@@ -109,23 +109,23 @@ GATEWAY_TOKEN=other-token bun run dev:gateway
 | Service | Required env | Defaults worth knowing |
 | --- | --- | --- |
 | executor | `GATEWAY_TOKEN` | `EXECUTOR_PORT=8081`, `SESSION_DIR=./data/sessions`, `PI_BIN=pi`, `MODEL`, `EXECUTOR_MODE=json\|rpc`, `RUN_RECOVERY_ATTEMPTS=2`, `RUN_RECOVERY_BACKOFF_MS=2000`, `RUN_TIMEOUT_MS=600000` |
-| gateway | `GATEWAY_TOKEN` | `GATEWAY_PORT=8080`, `EXECUTOR_URL=http://localhost:8081`, `DATA_DIR=./data`, `CLOUDBEAR_KEY` (optional — enables agent-key auth) |
+| gateway | `GATEWAY_TOKEN` | `GATEWAY_PORT=8080`, `EXECUTOR_URL=http://localhost:8081`, `DATA_DIR=./data`, `LAUN_KEY` (optional — enables agent-key auth) |
 | bridge | `GATEWAY_TOKEN`, `TELEGRAM_BOT_TOKEN` | `GATEWAY_URL=http://localhost:8080`, `TELEGRAM_ALLOWLIST_IDS` (empty = ignores everyone) |
 
 Everything else has a safe default. The gateway refuses to start without
-`GATEWAY_TOKEN`, and refuses to start if `CLOUDBEAR_KEY` is set but malformed.
+`GATEWAY_TOKEN`, and refuses to start if `LAUN_KEY` is set but malformed.
 
 ### 3. Drive it
 
 ```bash
-bun run cli -- setup --no-start          # once; gives you the agent key
-bun run cli -- agent auth --host 127.0.0.1 --key <cb_...>   # saves ~/.cloudbear/auth.json (0600)
-bun run cli -- agent new "reply with PONG"
-bun run cli -- agent log <id> --follow
-bun run cli -- stop <id>                 # 0 running, 1 not running/unknown
-bun run cli -- continue <id>             # resume a run that died
-bun run cli -- list
-bun run cli -- keys ls                   # needs GATEWAY_TOKEN in the env
+bun run laun -- setup --no-start          # once; gives you the agent key
+bun run laun -- agent auth --host 127.0.0.1 --key <laun_...>   # saves ~/.laun/auth.json (0600)
+bun run laun -- agent new "reply with PONG"
+bun run laun -- agent log <id> --follow
+bun run laun -- stop <id>                 # 0 running, 1 not running/unknown
+bun run laun -- continue <id>             # resume a run that died
+bun run laun -- list
+bun run laun -- keys ls                   # needs GATEWAY_TOKEN in the env
 ```
 
 The browser UI is served by the gateway at `http://127.0.0.1:8080/` — paste the
@@ -156,7 +156,7 @@ Smoke test, no Docker needed:
 ```bash
 GATEWAY_TOKEN=test-token bun run dev:executor &
 GATEWAY_TOKEN=test-token bun run dev:gateway &
-bun run cli -- agent new "Reply with exactly: PONG"   # after auth
+bun run laun -- agent new "Reply with exactly: PONG"   # after auth
 ```
 
 ## Verifying a change end to end
@@ -174,7 +174,7 @@ jj log --no-graph -n 5           # what just landed
 ## Remote / VPS
 
 See `deploy/remote-setup.md` for provisioning a host
-(`cloudbear setup ssh -i <key> user@host`), the SSH-tunnel access pattern, and
+(`laun setup ssh -i <key> user@host`), the SSH-tunnel access pattern, and
 the gotchas from the first real bring-up. `examples/agent-keys.md` covers key
 model and rotation; `examples/models.md` covers pi/model setup.
 
@@ -198,7 +198,7 @@ Follows `gameboy/docs/parallel-work.md`: a lane is a **jj workspace**, never a
 git worktree (a git worktree has no `.jj`, so `jj status` fails inside it).
 
 ```sh
-jj workspace add ../cloudbear-lane-<task>   # sibling of the repo, from a clean tree
+jj workspace add ../laun-lane-<task>   # sibling of the repo, from a clean tree
 ```
 
 - Write the spec to `.pi-subagents/specs/<lane>.md` **before** spawning a worker.
@@ -228,7 +228,7 @@ jj workspace list # finished lanes must be forgotten, then their dir deleted
 | A dev command says `unauthorized` although `.env` exists | The file must be named exactly `.env` in the directory you run from (Bun only auto-loads that name), and a value prefixed on the command line overrides it. |
 | A streaming request dies after ~10s with `curl: (18)` | Bun's `idleTimeout` defaults to 10s. Both servers set `idleTimeout: 0` (`apps/*/src/serve.ts`) — do not remove it. There is a behavioural test that fails if you do. |
 | SSE disconnects immediately | Same cause; the gateway heartbeats every 15s, slower than the 10s default. |
-| `cloudbear list` exits 2 | Usage error (it needs arguments, or the command does not exist — `cloudbear help` lists them). Exit codes: 0 ok, 1 gateway/runtime error, 2 usage. |
+| `laun list` exits 2 | Usage error (it needs arguments, or the command does not exist — `laun help` lists them). Exit codes: 0 ok, 1 gateway/runtime error, 2 usage. |
 | Gateway says `unauthorized` | Wrong token. Services want `GATEWAY_TOKEN`; humans want an agent key. They are different credentials. |
 | `session not running` from `stop` | 409 — it finished or never started. Not an error in the tooling. |
 | `jj status` shows "Working copy changes" with committed work | Normal in jj: the working-copy commit *is* the commit. It is only uncommitted in the git sense. |

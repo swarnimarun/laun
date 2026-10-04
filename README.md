@@ -8,26 +8,36 @@ Telegram / CLI / browser -> gateway -> executor (pi inside OpenShell sandbox) ->
 
 ## Quick start (one command)
 
+Prerequisites: Bun >= 1.2, an SSH key on a Ubuntu VPS with Docker, and (for
+the agent to do anything) `pi` with a configured model. Providers firewall
+port 8080, so every remote command below goes through a tunnel — open it once
+and leave it running:
+
+```bash
+ssh -f -N -L 18080:localhost:8080 -i ~/.ssh/id_ed25519 ubuntu@<vps>
+```
+
 ```bash
 # from a checkout (works before the CLI is on your PATH)
-bun install && bun run laun -- setup ssh -i ~/.ssh/id_ed25519 root@203.0.113.9
+bun install && bun run laun -- setup ssh -i ~/.ssh/id_ed25519 ubuntu@<vps>
 # ...or locally in this checkout
 bun run laun -- setup
 
 # once installed (`bun link apps/laun`), the short form works anywhere
-laun setup ssh -i ~/.ssh/id_ed25519 root@203.0.113.9
+laun setup ssh -i ~/.ssh/id_ed25519 ubuntu@<vps>
 ```
 
-Either way it prints a connection block with a URL and a one-time **agent key**:
+Either way it prints a connection block with a URL and a one-time **agent key**
+(shown once, stored hashed — save it now):
 
 ```
-  URL   http://203.0.113.9:8080
+  URL   http://127.0.0.1:18080
   Key   laun_01234567_XXXX…
-  UI    http://203.0.113.9:8080/   (paste the key)
+  UI    http://127.0.0.1:18080/   (paste the key)
 
-laun agent auth --host 203.0.113.9 --key laun_01234567_XXXX…
+laun agent auth --host 127.0.0.1 --port 18080 --key laun_01234567_XXXX…
 laun agent new "fix the failing tests"
-laun agent log <id> --follow
+laun agent watch <id>   # blocks until done; exit code is the outcome
 ```
 
 See `deploy/remote-setup.md` for flags, prerequisites, and troubleshooting, and
@@ -44,9 +54,17 @@ transcript, new session, follow-up messages, and approve/deny buttons.
 laun agent auth --host <host> --key <laun_...>   # verify + save (0600)
 laun agent new "<goal>" [--model <m>]
 laun agent ls | status <id> | log <id> [--follow] | say <id> "<text>"
+laun agent watch <id> [--timeout 30m]   # block until settled: 0 done, 1 error, 2 timeout
+laun agent stop <id> | continue <id>    # kill a runaway; resume a dead one
 laun agent approve <id> <requestId> | deny <id> <requestId>
+laun doctor                             # self-check: target, key, gateway
+laun target ls | add <name> --host ...  # named hosts, --target <name> anywhere
 laun keys ls | create [--label <l>] | revoke <id>   # needs GATEWAY_TOKEN
 ```
+
+Telegram (when `TELEGRAM_BOT_TOKEN` is set; otherwise the bridge exits 0,
+disabled): `/new`, `/status <id>`, `/log <id> [n]`, `/approve`, `/deny` —
+plain text follows up on your latest session.
 
 ## Quick start (manual, VPS)
 
@@ -84,7 +102,7 @@ lanes, and every gotcha found so far: **[DEVELOPMENT.md](DEVELOPMENT.md)**.
 ```bash
 bun install
 bun run build
-bun run test        # 211 tests / 14 files. Never bare `bun test` (it doubles)
+bun run test        # 303 tests / 16 files. Never bare `bun test` (it doubles)
 ```
 
 Run each service locally (needs `pi` on PATH + `.env`):
@@ -95,11 +113,28 @@ bun run dev:gateway    # :8080
 bun run dev:bridge     # long-polling Telegram
 ```
 
+## Upgrading (cloudbear v0 → laun v1)
+
+v1 is a clean break: `laun_`-prefixed keys, `LAUN_*` env names, `~/.laun/`,
+`/opt/laun` on the box. The old stack keeps running untouched until you cut
+over — then fresh-setup beside it and re-auth once:
+
+```bash
+laun setup ssh -i ~/.ssh/id_ed25519 ubuntu@<vps>   # new key, /opt/laun
+laun agent auth --host 127.0.0.1 --port 18080 --key <new key>
+```
+
+The old `cb_` key dies with the old stack; delete `~/.cloudbear/` after.
+Redeploying later? `setup ssh` rebuilds what is already on the box — rsync
+first (procedure in `deploy/remote-setup.md`, “Redeploying”).
+
 ## Layout
 
 * `packages/protocol` — shared types + validation for gateway/executor/bridge/CLI. Executor interface supports pi now, goose/dots later.
 * `packages/policy` — OpenShell policy templates (restrictive default).
-* `apps/executor` — spawns `pi -p --mode json` per session, streams JSONL events. Wraps with OpenShell when `OPENSHELL_ENABLED=true`.
+* `apps/executor` — one long-lived `pi --mode rpc` child per session (json
+  one-shot fallback), streamed JSONL events, abort/steer, self-healing retry.
+  Runs the child inside an OpenShell sandbox when `OPENSHELL_ENABLED=true`.
 * `apps/gateway` — tiny HTTP API + SSE + agent-key management. Serves the browser UI from `apps/gateway/public`.
 * `apps/telegram-bridge` — grammY long-polling bot, allowlisted user IDs only.
 * `apps/laun` — the `laun` command: local/remote setup, agent auth, and agent/key control.
