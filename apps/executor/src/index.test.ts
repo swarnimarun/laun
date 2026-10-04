@@ -7,6 +7,16 @@ import { loadConfig } from "./config.js";
 import { assertValidPrompt, assertValidSessionId, clampTimeout, resolveWorkdir } from "./paths.js";
 import { buildPiArgs, MAX_TOOL_OUTPUT, parsePiJsonLine, runPiStreaming } from "./pi.js";
 import { buildRpcArgs, RpcManager } from "./rpc.js";
+import {
+  DEFAULT_RECOVERY_ATTEMPTS,
+  DEFAULT_RECOVERY_BACKOFF_MS,
+  RECOVERY_CONTINUATION_PROMPT,
+  recoveryExhaustedMessage,
+  retryingMessage,
+  runWithRecovery,
+  sleepAbortable,
+  type RecoveryAttemptResult,
+} from "./recovery.js";
 import { createHandler } from "./server.js";
 
 describe("executor config", () => {
@@ -323,7 +333,12 @@ describe("POST /run terminal status (stub binaries)", () => {
     const reader = res.body!.getReader();
     await reader.read(); // first event arrives
     await reader.cancel(); // consumer goes away while the agent keeps emitting
-    await new Promise((r) => setTimeout(r, 2500));
+    // Poll for the run to finish rather than sleeping a fixed amount: under load
+    // 2.5s was not always enough, which made this test flaky in CI.
+    const deadline = Date.now() + 20_000;
+    while (handler.busy.size !== 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
     expect(handler.busy.size).toBe(0); // run completed instead of crashing
   });
 
@@ -545,7 +560,7 @@ describe("rpc mode: prompt -> agent_settled (stub child)", () => {
     } finally {
       mgr.close();
     }
-  });
+  }, 30_000);
 
   test("provider error with retry heals to done and surfaces retry status", async () => {
     const dir = mkdtempSync(join(tmpdir(), "cb-rpc-retry-"));
@@ -1208,3 +1223,727 @@ describe("json mode unchanged (regression)", () => {
   });
 });
 
+
+describe("recovery config", () => {
+  test("defaults to 2 attempts and 2000ms backoff", () => {
+    const cfg = loadConfig({ GATEWAY_TOKEN: "s" } as NodeJS.ProcessEnv);
+    expect(cfg.recoveryAttempts).toBe(2);
+    expect(cfg.recoveryBackoffMs).toBe(2000);
+    expect(DEFAULT_RECOVERY_ATTEMPTS).toBe(2);
+    expect(DEFAULT_RECOVERY_BACKOFF_MS).toBe(2000);
+  });
+
+  test("parses custom recovery values, including 0 (disabled)", () => {
+    const cfg = loadConfig({ GATEWAY_TOKEN: "s", RUN_RECOVERY_ATTEMPTS: "0", RUN_RECOVERY_BACKOFF_MS: "0" } as NodeJS.ProcessEnv);
+    expect(cfg.recoveryAttempts).toBe(0);
+    expect(cfg.recoveryBackoffMs).toBe(0);
+    const cfg2 = loadConfig({
+      GATEWAY_TOKEN: "s",
+      RUN_RECOVERY_ATTEMPTS: "10",
+      RUN_RECOVERY_BACKOFF_MS: "60000",
+    } as NodeJS.ProcessEnv);
+    expect(cfg2.recoveryAttempts).toBe(10);
+    expect(cfg2.recoveryBackoffMs).toBe(60000);
+  });
+
+  test("rejects out-of-range recovery values", () => {
+    for (const v of ["-1", "11", "nope", "1.5"]) {
+      expect(() => loadConfig({ GATEWAY_TOKEN: "s", RUN_RECOVERY_ATTEMPTS: v } as NodeJS.ProcessEnv)).toThrow(
+        "RUN_RECOVERY_ATTEMPTS",
+      );
+    }
+    for (const v of ["-1", "60001", "nope"]) {
+      expect(() => loadConfig({ GATEWAY_TOKEN: "s", RUN_RECOVERY_BACKOFF_MS: v } as NodeJS.ProcessEnv)).toThrow(
+        "RUN_RECOVERY_BACKOFF_MS",
+      );
+    }
+  });
+});
+
+describe("runWithRecovery (unit)", () => {
+  const okNext =
+    (prompts: string[], script: RecoveryAttemptResult[]): ((prompt: string, timeoutMs: number) => Promise<RecoveryAttemptResult>) =>
+    async (prompt) => {
+      prompts.push(prompt);
+      return script[Math.min(prompts.length - 1, script.length - 1)]!;
+    };
+  const fail = (msg = "boom"): RecoveryAttemptResult => ({ sawError: true, sawDone: false, aborted: false, firstError: msg });
+  const done: RecoveryAttemptResult = { sawError: false, sawDone: true, aborted: false, firstError: null };
+  const loopOpts = (over: Partial<Parameters<typeof runWithRecovery>[0]> = {}) => ({
+    maxRetries: 2,
+    backoffMs: 10,
+    timeoutMs: 5000,
+    deadline: Date.now() + 5000,
+    initialPrompt: "original",
+    onRetrying: () => {},
+    attempt: okNext([], [done]),
+    ...over,
+  });
+
+  test("a clean first attempt never retries", async () => {
+    const prompts: string[] = [];
+    let retries = 0;
+    const r = await runWithRecovery(loopOpts({ attempt: okNext(prompts, [done]), onRetrying: () => retries++ }));
+    expect(r.totalRuns).toBe(1);
+    expect(retries).toBe(0);
+    expect(prompts).toEqual(["original"]);
+    expect(r.sawDone).toBe(true);
+  });
+
+  test("an error-only run retries once with the continuation prompt", async () => {
+    const prompts: string[] = [];
+    const seen: Array<[number, number, string]> = [];
+    const r = await runWithRecovery(
+      loopOpts({
+        attempt: okNext(prompts, [fail("socket closed"), done]),
+        onRetrying: (i, n, err) => seen.push([i, n, err]),
+      }),
+    );
+    expect(r.totalRuns).toBe(2);
+    expect(r.sawDone).toBe(true);
+    // Continuation, not repetition: the retry prompt is the exported
+    // constant, never the original prompt verbatim.
+    expect(prompts).toEqual(["original", RECOVERY_CONTINUATION_PROMPT]);
+    expect(RECOVERY_CONTINUATION_PROMPT).not.toContain("original");
+    expect(seen).toEqual([[1, 2, "socket closed"]]);
+  });
+
+  test("a settled-then-errored run is finished, never recovered", async () => {
+    const prompts: string[] = [];
+    let retries = 0;
+    const r = await runWithRecovery(
+      loopOpts({
+        attempt: okNext(prompts, [{ sawError: true, sawDone: true, aborted: false, firstError: "late" }]),
+        onRetrying: () => retries++,
+      }),
+    );
+    expect(r.totalRuns).toBe(1);
+    expect(retries).toBe(0);
+  });
+
+  test("an aborted run is never recovered", async () => {
+    const prompts: string[] = [];
+    let retries = 0;
+    const r = await runWithRecovery(
+      loopOpts({
+        attempt: okNext(prompts, [{ sawError: true, sawDone: false, aborted: true, firstError: "x" }]),
+        onRetrying: () => retries++,
+      }),
+    );
+    expect(r.totalRuns).toBe(1);
+    expect(retries).toBe(0);
+    expect(r.aborted).toBe(true);
+  });
+
+  test("retries stop at the bound: 2 retries means at most 3 runs", async () => {
+    const prompts: string[] = [];
+    const seen: number[] = [];
+    const r = await runWithRecovery(
+      loopOpts({ maxRetries: 2, attempt: okNext(prompts, [fail()]), onRetrying: (i) => seen.push(i) }),
+    );
+    expect(r.totalRuns).toBe(3);
+    expect(seen).toEqual([1, 2]);
+    expect(r.sawError).toBe(true);
+    expect(r.sawDone).toBe(false);
+  });
+
+  test("attempts=0 disables recovery entirely", async () => {
+    const prompts: string[] = [];
+    let retries = 0;
+    const r = await runWithRecovery(loopOpts({ maxRetries: 0, attempt: okNext(prompts, [fail()]), onRetrying: () => retries++ }));
+    expect(r.totalRuns).toBe(1);
+    expect(retries).toBe(0);
+  });
+
+  test("the shared deadline bounds the whole sequence, not each attempt", async () => {
+    const budgets: number[] = [];
+    const start = Date.now();
+    const r = await runWithRecovery(
+      loopOpts({
+        maxRetries: 10,
+        backoffMs: 150,
+        timeoutMs: 400,
+        deadline: start + 400,
+        attempt: async (_prompt, budget) => {
+          budgets.push(budget);
+          return fail();
+        },
+      }),
+    );
+    const elapsed = Date.now() - start;
+    // Retries happened (more than one run) but the 10-retry budget was cut
+    // short by the 400ms wall-clock deadline.
+    expect(r.totalRuns).toBeGreaterThan(1);
+    expect(r.totalRuns).toBeLessThan(11);
+    expect(elapsed).toBeLessThan(2000);
+    // Each attempt gets the *remaining* budget, never a fresh full timeout.
+    expect(budgets[0]).toBe(400);
+    expect(budgets[1]!).toBeLessThan(budgets[0]!);
+  });
+
+  test("an abort during backoff stops the loop with no further attempt", async () => {
+    const ctl = new AbortController();
+    const prompts: string[] = [];
+    const r = await runWithRecovery(
+      loopOpts({
+        maxRetries: 5,
+        backoffMs: 5000,
+        signal: ctl.signal,
+        attempt: okNext(prompts, [fail()]),
+        // Abort the moment the loop parks in backoff: no wall-clock wait.
+        onRetrying: () => ctl.abort(),
+      }),
+    );
+    expect(r.totalRuns).toBe(1);
+    expect(prompts).toHaveLength(1);
+    expect(r.aborted).toBe(true);
+  });
+
+  test("recovery message contracts", () => {
+    expect(retryingMessage(1, 2, "socket closed")).toBe("retrying (1/2): socket closed");
+    expect(retryingMessage(1, 2, "x").startsWith("retrying (")).toBe(true);
+    expect(recoveryExhaustedMessage(3, "socket closed")).toContain("3 attempts");
+    expect(recoveryExhaustedMessage(3, "socket closed")).toContain("socket closed");
+    // The continuation prompt names the cause and forbids redoing work.
+    expect(RECOVERY_CONTINUATION_PROMPT).toContain("transport error");
+    expect(RECOVERY_CONTINUATION_PROMPT).toContain("without redoing completed work");
+  });
+
+  test("sleepAbortable wakes early on abort", async () => {
+    const pre = new AbortController();
+    pre.abort();
+    const t0 = Date.now();
+    await sleepAbortable(5000, pre.signal);
+    expect(Date.now() - t0).toBeLessThan(500);
+    const mid = new AbortController();
+    setTimeout(() => mid.abort(), 50);
+    const t1 = Date.now();
+    await sleepAbortable(5000, mid.signal);
+    expect(Date.now() - t1).toBeLessThan(2000);
+  });
+});
+
+describe("json recovery (stub pi binaries)", () => {
+  function jsonRecoveryHandler(dir: string, piBin: string, extra: Record<string, unknown> = {}) {
+    return createHandler({
+      port: 0,
+      gatewayToken: "t",
+      sessionDir: dir,
+      piBin,
+      defaultModel: "m",
+      openshellEnabled: false,
+      openshellPrefix: [],
+      defaultTimeoutMs: 30_000,
+      recoveryAttempts: 2,
+      recoveryBackoffMs: 50,
+      ...extra,
+    } as Parameters<typeof createHandler>[0]);
+  }
+
+  function writeArgvLog(dir: string): void {
+    writeFileSync(join(dir, "argv.log"), "");
+    writeFileSync(join(dir, "pids.log"), "");
+    process.env["CB_ARGV"] = join(dir, "argv.log");
+    process.env["CB_PIDS"] = join(dir, "pids.log");
+  }
+
+  function clearArgvLog(): void {
+    delete process.env["CB_ARGV"];
+    delete process.env["CB_PIDS"];
+  }
+
+  function argvLines(dir: string): string[] {
+    return readFileSync(join(dir, "argv.log"), "utf8").trim().split("\n").filter(Boolean);
+  }
+
+  function pidLines(dir: string): number[] {
+    return readFileSync(join(dir, "pids.log"), "utf8").trim().split("\n").filter(Boolean).map(Number);
+  }
+
+  function isDead(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
+  /** Fails the first spawn (transport error), succeeds on the continuation prompt. */
+  function writeFailoverStub(dir: string, name: string): string {
+    const p = join(dir, name);
+    writeFileSync(
+      p,
+      "#!/bin/sh\n" +
+        'echo "$*" >> "${CB_ARGV:-/dev/null}"\n' +
+        'echo "$$" >> "${CB_PIDS:-/dev/null}"\n' +
+        'case "$*" in\n' +
+        "  *transport*)\n" +
+        '    echo \'{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"resumed"}}\';\n' +
+        '    echo \'{"type":"agent_settled"}\';\n' +
+        "    exit 0;;\n" +
+        "  *)\n" +
+        '    echo \'{"type":"message_update","assistantMessageEvent":{"type":"error","reason":"socket","error":"The socket connection was closed unexpectedly"}}\';\n' +
+        "    exit 1;;\n" +
+        "esac\n",
+    );
+    chmodSync(p, 0o755);
+    return p;
+  }
+
+  function runJson(handler: ReturnType<typeof createHandler>, sessionId: string, prompt: string): Promise<Response> {
+    return handler.handleRun(
+      new Request("http://x/run", {
+        method: "POST",
+        headers: { authorization: "Bearer t", "content-type": "application/json" },
+        body: JSON.stringify({ sessionId, prompt }),
+      }),
+    );
+  }
+
+  function msg(e: AgentEvent): string {
+    return (e as { message?: string }).message ?? "";
+  }
+
+  /** Read stream chunks until `needle` appears (Bun yields string chunks here). */
+  async function readStreamUntil(reader: ReadableStreamDefaultReader<any>, needle: string): Promise<string> {
+    const dec = new TextDecoder();
+    let text = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (typeof value === "string") text += value;
+      else if (value) text += dec.decode(value as Uint8Array, { stream: true });
+      if (done || text.includes(needle)) return text;
+    }
+  }
+
+  async function readStreamRest(reader: ReadableStreamDefaultReader<any>, first: string): Promise<string> {
+    const dec = new TextDecoder();
+    let text = first;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (typeof value === "string") text += value;
+      else if (value) text += dec.decode(value as Uint8Array, { stream: true });
+      if (done) return text;
+    }
+  }
+
+  test("a transport error recovers with the continuation prompt and ends done", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-rec-json-"));
+    writeArgvLog(dir);
+    const handler = jsonRecoveryHandler(dir, writeFailoverStub(dir, "pi.sh"));
+    try {
+      const events = await readNdjson(await runJson(handler, "srec", "do the thing ALPHA"));
+      // Terminal status is done, and the resumed output arrived.
+      expect(events.at(-1)).toMatchObject({ type: "status", status: "done" });
+      expect(events.some((e) => e.type === "text" && (e as { delta: string }).delta === "resumed")).toBe(true);
+      // The original transport error is visible in the stream.
+      expect(events.some((e) => e.type === "error" && msg(e).includes("socket connection was closed"))).toBe(true);
+      // The retrying status sits between the error and the terminal done, in order.
+      const idxErr = events.findIndex((e) => e.type === "error");
+      const idxRetry = events.findIndex((e) => e.type === "status" && msg(e).startsWith("retrying ("));
+      const idxDone = events.findIndex((e) => e.type === "status" && e.status === "done");
+      expect(idxErr).toBeGreaterThanOrEqual(0);
+      expect(idxRetry).toBeGreaterThan(idxErr);
+      expect(idxDone).toBeGreaterThan(idxRetry);
+      expect(msg(events[idxRetry]!)).toContain("socket connection was closed");
+      // Two spawns with the same --session-id; the retry continues instead
+      // of replaying the original prompt verbatim.
+      const argv = argvLines(dir);
+      expect(argv).toHaveLength(2);
+      for (const line of argv) expect(line).toContain("--session-id srec");
+      expect(argv[0]).toContain("ALPHA");
+      expect(argv[1]).not.toContain("ALPHA");
+      expect(argv[1]).toContain("transport");
+      expect(handler.busy.size).toBe(0);
+    } finally {
+      clearArgvLog();
+      handler.close();
+    }
+  });
+
+  test("an always-failing run stops after the configured attempts and names the count", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-rec-json-fail-"));
+    writeArgvLog(dir);
+    const stub = join(dir, "fail.sh");
+    writeFileSync(
+      stub,
+      "#!/bin/sh\n" +
+        'echo "$*" >> "${CB_ARGV:-/dev/null}"\n' +
+        'echo "$$" >> "${CB_PIDS:-/dev/null}"\n' +
+        'echo \'{"type":"error","message":"always broken"}\';\n' +
+        "exit 1\n",
+    );
+    chmodSync(stub, 0o755);
+    // A long backoff proves the wait is honoured: elapsed must cover both gaps.
+    const handler = jsonRecoveryHandler(dir, stub, { recoveryBackoffMs: 400 });
+    try {
+      const t0 = Date.now();
+      const events = await readNdjson(await runJson(handler, "sfail", "hi"));
+      const elapsed = Date.now() - t0;
+      // Exactly 3 spawns for 2 configured retries — never more.
+      expect(argvLines(dir)).toHaveLength(3);
+      const retrying = events.filter((e) => e.type === "status" && msg(e).startsWith("retrying ("));
+      expect(retrying).toHaveLength(2);
+      expect(msg(retrying[0]!)).toBe("retrying (1/2): always broken");
+      expect(msg(retrying[1]!)).toBe("retrying (2/2): always broken");
+      // Terminal error names the attempt count plus the original error.
+      expect(events.at(-1)).toMatchObject({ type: "status", status: "error" });
+      expect(msg(events.at(-1)!)).toContain("3 attempts");
+      expect(msg(events.at(-1)!)).toContain("always broken");
+      expect(events.some((e) => e.type === "status" && e.status === "done")).toBe(false);
+      // Backoff between attempts was honoured (two ~400ms gaps minimum).
+      // Scheduling lag can only stretch this, never shrink it.
+      expect(elapsed).toBeGreaterThanOrEqual(750);
+      // No orphaned children: every attempt's child exited and was reaped.
+      const pids = pidLines(dir);
+      expect(pids).toHaveLength(3);
+      for (const pid of pids) expect(isDead(pid)).toBe(true);
+      expect(handler.busy.size).toBe(0);
+    } finally {
+      clearArgvLog();
+      handler.close();
+    }
+  });
+
+  test("attempts=0 disables recovery: single run, legacy terminal", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-rec-json-off-"));
+    writeArgvLog(dir);
+    const stub = join(dir, "fail.sh");
+    writeFileSync(stub, "#!/bin/sh\n" + 'echo "$*" >> "${CB_ARGV:-/dev/null}"\n' + "exit 1\n");
+    chmodSync(stub, 0o755);
+    const handler = jsonRecoveryHandler(dir, stub, { recoveryAttempts: 0 });
+    try {
+      const events = await readNdjson(await runJson(handler, "s0", "hi"));
+      expect(argvLines(dir)).toHaveLength(1);
+      expect(events.some((e) => e.type === "status" && msg(e).startsWith("retrying ("))).toBe(false);
+      // Byte-identical terminal to the pre-recovery behaviour.
+      expect(events.at(-1)).toEqual({ type: "status", sessionId: "s0", status: "error", message: "run exited 1" });
+    } finally {
+      clearArgvLog();
+      handler.close();
+    }
+  });
+
+  test("a run that settles then errors is finished, not recovered", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-rec-json-settled-"));
+    writeArgvLog(dir);
+    const stub = join(dir, "late.sh");
+    writeFileSync(
+      stub,
+      "#!/bin/sh\n" +
+        'echo "$*" >> "${CB_ARGV:-/dev/null}"\n' +
+        'echo \'{"type":"agent_settled"}\';\n' +
+        'echo \'{"type":"error","message":"late failure"}\';\n' +
+        "exit 0\n",
+    );
+    chmodSync(stub, 0o755);
+    const handler = jsonRecoveryHandler(dir, stub);
+    try {
+      const events = await readNdjson(await runJson(handler, "sset", "hi"));
+      // Not recovered: one spawn, no retrying, and the settle stands.
+      expect(argvLines(dir)).toHaveLength(1);
+      expect(events.some((e) => e.type === "status" && msg(e).startsWith("retrying ("))).toBe(false);
+      expect(events.some((e) => e.type === "done")).toBe(true);
+      // Terminal keeps the inherited semantics: the late error event poisons
+      // it even though the run settled (pre-recovery behaviour, unchanged).
+      expect(events.at(-1)).toEqual({ type: "status", sessionId: "sset", status: "error", message: "run exited 0" });
+    } finally {
+      clearArgvLog();
+      handler.close();
+    }
+  });
+
+  test("operator abort during backoff ends the run with no further attempt", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-rec-json-abort-"));
+    writeArgvLog(dir);
+    const stub = join(dir, "fail.sh");
+    writeFileSync(
+      stub,
+      "#!/bin/sh\n" +
+        'echo "$*" >> "${CB_ARGV:-/dev/null}"\n' +
+        'echo \'{"type":"error","message":"first broken"}\';\n' +
+        "exit 1\n",
+    );
+    chmodSync(stub, 0o755);
+    // Long backoff: the abort must land inside it, cutting it short.
+    const handler = jsonRecoveryHandler(dir, stub, { recoveryBackoffMs: 5000 });
+    try {
+      const res = await runJson(handler, "sabortbo", "hi");
+      expect(res.status).toBe(200);
+      const reader = res.body!.getReader();
+      // Deterministic: the retrying status is only emitted once the loop is
+      // parked in backoff, so the abort below always lands mid-backoff.
+      const first = await readStreamUntil(reader, "retrying (");
+      expect(first).toContain("retrying (");
+      const abortRes = await handler.handleAbort(
+        new Request("http://x/abort", {
+          method: "POST",
+          headers: { authorization: "Bearer t", "content-type": "application/json" },
+          body: JSON.stringify({ sessionId: "sabortbo" }),
+        }),
+      );
+      expect(abortRes.status).toBe(200);
+      const text = await readStreamRest(reader, first);
+      const events = text.trim().split("\n").map((l) => JSON.parse(l) as AgentEvent);
+      expect(events.some((e) => e.type === "status" && msg(e) === "aborted by user")).toBe(true);
+      expect(events.some((e) => e.type === "status" && e.status === "done")).toBe(false);
+      expect(events.at(-1)).toMatchObject({ type: "status", status: "error" });
+      // The stream closed after the loop exited, so this count is final: no
+      // second attempt ever started, and the continuation never ran.
+      expect(argvLines(dir)).toHaveLength(1);
+      expect(argvLines(dir)[0]).not.toContain("transport");
+      expect(handler.busy.size).toBe(0);
+    } finally {
+      clearArgvLog();
+      handler.close();
+    }
+  });
+});
+
+describe("rpc recovery (stub rpc child)", () => {
+  function rpcRecoveryHandler(dir: string, piBin: string, extra: Record<string, unknown> = {}) {
+    return rpcHandler(dir, piBin, { recoveryAttempts: 2, recoveryBackoffMs: 50, ...extra });
+  }
+
+  function msg(e: AgentEvent): string {
+    return (e as { message?: string }).message ?? "";
+  }
+
+  /** Errors on the original prompt (then dies), succeeds on the continuation. */
+  function writeFailoverStub(dir: string): string {
+    return writeRpcStub(
+      dir,
+      "rpc.sh",
+      "#!/bin/sh\n" +
+        'LOG="${RPC_LOG:-/dev/null}"\n' +
+        'echo "spawn $$" >> "$LOG"\n' +
+        'while IFS= read -r line; do\n' +
+        '  echo "$line" >> "$LOG"\n' +
+        '  case "$line" in\n' +
+        "    *set_auto_retry*) ;;\n" +
+        '    *get_state*) echo \'{"type":"state","isStreaming":false}\' ;;\n' +
+        "    *transport*)\n" +
+        '      echo \'{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"resumed"}}\';\n' +
+        '      echo \'{"type":"agent_settled"}\';;\n' +
+        "    *prompt*)\n" +
+        '      echo \'{"type":"message_update","assistantMessageEvent":{"type":"error","reason":"socket","error":"The socket connection was closed unexpectedly"}}\';\n' +
+        "      exit 1;;\n" +
+        "    *abort*) echo '{\"type\":\"agent_settled\"}' ;;\n" +
+        "  esac\n" +
+        "done\n",
+    );
+  }
+
+  function writeAlwaysFailStub(dir: string): string {
+    return writeRpcStub(
+      dir,
+      "rpc.sh",
+      "#!/bin/sh\n" +
+        'LOG="${RPC_LOG:-/dev/null}"\n' +
+        'echo "spawn $$" >> "$LOG"\n' +
+        'while IFS= read -r line; do\n' +
+        '  echo "$line" >> "$LOG"\n' +
+        '  case "$line" in\n' +
+        "    *set_auto_retry*) ;;\n" +
+        '    *get_state*) echo \'{"type":"state","isStreaming":false}\' ;;\n' +
+        '    *prompt*)\n' +
+        '      echo \'{"type":"error","message":"rpc always broken"}\';\n' +
+        "      exit 1;;\n" +
+        "  esac\n" +
+        "done\n",
+    );
+  }
+
+  function runRpc(handler: ReturnType<typeof createHandler>, sessionId: string, prompt: string): Promise<Response> {
+    return handler.handleRun(
+      new Request("http://x/run", {
+        method: "POST",
+        headers: { authorization: "Bearer t", "content-type": "application/json" },
+        body: JSON.stringify({ sessionId, prompt }),
+      }),
+    );
+  }
+
+  function logLines(dir: string): string[] {
+    return readFileSync(join(dir, "cmds.log"), "utf8").split("\n").filter(Boolean);
+  }
+
+  test("a transport error re-issues the continuation prompt and ends done", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-rec-rpc-"));
+    const log = join(dir, "cmds.log");
+    writeFileSync(log, "");
+    const handler = rpcRecoveryHandler(dir, writeFailoverStub(dir));
+    process.env["RPC_LOG"] = log;
+    try {
+      const res = await runRpc(handler, "srec", "do the thing ALPHA");
+      expect(res.status).toBe(200);
+      const events = await readNdjson(res);
+      expect(events.at(-1)).toMatchObject({ type: "status", status: "done" });
+      expect(events.some((e) => e.type === "text" && (e as { delta: string }).delta === "resumed")).toBe(true);
+      const idxErr = events.findIndex((e) => e.type === "error");
+      const idxRetry = events.findIndex((e) => e.type === "status" && msg(e).startsWith("retrying ("));
+      const idxDone = events.findIndex((e) => e.type === "status" && e.status === "done");
+      expect(idxErr).toBeGreaterThanOrEqual(0);
+      expect(idxRetry).toBeGreaterThan(idxErr);
+      expect(idxDone).toBeGreaterThan(idxRetry);
+      // The prompt went through the rpc channel: original once, the
+      // exported continuation prompt exactly once — never replayed verbatim.
+      const lines = logLines(dir);
+      const prompts = lines.filter((l) => l.includes('"type":"prompt"'));
+      expect(prompts).toHaveLength(2);
+      expect(prompts[0]).toContain("ALPHA");
+      expect(prompts[0]).not.toContain("transport");
+      const continuations = readFileSync(log, "utf8").split(RECOVERY_CONTINUATION_PROMPT).length - 1;
+      expect(continuations).toBe(1);
+      // The dead child was replaced, not leaked: exactly two spawns, and the
+      // first pid is gone while the run itself completed.
+      const spawns = lines.filter((l) => l.startsWith("spawn "));
+      expect(spawns).toHaveLength(2);
+      expect(handler.busy.size).toBe(0);
+    } finally {
+      delete process.env["RPC_LOG"];
+      handler.close();
+    }
+  });
+
+  test("an always-failing rpc run stops at the bound and names the count", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-rec-rpc-fail-"));
+    const log = join(dir, "cmds.log");
+    writeFileSync(log, "");
+    const handler = rpcRecoveryHandler(dir, writeAlwaysFailStub(dir), { recoveryAttempts: 1, recoveryBackoffMs: 50 });
+    process.env["RPC_LOG"] = log;
+    try {
+      const events = await readNdjson(await runRpc(handler, "sfail", "hi"));
+      // Exactly 2 spawns for 1 configured retry — never more.
+      const lines = logLines(dir);
+      expect(lines.filter((l) => l.startsWith("spawn "))).toHaveLength(2);
+      expect(lines.filter((l) => l.includes('"type":"prompt"'))).toHaveLength(2);
+      const retrying = events.filter((e) => e.type === "status" && msg(e).startsWith("retrying ("));
+      expect(retrying).toHaveLength(1);
+      expect(msg(retrying[0]!)).toBe("retrying (1/1): rpc always broken");
+      expect(events.at(-1)).toMatchObject({ type: "status", status: "error" });
+      expect(msg(events.at(-1)!)).toContain("2 attempts");
+      expect(msg(events.at(-1)!)).toContain("rpc always broken");
+      expect(events.some((e) => e.type === "status" && e.status === "done")).toBe(false);
+      // No orphaned children: both generations exited; close() reaps the idle one.
+      const pids = lines.filter((l) => l.startsWith("spawn ")).map((l) => Number(l.split(" ")[1]));
+      expect(pids).toHaveLength(2);
+      handler.close();
+      await pollFor(
+        () => pids.every((pid) => { try { process.kill(pid, 0); return false; } catch { return true; } }),
+        "rpc recovery children reaped",
+      );
+      expect(handler.busy.size).toBe(0);
+    } finally {
+      delete process.env["RPC_LOG"];
+      handler.close();
+    }
+  });
+
+  test("attempts=0 disables rpc recovery: single prompt, legacy terminal", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-rec-rpc-off-"));
+    const log = join(dir, "cmds.log");
+    writeFileSync(log, "");
+    const handler = rpcRecoveryHandler(dir, writeAlwaysFailStub(dir), { recoveryAttempts: 0 });
+    process.env["RPC_LOG"] = log;
+    try {
+      const events = await readNdjson(await runRpc(handler, "s0", "hi"));
+      const lines = logLines(dir);
+      expect(lines.filter((l) => l.includes('"type":"prompt"'))).toHaveLength(1);
+      expect(events.some((e) => e.type === "status" && msg(e).startsWith("retrying ("))).toBe(false);
+      // Byte-identical terminal to the pre-recovery behaviour.
+      expect(events.at(-1)).toEqual({ type: "status", sessionId: "s0", status: "error", message: "run failed" });
+    } finally {
+      delete process.env["RPC_LOG"];
+      handler.close();
+    }
+  });
+
+  test("an rpc run that settles then errors is finished, not recovered", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-rec-rpc-settled-"));
+    const log = join(dir, "cmds.log");
+    writeFileSync(log, "");
+    const stub = writeRpcStub(
+      dir,
+      "rpc.sh",
+      "#!/bin/sh\n" +
+        'LOG="${RPC_LOG:-/dev/null}"\n' +
+        'echo "spawn $$" >> "$LOG"\n' +
+        'while IFS= read -r line; do\n' +
+        '  echo "$line" >> "$LOG"\n' +
+        '  case "$line" in\n' +
+        "    *set_auto_retry*) ;;\n" +
+        '    *get_state*) echo \'{"type":"state","isStreaming":false}\' ;;\n' +
+        '    *prompt*)\n' +
+        '      echo \'{"type":"agent_settled"}\';\n' +
+        '      echo \'{"type":"error","message":"late failure"}\';;\n' +
+        "  esac\n" +
+        "done\n",
+    );
+    const handler = rpcRecoveryHandler(dir, stub);
+    process.env["RPC_LOG"] = log;
+    try {
+      const events = await readNdjson(await runRpc(handler, "sset", "hi"));
+      const lines = logLines(dir);
+      expect(lines.filter((l) => l.includes('"type":"prompt"'))).toHaveLength(1);
+      expect(events.some((e) => e.type === "status" && msg(e).startsWith("retrying ("))).toBe(false);
+      expect(events.at(-1)).toMatchObject({ type: "status", status: "done" });
+    } finally {
+      delete process.env["RPC_LOG"];
+      handler.close();
+    }
+  });
+
+  test("operator abort during rpc backoff ends the run with no further prompt", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-rec-rpc-abort-"));
+    const log = join(dir, "cmds.log");
+    writeFileSync(log, "");
+    const handler = rpcRecoveryHandler(dir, writeAlwaysFailStub(dir), { recoveryBackoffMs: 5000 });
+    process.env["RPC_LOG"] = log;
+    try {
+      const res = await runRpc(handler, "sabortbo", "hi");
+      expect(res.status).toBe(200);
+      const reader = res.body!.getReader();
+      const dec = new TextDecoder();
+      const append = (text: string, value: unknown): string =>
+        typeof value === "string" ? text + value : value ? text + dec.decode(value as Uint8Array, { stream: true }) : text;
+      let text = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        text = append(text, value);
+        if (done || text.includes("retrying (")) break;
+      }
+      // The retrying status is only emitted once the loop is parked in
+      // backoff, so the abort below always lands mid-backoff.
+      expect(text).toContain("retrying (");
+      const abortRes = await handler.handleAbort(
+        new Request("http://x/abort", {
+          method: "POST",
+          headers: { authorization: "Bearer t", "content-type": "application/json" },
+          body: JSON.stringify({ sessionId: "sabortbo" }),
+        }),
+      );
+      expect(abortRes.status).toBe(200);
+      for (;;) {
+        const { done, value } = await reader.read();
+        text = append(text, value);
+        if (done) break;
+      }
+      const events = text.trim().split("\n").map((l) => JSON.parse(l) as AgentEvent);
+      expect(events.some((e) => e.type === "status" && msg(e) === "aborted by user")).toBe(true);
+      expect(events.some((e) => e.type === "status" && e.status === "done")).toBe(false);
+      expect(events.at(-1)).toMatchObject({ type: "status", status: "error" });
+      // The stream closed after the loop exited, so these counts are final:
+      // the continuation was never re-issued and no child was spawned for it.
+      const lines = logLines(dir);
+      expect(lines.filter((l) => l.startsWith("spawn "))).toHaveLength(1);
+      expect(lines.filter((l) => l.includes('"type":"prompt"'))).toHaveLength(1);
+      expect(readFileSync(log, "utf8").split(RECOVERY_CONTINUATION_PROMPT).length - 1).toBe(0);
+      expect(handler.busy.size).toBe(0);
+    } finally {
+      delete process.env["RPC_LOG"];
+      handler.close();
+    }
+  });
+});
