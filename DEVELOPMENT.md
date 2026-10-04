@@ -20,23 +20,23 @@ bun run build        # tsc -b, also what CI runs
 ## Tests
 
 ```bash
-bun run test         # 211 tests, 14 files, ~36s
+bun run test         # 280 tests, 15 files, ~40s
 ```
 
 **Always use `bun run test`, never bare `bun test`.** Bare `bun test` also picks
-up the compiled copies under `dist/` and runs the suite **twice (422 tests,
-28 files, ~72s)**. The script scopes the glob to `*/src`.
+up the compiled copies under `dist/` and runs the suite **twice (560 tests,
+30 files)**. The script scopes the glob to `*/src`.
 
 Per package:
 
 | Package | Tests | Files | Notes |
 | --- | --- | --- | --- |
 | `packages/protocol` | 8 | 1 | types, key format, bearer checks |
-| `packages/policy` | 54 | 3 | OpenShell YAML schema limits, provider secrets |
-| `apps/executor` | 68 | 2 | **~42s** — spawns stub binaries, one test holds a stream open past Bun's 10s idle window |
-| `apps/gateway` | 25 | 5 | auth, abort, sessions, SSE |
-| `apps/telegram-bridge` | 5 | 1 | formatting + allowlist |
-| `apps/cli` | 51 | 2 | flags, exit codes, ssh argv, recovery ergonomics |
+| `packages/policy` | 60 | 4 | OpenShell YAML schema limits, provider secrets, auto-approve scoping |
+| `apps/executor` | 81 | 2 | **~42s** — spawns stub binaries, one test holds a stream open past Bun's 10s idle window; incl. thinking coalescing + usage emission |
+| `apps/gateway` | 26 | 5 | auth, abort, sessions, SSE; abort always pokes the executor |
+| `apps/telegram-bridge` | 18 | 1 | formatting + allowlist, disabled exit, `/log`, busy-409 reply |
+| `apps/cli` | 87 | 2 | flags, exit codes, ssh argv, recovery ergonomics, `watch`, `doctor`, named targets, thinking render |
 
 ### Tests need no network, no model, no pi
 

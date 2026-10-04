@@ -94,6 +94,17 @@ approved set is queryable (what was granted, when), and a filesystem/process
 proposal is still *held* for review rather than silently granted. Prove it with
 a probe that needs egress, not by asserting the flag was set.
 
+> Landed 2026-10-04 (code-complete, live proof pending redeploy):
+> `--approval-mode auto` is set at sandbox creation with runtime sniffing
+> (degrades to `unsupported` + warn), network-egress auto-approve is scoped
+> script-side, grants are audited via `OS_GRANTED`, the raw key is
+> byte-compared absent inside the sandbox, and fs/process probes stay held.
+> **Verified live 2026-10-04:** `--approval-mode` exists in
+> `openshell sandbox create --help` (manual default, agent-authored proposals)
+> and `openshell rule get [NAME]` exists — the script's sniffing targets are
+> real. Full provider provisioning still needs a real `MODEL_API_KEY` on the
+> box, which is a human step, not a lane step.
+
 ### 4. Approvals are acknowledge-only *(stub)*
 
 `POST /sessions/:id/approvals` records a human decision and broadcasts it.
@@ -126,6 +137,13 @@ gateway's 2000-event ring cannot be flooded by it — thinking deltas must be
 **coalesced** (batched, not one event per token), covered by a test proving a
 long reasoning block does not evict the surrounding `done`/`error` events.
 
+> Landed 2026-10-04 (code-complete, live proof pending redeploy): the executor
+> emits coalesced thinking (300-char chunks, flushed at turn end/abort/timeout;
+> 10k chars → ~33 events, covered by flood + round-trip tests), and the CLI
+> (`💭` prefix, coalesced transcript, `--json` passthrough) and the bridge
+> render it. Still open: gateway forwarding of the new event kinds through the
+> ring + browser UI render — integrator Phase-2 work.
+
 ### 6. No completion notification *(missing)*
 
 You must poll or hold `--follow`. There is no way to say "tell me when this
@@ -134,6 +152,10 @@ finishes".
 **Done when:** `cloudbear agent watch <id>` (or an equivalent) exits when the
 run settles and returns its status code from the run's outcome — usable by a
 cloud agent that wants to block on a job.
+
+> Landed + live-proven 2026-10-04: `agent watch <id> [--poll-ms] [--timeout]`
+> exits 0/1/2 (done/error/timeout-or-usage), proven against the VPS over the
+> tunnel (`watch 7031451e` → `✅ done`, exit 0). Needs no new gateway routes.
 
 ### 7. Follow-ups are rejected while a run is active *(stub)*
 
@@ -178,7 +200,7 @@ knows how to resume one.
 | 16 | **Keys are all-or-nothing** | one key grants every session | scopes (per repo/target), revocation that is immediate and testable |
 | 17 | **Single host only** | one saved target in `~/.cloudbear/auth.json` | named targets, `cloudbear --target <name>` |
 | 18 | **No stack self-check** | you must know the ssh/docker commands by hand | `cloudbear doctor` reports health, config, version drift and the common failure modes |
-| 19 | **Telegram bridge crash-loops** | placeholder `TELEGRAM_BOT_TOKEN` on the box | ships disabled-by-default when unset, so the stack is all-healthy |
+| 19 | **Telegram bridge crash-loops** | placeholder `TELEGRAM_BOT_TOKEN` on the box | ships disabled-by-default when unset, so the stack is all-healthy — **landed 2026-10-04** (exit 0 + `/log` + actionable busy reply proven locally; `Restarting (1)` on the box clears on next redeploy) |
 | 20 | **No TLS path** | plain HTTP behind a tunnel; docs say "put a proxy in front" | a documented Caddy/nginx recipe with an example config in `deploy/` |
 
 ---
@@ -218,8 +240,8 @@ branding (talk ACP to `goose serve` instead). See `PLAN.md` for the reasoning.
 | Policy proposals auto-approved (network only) | missing | P0 |
 | Real (gating) approvals | stub | P0 |
 | `pi` in-sandbox JSON/RPC | unverified | P0 |
-| Thinking visible (coalesced) | missing | P1 |
-| Completion notification (`watch`) | missing | P1 |
+| Thinking visible (coalesced) | code landed, gateway/UI pending | P1 |
+| Completion notification (`watch`) | landed + live-proven | P1 |
 | Queue/steer while busy | stub | P1 |
 | Resume after reboot | stub | P1 |
 | Retry policy for timeouts | stub | P1 |
@@ -229,6 +251,6 @@ branding (talk ACP to `goose serve` instead). See `PLAN.md` for the reasoning.
 | ACP adapter (goose/dots) | missing | P2 |
 | Budgets + concurrency cap | missing | P2 |
 | Key scopes, multi-target | missing | P2 |
-| `cloudbear doctor` | missing | P2 |
-| Bridge disabled without a token | stub | P2 |
+| `cloudbear doctor` | landed + live-proven | P2 |
+| Bridge disabled without a token | landed, live proof on redeploy | P2 |
 | TLS recipe | partial | P2 |
