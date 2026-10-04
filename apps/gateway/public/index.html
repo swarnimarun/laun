@@ -13,7 +13,7 @@
     <!-- Login: shown until the gateway accepts a stored or pasted agent key. -->
     <section id="login" class="login">
       <form id="login-form" class="card">
-        <h1>🐻 laun</h1>
+        <h1>laun</h1>
         <p class="muted">Paste the agent key printed by <code>laun setup</code>.</p>
         <label for="key-input">Agent key</label>
         <input id="key-input" type="password" placeholder="laun_..." autocomplete="off" spellcheck="false" />
@@ -25,10 +25,10 @@
     <div id="app" class="app" hidden>
       <aside class="sidebar">
         <header class="sidebar-head">
-          <span class="brand">🐻 laun</span>
+          <span class="brand">laun</span>
           <span class="head-actions">
             <button id="new-session-btn" type="button" title="New session">+ New</button>
-            <button id="refresh-btn" type="button" title="Refresh sessions">⟳</button>
+            <button id="refresh-btn" type="button" title="Refresh sessions">Refresh</button>
           </span>
         </header>
         <!-- New session: goal required, blank model means the server default. -->
@@ -55,16 +55,17 @@
             <span id="sh-status" class="badge"></span>
             <span id="sh-model" class="mono muted"></span>
             <span class="spacer"></span>
-            <span id="follow-chip" class="chip">● live</span>
+            <span id="follow-chip" class="chip">live</span>
           </div>
           <p id="sh-goal" class="goal"></p>
+          <div id="run-usage" class="run-usage" hidden></div>
         </header>
         <!-- Pending approvals, fed by GET /sessions/:id and live approval_request events. -->
         <div id="approvals" class="approvals" hidden></div>
         <div class="transcript-wrap">
           <div id="transcript" class="transcript" hidden></div>
           <div id="empty-state" class="empty muted">Select a session on the left, or start a new one.</div>
-          <button id="jump-btn" class="jump" type="button" hidden>↓ Jump to latest</button>
+          <button id="jump-btn" class="jump" type="button" hidden>Jump to latest</button>
         </div>
         <form id="composer" class="composer" hidden>
           <div class="composer-row">

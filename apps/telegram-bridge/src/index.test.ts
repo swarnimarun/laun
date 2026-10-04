@@ -81,7 +81,9 @@ describe("format", () => {
     expect(chunks[0]).toContain("📊");
     expect(chunks[0]).toContain("100");
     expect(chunks[0]).toContain("50");
-    expect(usageLine({})).toBe("📊 usage");
+    expect(usageLine({})).toBeNull();
+    expect(usageLine({ inputTokens: 0, outputTokens: 0, totalTokens: 0 })).toBeNull();
+    expect(usageLine({ inputTokens: "lots" })).toBeNull();
   });
 
   test("unknown event types are skipped, never crash", () => {

@@ -130,11 +130,16 @@ Bun.serve({
         }
         if (suffix === "/events" && req.method === "GET") {
           const bus = gw.busFor(sessionId);
+          // Resume from a cursor so reconnects skip replay: ?since=N drops
+          // the first N bus events (same indexing as GET /log). Defaults to
+          // the full bus for first-time followers.
+          const sinceRaw = Number(url.searchParams.get("since") ?? 0);
+          const since = Number.isInteger(sinceRaw) && sinceRaw >= 0 ? sinceRaw : 0;
           const stream = new ReadableStream({
             start(controller) {
               const enc = new TextEncoder();
               const send = (e: unknown) => controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
-              for (const e of bus.events) send(e);
+              for (const e of bus.events.slice(since)) send(e);
               const sub = (e: unknown) => send(e);
               bus.subs.add(sub);
               const hb = setInterval(() => controller.enqueue(enc.encode(`: hb\n\n`)), 15_000);

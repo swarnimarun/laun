@@ -52,19 +52,29 @@ function extraLine(e: AgentEvent): string | null {
   return null;
 }
 
-/** One compact accounting line; every field is optional. */
+/**
+ * One compact accounting line, or null when there is nothing worth saying.
+ * Zero/empty usage (the common case — the harness emits zero-filled usage
+ * objects on every message) renders as nothing: a bare "usage" line is noise.
+ */
 export function usageLine(u: {
   inputTokens?: unknown;
   outputTokens?: unknown;
   totalTokens?: unknown;
   costUsd?: unknown;
-}): string {
+}): string | null {
   const parts: string[] = [];
-  if (typeof u.inputTokens === "number") parts.push(`${u.inputTokens} in`);
-  if (typeof u.outputTokens === "number") parts.push(`${u.outputTokens} out`);
-  if (typeof u.totalTokens === "number") parts.push(`${u.totalTokens} total`);
-  if (typeof u.costUsd === "number") parts.push(`$${u.costUsd}`);
-  return parts.length ? `📊 usage: ${parts.join(", ")}` : "📊 usage";
+  const num = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null;
+  const input = num(u.inputTokens);
+  const output = num(u.outputTokens);
+  const total = num(u.totalTokens);
+  const cost = num(u.costUsd);
+  if (input !== null) parts.push(`${input} in`);
+  if (output !== null) parts.push(`${output} out`);
+  if (total !== null) parts.push(`${total} total`);
+  if (cost !== null) parts.push(`$${cost}`);
+  return parts.length ? `📊 usage: ${parts.join(", ")}` : null;
 }
 
 /** Batch renderable events into Telegram-sized plain-text chunks. */

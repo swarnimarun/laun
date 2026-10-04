@@ -14,10 +14,11 @@ const FOLLOW_THRESHOLD_PX = 64; // "at the bottom" tolerance for auto-scroll
  *  bus from index 0, so that many frames are skipped to avoid duplicating what /log returned. */
 const state = {
   key: "", sessions: [], currentId: null, current: null,
-  seen: 0, replayRemaining: 0, terminal: false, streaming: false,
+  seen: 0, terminal: false, streaming: false,
   streamToken: null, streamAbort: null, reconnectTimer: null, reconnectAttempts: 0,
   streamState: "idle", // idle | connecting | live | reconnecting
-  follow: true, openBubble: null, approvalIds: new Set(),
+  follow: true, openBubble: null, openThinking: null, approvalIds: new Set(),
+  usageTotals: null,
 };
 // ----------------------------------------------------------------------- helpers
 const $ = (id) => document.getElementById(id);
@@ -82,6 +83,7 @@ function appendNode(node) {
 function appendSystem(text, kind = "info") {
   appendNode(el("div", `sys sys-${kind}`, text));
   state.openBubble = null; // the next text delta starts a fresh bubble
+  closeThinking();
 }
 /** Append a text delta to the current assistant bubble. */
 function appendDelta(delta) {
@@ -89,26 +91,56 @@ function appendDelta(delta) {
   state.openBubble.textContent += delta;
   if (state.follow) $("transcript").scrollTop = $("transcript").scrollHeight;
 }
-/** Collapsed "🔧 name" line with formatted args (capped at ~500 chars by formatArgs). */
+/** Collapsed "tool: name" line with formatted args (capped at ~500 chars by formatArgs). */
 function appendToolCall(name, args) {
   const details = el("details", "tool");
-  details.append(el("summary", "", `🔧 ${name}`), el("pre", "", formatArgs(args)));
+  details.append(el("summary", "", `tool: ${name}`), el("pre", "", formatArgs(args)));
   appendNode(details);
   state.openBubble = null;
+  closeThinking();
 }
 /** Tool failures are surfaced; successes stay quiet. */
 function appendToolFailure(name, output) {
   const text = typeof output === "string" && output.trim() ? clamp(output.trim(), 500) : "(no output)";
-  appendSystem(`⚠️ ${name} failed: ${text}`, "warn");
+  appendSystem(`warning: ${name} failed: ${text}`, "warn");
 }
-/** One compact accounting line; unknown/absent fields render, never crash. */
-function usageLine(e) {
-  const parts = [];
-  for (const [k, label] of [["inputTokens", "in"], ["outputTokens", "out"], ["totalTokens", "total"]]) {
-    if (typeof e[k] === "number") parts.push(`${label} ${e[k]}`);
+/**
+ * Reasoning lands in one collapsed block per contiguous run, not one line
+ * per chunk. A new text/tool/status event closes the open block.
+ */
+function appendThinking(delta) {
+  if (!state.openThinking) {
+    const details = el("details", "thinking");
+    details.append(el("summary", "", "reasoning"));
+    state.openThinking = el("div", "tbody", "");
+    details.append(state.openThinking);
+    appendNode(details);
   }
-  if (typeof e.costUsd === "number") parts.push(`$${e.costUsd.toFixed(4)}`);
-  return parts.length ? `📊 usage: ${parts.join(", ")}` : `📊 usage`;
+  state.openThinking.textContent += delta;
+  if (state.follow) $("transcript").scrollTop = $("transcript").scrollHeight;
+}
+function closeThinking() { state.openThinking = null; }
+/**
+ * Usage never enters the transcript: totals accumulate into the sticky
+ * run footer, which hides while everything is zero (the common case).
+ */
+function accumulateUsage(e) {
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+  const t = state.usageTotals ?? (state.usageTotals = { input: 0, output: 0, total: 0, cost: 0 });
+  t.input += num(e.inputTokens);
+  t.output += num(e.outputTokens);
+  t.total += num(e.totalTokens);
+  t.cost += num(e.costUsd);
+  renderUsageFooter();
+}
+function renderUsageFooter() {
+  const box = $("run-usage");
+  const t = state.usageTotals;
+  if (!t || (!t.input && !t.output && !t.total && !t.cost)) { box.hidden = true; box.textContent = ""; return; }
+  let s = `usage: in ${t.input}, out ${t.output}, total ${t.total}`;
+  if (t.cost) s += `, $${t.cost.toFixed(4)}`;
+  box.textContent = s;
+  box.hidden = false;
 }
 /** Keep sidebar badges and the session header in sync with streamed status events. */
 function setSessionStatus(sessionId, status) {
@@ -127,8 +159,8 @@ function applyEvent(ev) {
     case "tool_call": appendToolCall(ev.name, ev.args); return "continue";
     case "tool_result": if (ev.ok === false) appendToolFailure(ev.name, ev.output); return "continue";
     case "approval_request": addApprovalCard(ev, $("approvals")); return "continue";
-    case "thinking": if (typeof ev.delta === "string" && ev.delta) appendSystem(`💭 ${ev.delta}`, "info"); return "continue";
-    case "usage": appendSystem(usageLine(ev), "info"); return "continue";
+    case "thinking": if (typeof ev.delta === "string" && ev.delta) appendThinking(ev.delta); return "continue";
+    case "usage": accumulateUsage(ev); return "continue";
     case "status": {
       setSessionStatus(ev.sessionId, ev.status);
       // The gateway pings a bare "running" at the start of every run; the badge already shows it.
@@ -139,8 +171,8 @@ function applyEvent(ev) {
       }
       return isTerminalEvent(ev) ? "terminal" : "continue";
     }
-    case "done": setSessionStatus(ev.sessionId, "done"); appendSystem(ev.summary ? `✅ done: ${ev.summary}` : "✅ done", "ok"); return "terminal";
-    case "error": setSessionStatus(ev.sessionId, "error"); appendSystem(`⛔ ${ev.message}`, "error"); return "terminal";
+    case "done": setSessionStatus(ev.sessionId, "done"); appendSystem(ev.summary ? `done: ${ev.summary}` : "done", "ok"); return "terminal";
+    case "error": setSessionStatus(ev.sessionId, "error"); appendSystem(`error: ${ev.message}`, "error"); return "terminal";
     default: return "continue";
   }
 }
@@ -150,7 +182,7 @@ function addApprovalCard(ev, container) {
   if (state.approvalIds.has(ev.requestId)) return;
   state.approvalIds.add(ev.requestId);
   const card = el("div", "approval");
-  card.append(el("div", "approval-head", `🔐 approval needed · ${ev.requestId}`), el("p", "", ev.reason));
+  card.append(el("div", "approval-head", `approval needed · ${ev.requestId}`), el("p", "", ev.reason));
   if (ev.detail) card.append(el("pre", "", clamp(String(ev.detail), 800)));
   const actions = el("div", "row");
   const error = el("p", "error");
@@ -219,7 +251,7 @@ function renderConnChip() {
 function setStreamState(next) { state.streamState = next; renderConnChip(); }
 /** Auto-scroll indicator: "live" follows the tail, "paused" keeps the user's place. */
 function renderFollowChip() {
-  $("follow-chip").textContent = state.follow ? "● live" : "⏸ paused";
+  $("follow-chip").textContent = state.follow ? "live" : "paused";
   $("follow-chip").className = `chip ${state.follow ? "chip-ok" : "chip-warn"}`;
   $("jump-btn").hidden = state.follow || !state.currentId;
 }
@@ -243,20 +275,25 @@ async function loadSessions() {
 }
 function resetSessionView() {
   stopStream();
-  state.currentId = null; state.current = null; state.seen = 0; state.replayRemaining = 0;
-  state.terminal = false; state.openBubble = null; state.approvalIds = new Set(); state.follow = true;
+  state.currentId = null; state.current = null; state.seen = 0;
+  state.terminal = false; state.openBubble = null; state.openThinking = null;
+  state.usageTotals = null;
+  state.approvalIds = new Set(); state.follow = true;
   $("transcript").textContent = ""; $("transcript").hidden = true;
   $("empty-state").hidden = false; $("session-header").hidden = true;
+  $("run-usage").hidden = true; $("run-usage").textContent = "";
   $("approvals").textContent = ""; $("approvals").hidden = true;
   $("composer").hidden = true;
   setComposerNote("");
   renderFollowChip();
+  if (location.hash) history.replaceState(null, "", location.pathname);
 }
 /** Open a session: backfill from GET /log, then follow the live SSE stream. */
-async function openSession(id) {
+async function openSession(id, pushHash = true) {
   if (state.currentId === id) { await refreshCurrentSession(); return; }
   resetSessionView();
   state.currentId = id;
+  if (pushHash && location.hash !== `#/s/${id}`) history.replaceState(null, "", `#/s/${id}`);
   renderSessionList();
   setStreamState("connecting");
   try {
@@ -301,15 +338,14 @@ async function refreshCurrentSession() {
   }
 }
 // ------------------------------------------------------------------------ stream
-/** Parse one SSE frame and apply it, skipping the server's replay of already-seen events. */
+/** Parse one SSE frame and apply it. The server resumes from ?since=, so every
+ *  frame here is new — no replay counting. */
 function consumeFrame(frame, sessionId) {
   const payload = frame.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trimStart()).join("\n");
   if (!payload) return; // heartbeat comment or empty frame
   let ev;
   try { ev = JSON.parse(payload); } catch { return; }
   if (!ev || typeof ev.type !== "string" || state.currentId !== sessionId) return;
-  // The server replays its whole bus on connect: drop the frames /log already gave us.
-  if (state.replayRemaining > 0) { state.replayRemaining -= 1; return; }
   state.seen += 1;
   if (applyEvent(ev) === "terminal") {
     state.terminal = true;
@@ -330,11 +366,10 @@ async function openStream(id) {
   setStreamState(state.reconnectAttempts > 0 ? "reconnecting" : "connecting");
   let dropped = false;
   try {
-    const res = await fetch(`/sessions/${id}/events`, { headers: { authorization: `Bearer ${state.key}` }, signal: ctrl.signal });
+    const res = await fetch(`/sessions/${id}/events?since=${state.seen}`, { headers: { authorization: `Bearer ${state.key}` }, signal: ctrl.signal });
     if (res.status === 401) { forgetKey("Agent key invalid or revoked — paste a fresh key to reconnect."); return; }
     if (!res.ok || !res.body) throw new Error(`stream failed (HTTP ${res.status})`);
     state.reconnectAttempts = 0;
-    state.replayRemaining = state.seen; // skip what /log already backfilled
     setStreamState("live");
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -415,6 +450,7 @@ async function connect(key) {
     $("login").hidden = true; $("app").hidden = false;
     setStreamState("idle");
     renderSessionList();
+    routeFromHash(false); // honor a deep-linked #/s/<id> after connecting
   } catch (err) {
     if (err.status !== 401) {
       state.key = "";
@@ -490,6 +526,13 @@ $("jump-btn").addEventListener("click", () => {
   $("transcript").scrollTop = $("transcript").scrollHeight;
   renderFollowChip();
 });
+// Hash routing: #/ = list, #/s/<id> = session. Back/forward and deep-links work.
+function routeFromHash(pushHash) {
+  const m = location.hash.match(/^#\/s\/([A-Za-z0-9_-]{1,64})$/);
+  if (m && state.key) void openSession(m[1], pushHash);
+  else if (!m && state.currentId) resetSessionView();
+}
+window.addEventListener("hashchange", () => routeFromHash(false));
 window.addEventListener("beforeunload", () => stopStream());
 // ---------------------------------------------------------------------------- boot
 (function boot() {
