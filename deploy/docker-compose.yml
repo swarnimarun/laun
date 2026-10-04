@@ -14,6 +14,11 @@ services:
       PI_BIN: ${PI_BIN:-pi}
       MODEL: ${MODEL:-opencode-go/muse-spark-1.3-contributor}
       RUN_TIMEOUT_MS: ${RUN_TIMEOUT_MS:-600000}
+      # Executor runtime:
+      #   json = one pi process per message (proven, the fallback)
+      #   rpc  = one long-lived pi child per session: steer, abort, auto-retry
+      EXECUTOR_MODE: ${EXECUTOR_MODE:-json}
+      RPC_IDLE_TTL_MS: ${RPC_IDLE_TTL_MS:-300000}
       OPENSHELL_ENABLED: ${OPENSHELL_ENABLED:-false}
       OPENSHELL_PREFIX: ${OPENSHELL_PREFIX:-}
       # No model keys here on purpose: pi authenticates from the executor host's
