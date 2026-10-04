@@ -222,5 +222,9 @@ describe("bootstrap contract", () => {
     expect(bootstrap).toContain("*.pi");
     // and warns when there is no pi login, instead of failing opaquely later
     expect(bootstrap).toContain("agent/auth.json");
+    // the resolved path must be persisted so a later manual `docker compose up`
+    // (which never runs this script) cannot fall back to HOME=/root
+    expect(bootstrap).toContain("^PI_CONFIG_DIR=");
+    expect(bootstrap).toContain("PI_CONFIG_DIR=%s");
   });
 });

@@ -152,6 +152,16 @@ else
     warn "no pi credentials at $PI_CONFIG_DIR/agent/auth.json — every session will fail until pi is logged in on this host (run pi once and /login)"
   fi
 
+  # Persist the resolved path so ANY later invocation — including a manual
+  # `docker compose up` that never goes through this script — resolves the same
+  # mount. Without this, compose falls back to ${HOME} which is /root under sudo.
+  if grep -q '^PI_CONFIG_DIR=' "$ENV_FILE" 2>/dev/null; then
+    sed -i "s|^PI_CONFIG_DIR=.*|PI_CONFIG_DIR=$PI_CONFIG_DIR|" "$ENV_FILE"
+  else
+    printf '\nPI_CONFIG_DIR=%s\n' "$PI_CONFIG_DIR" >> "$ENV_FILE"
+  fi
+  chmod 600 "$ENV_FILE"
+
   log "starting the stack (docker compose up -d --build)"
   (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" docker compose -f deploy/docker-compose.yml --env-file .env up -d --build) \
     || die "docker compose up failed — inspect: cd $REMOTE_DIR && docker compose logs"
