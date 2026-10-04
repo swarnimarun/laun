@@ -2,6 +2,23 @@ import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+export {
+  listOpenShellTemplates,
+  loadOpenShellTemplate,
+  renderOpenShellPolicy,
+  validateBinaryObject,
+  validateEndpointObject,
+  validatePolicy,
+} from "./openshell.js";
+export {
+  defaultProviderProfilePath,
+  isRealHost,
+  loadProviderProfileText,
+  parseProviderProfile,
+  scanForSecrets,
+  validateProviderProfile,
+} from "./provider.js";
+
 export interface PolicyTemplate {
   name: string;
   description?: string;

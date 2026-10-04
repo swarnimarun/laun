@@ -1,0 +1,48 @@
+# Cloudbear model provider profile.
+#
+# Declares the model endpoint and the credential OpenShell injects ONLY for
+# approved endpoints, so the agent inside the sandbox never sees the real key.
+# Field map verified 2026-10-04 against the run-pi-with-openrouter tutorial and
+# https://docs.nvidia.com/openshell/latest/how-it-works/providers/profiles
+# (credentials[] with env_vars/auth_style/header_name, discovery, endpoints[]
+# with host/port/protocol/access/enforcement, binaries[] as scalar paths).
+#
+# Deploy flow (see deploy/openshell/install-and-verify.sh):
+#   1. substitute MODEL_HOST into a COPY of this file (never edit the host in
+#      place -- this file must stay generic and must never contain a secret);
+#   2. openshell profile lint -f <rendered> && openshell profile import -f <rendered>
+#   3. MODEL_API_KEY=<real key> openshell provider create --name cloudbear-model
+#        --type cloudbear-model --from-existing
+# The key travels only via the environment into OpenShell's credential store.
+# This file contains no secret material by construction (tests assert that).
+
+id: cloudbear-model
+display_name: Cloudbear Model
+description: Model/inference endpoint for cloudbear agent sandboxes. The API key is injected by OpenShell only for the approved endpoint.
+category: inference
+inference_capable: true
+
+credentials:
+  - name: api_key
+    description: Model API key. Present in the sandbox only as a placeholder; OpenShell swaps in the real key for approved endpoints.
+    env_vars:
+      - MODEL_API_KEY
+    required: true
+    auth_style: bearer
+    header_name: authorization
+
+discovery:
+  credentials:
+    - api_key
+
+endpoints:
+  - host: "${MODEL_HOST}"
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+
+binaries:
+  # Pi runs on Node. ASSUMED: confirm the node path for the pinned pi image.
+  - /usr/local/bin/node
+  - /usr/bin/node

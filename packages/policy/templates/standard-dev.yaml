@@ -1,0 +1,117 @@
+# Cloudbear "standard-dev" OpenShell policy template.
+#
+# Restrictive + egress to git forges and package registries. Use per-repo after
+# reviewing advisor proposals (`openshell rule get <sandbox> --status pending`).
+# Same render flow as restrictive:
+#   WORKDIR=<in-sandbox workdir> MODEL_HOST=<model hostname>
+#   bun packages/policy/src/render.ts standard-dev --target openshell
+#
+# Verified against https://docs.nvidia.com/openshell/latest/how-it-works/policies/schema
+# and the provider-policy composition example in
+# https://docs.nvidia.com/openshell/latest/how-it-works/providers/profiles
+# (both fetched 2026-10-04). Image-dependent binary paths are ASSUMED.
+
+version: 1
+
+filesystem_policy:
+  include_workdir: false
+  read_only:
+    - /usr
+    - /lib
+    - /bin
+    - /etc
+  read_write:
+    - "${WORKDIR}"
+    - /tmp
+
+landlock:
+  compatibility: hard_requirement
+
+# Deliberately empty: Docker/Podman then use the image's USER.
+process: {}
+
+network_policies:
+  model:
+    endpoints:
+      - host: "${MODEL_HOST}"
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+    binaries:
+      # ASSUMED: confirm the node path for the pinned pi image.
+      - path: /usr/local/bin/node
+      - path: /usr/bin/node
+
+  # GitHub REST + GraphQL read-only, plus git smart-HTTP fetch. Shape mirrors
+  # the documented github provider composition: the read-only preset alone
+  # would block the POST to */git-upload-pack that clone/fetch need, so
+  # github.com uses explicit rules (fetch only -- push stays denied).
+  github:
+    endpoints:
+      - host: api.github.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+      - host: api.github.com
+        port: 443
+        path: /graphql
+        protocol: graphql
+        enforcement: enforce
+        access: read-only
+      - host: github.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow:
+              method: GET
+              path: "**"
+          - allow:
+              method: HEAD
+              path: "**"
+          - allow:
+              method: OPTIONS
+              path: "**"
+          - allow:
+              method: POST
+              path: "/**/git-upload-pack"
+    binaries:
+      # ASSUMED: confirm git/node paths for the pinned image.
+      - path: /usr/bin/git
+      - path: /usr/local/bin/git
+      - path: /usr/local/bin/node
+      - path: /usr/bin/node
+
+  npm_registry:
+    endpoints:
+      - host: registry.npmjs.org
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+        # npm scoped packages request paths containing %2F.
+        allow_encoded_slash: true
+    binaries:
+      - path: /usr/local/bin/node
+      - path: /usr/bin/node
+
+  pypi:
+    endpoints:
+      - host: pypi.org
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+      - host: files.pythonhosted.org
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+    binaries:
+      # ASSUMED: confirm the python path for the pinned image.
+      - path: /usr/bin/python3
+      - path: /usr/local/bin/python3
+
+network_middlewares: {}

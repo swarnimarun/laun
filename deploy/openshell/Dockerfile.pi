@@ -1,0 +1,37 @@
+# Pi image for OpenShell sandboxes.
+#
+# Follows OpenShell's own Pi tutorial
+# (https://docs.nvidia.com/openshell/latest/tutorials/run-pi-with-openrouter):
+#   - Node 24 + npm, because pi's package requires node >= 22.19
+#   - fd and ripgrep installed up front: inside a sandbox pi cannot download
+#     them on first use, which is exactly what the policy is there to prevent
+#   - a writable /workspace as the agent's workdir, owned by the unprivileged
+#     `node` user
+#   - PI_CODING_AGENT_DIR under /tmp, one of the few places a restrictive
+#     policy lets pi write
+#
+# Build (on the gateway host, where the images are resolved):
+#   docker build -t pi-agent:local -f deploy/openshell/Dockerfile.pi .
+#
+# `cloudbear`'s OpenShell bring-up (deploy/openshell/install-and-verify.sh)
+# expects this tag; override with PI_IMAGE=<ref> if you push it elsewhere.
+FROM node:24-bookworm-slim
+
+ARG PI_VERSION=latest
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       bash ca-certificates fd-find git ripgrep \
+    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}"
+
+# Prove the install actually landed: a silent failure here produced an executor
+# image with no agent in it at all, once already.
+RUN command -v pi >/dev/null && pi --version
+
+RUN mkdir -p /workspace && chown node:node /workspace
+USER node
+WORKDIR /workspace
+ENV PI_CODING_AGENT_DIR=/tmp/pi-agent
