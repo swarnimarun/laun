@@ -11,6 +11,7 @@
     "start": "bun src/index.ts"
   },
   "dependencies": {
+    "@laun/acp": "workspace:*",
     "@laun/policy": "workspace:*",
     "@laun/protocol": "workspace:*",
     "@nvidia/openshell-sdk": "file:../../vendor/openshell-sdk"

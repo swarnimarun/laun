@@ -14,6 +14,7 @@
       "name": "laun-executor",
       "version": "0.1.0",
       "dependencies": {
+        "@laun/acp": "workspace:*",
         "@laun/policy": "workspace:*",
         "@laun/protocol": "workspace:*",
         "@nvidia/openshell-sdk": "file:../../vendor/openshell-sdk",

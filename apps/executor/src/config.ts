@@ -48,6 +48,20 @@ export interface ExecutorConfig {
    */
   sandboxMaxIdleMs?: number;
   defaultTimeoutMs: number;
+  /**
+   * Bound for one parked approval (extension_ui confirm/select) before it
+   * is denied automatically. Fail-closed: a run never hangs forever.
+   * Defaults to 300_000 (5m).
+   */
+  approvalTimeoutMs?: number;
+  /**
+   * Goose ACP server base URL (e.g. http://127.0.0.1:3284) for
+   * runtime:"goose"|"dots" runs. Empty disables those runtimes (fail loud
+   * at run time, never silently pi). Never log.
+   */
+  gooseUrl?: string;
+  /** Sent as X-Secret-Key to goose. Never log, never print. */
+  gooseSecret?: string;
   /** json = one-shot `pi -p --mode json` per run (fallback). rpc = one long-lived `pi --mode rpc` child per session. Defaults to json. */
   executorMode?: ExecutorMode;
   /** Idle TTL for rpc children before they are reaped. Restart reuses the same session dir. Defaults to 300_000. */
@@ -144,6 +158,27 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ExecutorConfig
   if (!Number.isFinite(sandboxMaxIdleMs) || sandboxMaxIdleMs < 1000) {
     throw new Error("OPENSHELL_SANDBOX_MAX_IDLE_MS must be >= 1000");
   }
+  const approvalTimeoutRaw = (env["APPROVAL_TIMEOUT_MS"] ?? "").trim();
+  const approvalTimeoutMs = approvalTimeoutRaw === "" ? 300_000 : Number(approvalTimeoutRaw);
+  if (!Number.isInteger(approvalTimeoutMs) || approvalTimeoutMs < 100 || approvalTimeoutMs > 3_600_000) {
+    throw new Error("APPROVAL_TIMEOUT_MS must be an integer 100-3600000");
+  }
+  // Goose ACP wiring: URLs validated here (fail closed); the secret is
+  // opaque and never logged. Absent values only fail runs that request
+  // those runtimes, never pi runs.
+  const gooseUrl = (env["GOOSE_URL"] ?? "").trim();
+  if (gooseUrl) {
+    let protocol: string;
+    try {
+      protocol = new URL(gooseUrl).protocol;
+    } catch {
+      throw new Error("GOOSE_URL must be a valid URL");
+    }
+    if (protocol !== "http:" && protocol !== "https:") {
+      throw new Error("GOOSE_URL must be an http(s) URL");
+    }
+  }
+  const gooseSecret = (env["GOOSE_SECRET"] ?? "").trim();
   return {
     port,
     gatewayToken,
@@ -169,5 +204,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ExecutorConfig
     sdkCaFile,
     sdkInsecure,
     sandboxMaxIdleMs,
+    approvalTimeoutMs,
+    gooseUrl,
+    gooseSecret,
   };
 }
