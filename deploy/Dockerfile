@@ -1,6 +1,6 @@
-# Single Dockerfile for all cloudbear services (Bun runs TS directly — no build step).
+# Single Dockerfile for all laun services (Bun runs TS directly — no build step).
 # Usage (from repo root):
-#   docker build -f deploy/Dockerfile --build-arg APP=apps/gateway -t cloudbear-gateway .
+#   docker build -f deploy/Dockerfile --build-arg APP=apps/gateway -t laun-gateway .
 ARG APP=apps/gateway
 FROM oven/bun:1.4 AS base
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates git && rm -rf /var/lib/apt/lists/*

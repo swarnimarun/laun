@@ -1,11 +1,11 @@
 import { Bot, InlineKeyboard } from "grammy";
-import { isAllowlisted } from "@cloudbear/protocol";
+import { isAllowlisted } from "@laun/protocol";
 import type { BridgeConfig } from "./config.js";
 import { GatewayClient } from "./client.js";
 import { decodeApproval, encodeApproval, renderChunks, sessionLine } from "./format.js";
 
 const HELP = [
-  "🧸 cloudbear — your VPS agent",
+  "🧸 laun — your VPS agent",
   "",
   "/new <goal> — start a session (e.g. /new fix failing tests in web/)",
   "/status <id> — session status + pending approvals",

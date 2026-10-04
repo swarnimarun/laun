@@ -1,11 +1,11 @@
-// cloudbear web UI — vanilla ESM, no bundler, no dependencies.
+// laun web UI — vanilla ESM, no bundler, no dependencies.
 //
 // Everything talks to the same-origin gateway. The agent key lives in localStorage and is sent
 // as `Authorization: Bearer <key>` on every request. Streaming uses fetch() + ReadableStream
 // because EventSource cannot set an Authorization header; SSE frames are parsed by hand
 // (`data:` lines carry JSON, lines starting with `:` are heartbeat comments).
 
-const KEY_STORAGE = "cloudbear.key";
+const KEY_STORAGE = "laun.key";
 const TERMINAL_STATUSES = new Set(["done", "error"]);
 const FOLLOW_THRESHOLD_PX = 64; // "at the bottom" tolerance for auto-scroll
 

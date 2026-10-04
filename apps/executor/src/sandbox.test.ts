@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent } from "@cloudbear/protocol";
+import type { AgentEvent } from "@laun/protocol";
 import { loadConfig } from "./config.js";
 import { buildPiArgs, runPiStreaming } from "./pi.js";
 import { buildRpcArgs, RpcManager } from "./rpc.js";
@@ -42,7 +42,7 @@ async function pollFor(cond: () => boolean, what: string, timeoutMs = 5000): Pro
  * Stub of the openshell CLI surface this lane uses. `sandbox exec` parses
  * exactly our shaping (`-n <name> -- <argv...>`, nothing else) and execs the
  * target so stdio pipes flow through, holding them open like the real CLI.
- * `sandbox create` logs and exits ${CB_SANDBOX_CREATE_EXIT:-0}; `delete` logs.
+ * `sandbox create` logs and exits ${LAUN_SANDBOX_CREATE_EXIT:-0}; `delete` logs.
  */
 function writeOpenshellStub(dir: string): string {
   const p = join(dir, "openshell-stub.sh");
@@ -50,15 +50,15 @@ function writeOpenshellStub(dir: string): string {
     p,
     "#!/bin/sh\n" +
       'if [ "$1" = "sandbox" ] && [ "$2" = "create" ]; then\n' +
-      '  echo "$*" >> "${CB_SANDBOX_CREATE_LOG:-/dev/null}"\n' +
-      '  exit "${CB_SANDBOX_CREATE_EXIT:-0}"\n' +
+      '  echo "$*" >> "${LAUN_SANDBOX_CREATE_LOG:-/dev/null}"\n' +
+      '  exit "${LAUN_SANDBOX_CREATE_EXIT:-0}"\n' +
       "fi\n" +
       'if [ "$1" = "sandbox" ] && [ "$2" = "delete" ]; then\n' +
-      '  echo "$*" >> "${CB_SANDBOX_DELETE_LOG:-/dev/null}"\n' +
+      '  echo "$*" >> "${LAUN_SANDBOX_DELETE_LOG:-/dev/null}"\n' +
       "  exit 0\n" +
       "fi\n" +
       'if [ "$1" = "sandbox" ] && [ "$2" = "exec" ]; then\n' +
-      '  echo "$*" >> "${CB_SANDBOX_EXEC_LOG:-/dev/null}"\n' +
+      '  echo "$*" >> "${LAUN_SANDBOX_EXEC_LOG:-/dev/null}"\n' +
       "  shift 2\n" +
       '  if [ "$1" = "-n" ] || [ "$1" = "--name" ]; then shift 2; fi\n' +
       '  if [ "$1" = "--" ]; then shift; fi\n' +
@@ -179,7 +179,7 @@ describe("sandbox argv shaping", () => {
   test("create passes image/policy/provider/approval-mode from config", () => {
     expect(
       buildSandboxCreateArgs({
-        name: "cb-s1",
+        name: "laun-s1",
         image: "pi-agent:local",
         policyFile: "/pol.yaml",
         providers: ["prov-a", "prov-b"],
@@ -189,7 +189,7 @@ describe("sandbox argv shaping", () => {
       "sandbox",
       "create",
       "--name",
-      "cb-s1",
+      "laun-s1",
       "--from",
       "pi-agent:local",
       "--provider",
@@ -204,22 +204,22 @@ describe("sandbox argv shaping", () => {
   });
 
   test("create omits empty optionals (no invented flags)", () => {
-    expect(buildSandboxCreateArgs({ name: "cb-s1", image: "img" })).toEqual([
+    expect(buildSandboxCreateArgs({ name: "laun-s1", image: "img" })).toEqual([
       "sandbox",
       "create",
       "--name",
-      "cb-s1",
+      "laun-s1",
       "--from",
       "img",
     ]);
   });
 
   test("exec shapes an interactive child: sandbox exec -n <name> -- <argv>", () => {
-    expect(buildSandboxExecArgs("cb-s1", ["pi", "--mode", "rpc"])).toEqual([
+    expect(buildSandboxExecArgs("laun-s1", ["pi", "--mode", "rpc"])).toEqual([
       "sandbox",
       "exec",
       "-n",
-      "cb-s1",
+      "laun-s1",
       "--",
       "pi",
       "--mode",
@@ -228,7 +228,7 @@ describe("sandbox argv shaping", () => {
   });
 
   test("sandbox names are deterministic per session", () => {
-    expect(sandboxNameForSession("abc-123")).toBe("cb-abc-123");
+    expect(sandboxNameForSession("abc-123")).toBe("laun-abc-123");
   });
 });
 
@@ -276,13 +276,13 @@ describe("interactive stdio proof (real runner + stub CLI shaping)", () => {
     // that execs the target with the pipes held open, like the real CLI.
     // A live-gateway proof was attempted on this Mac and is documented in the
     // handoff; the VPS proof (integrator) covers the real server side.
-    const dir = mkdtempSync(join(tmpdir(), "cb-sbx-stdio-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-sbx-stdio-"));
     const execLog = join(dir, "exec.log");
     writeFileSync(execLog, "");
-    process.env["CB_SANDBOX_EXEC_LOG"] = execLog;
+    process.env["LAUN_SANDBOX_EXEC_LOG"] = execLog;
     const stub = writeOpenshellStub(dir);
     const runner = new CliSandboxRunner({ bin: stub, image: "stub-image" });
-    const child = runner.spawnInteractive("cb-probe", ["cat"], { cwd: dir, env: process.env });
+    const child = runner.spawnInteractive("laun-probe", ["cat"], { cwd: dir, env: process.env });
     try {
       const reader = attachLineReader(child);
       expect(child.pid).toBeDefined();
@@ -295,9 +295,9 @@ describe("interactive stdio proof (real runner + stub CLI shaping)", () => {
       }
       expect(childAlive(child)).toBe(true);
       // The shaping the proof used is the exact CLI contract.
-      expect(readFileSync(execLog, "utf8")).toContain("sandbox exec -n cb-probe -- cat");
+      expect(readFileSync(execLog, "utf8")).toContain("sandbox exec -n laun-probe -- cat");
     } finally {
-      delete process.env["CB_SANDBOX_EXEC_LOG"];
+      delete process.env["LAUN_SANDBOX_EXEC_LOG"];
       try {
         child.kill("SIGKILL");
       } catch {
@@ -308,10 +308,10 @@ describe("interactive stdio proof (real runner + stub CLI shaping)", () => {
   }, 15000);
 
   test("real runner create passes flags; create failure throws loudly", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-sbx-create-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-sbx-create-"));
     const createLog = join(dir, "create.log");
     writeFileSync(createLog, "");
-    process.env["CB_SANDBOX_CREATE_LOG"] = createLog;
+    process.env["LAUN_SANDBOX_CREATE_LOG"] = createLog;
     const stub = writeOpenshellStub(dir);
     const runner = new CliSandboxRunner({
       bin: stub,
@@ -321,28 +321,28 @@ describe("interactive stdio proof (real runner + stub CLI shaping)", () => {
       approvalMode: "auto",
     });
     try {
-      await runner.create({ name: "cb-s1" });
+      await runner.create({ name: "laun-s1" });
       const logged = readFileSync(createLog, "utf8");
-      for (const flag of ["--name cb-s1", "--from pi-agent:local", "--provider prov-a", "--provider prov-b", "--policy /pol.yaml", "--approval-mode auto"]) {
+      for (const flag of ["--name laun-s1", "--from pi-agent:local", "--provider prov-a", "--provider prov-b", "--policy /pol.yaml", "--approval-mode auto"]) {
         expect(logged).toContain(flag);
       }
-      process.env["CB_SANDBOX_CREATE_EXIT"] = "1";
-      await expect(runner.create({ name: "cb-boom" })).rejects.toThrow("failed to create sandbox cb-boom");
+      process.env["LAUN_SANDBOX_CREATE_EXIT"] = "1";
+      await expect(runner.create({ name: "laun-boom" })).rejects.toThrow("failed to create sandbox laun-boom");
     } finally {
-      delete process.env["CB_SANDBOX_CREATE_LOG"];
-      delete process.env["CB_SANDBOX_CREATE_EXIT"];
+      delete process.env["LAUN_SANDBOX_CREATE_LOG"];
+      delete process.env["LAUN_SANDBOX_CREATE_EXIT"];
     }
   });
 
   test("remove never throws, even when the binary is missing", async () => {
-    const runner = new CliSandboxRunner({ bin: "cloudbear-definitely-not-a-binary", image: "img", removeTimeoutMs: 2000 });
-    await runner.remove("cb-ghost"); // must resolve, not reject
+    const runner = new CliSandboxRunner({ bin: "laun-definitely-not-a-binary", image: "img", removeTimeoutMs: 2000 });
+    await runner.remove("laun-ghost"); // must resolve, not reject
   });
 });
 
 describe("rpc through the runner (fake)", () => {
   test("enabled routes spawn through the runner with pi argv; created once", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-sbx-rpc-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-sbx-rpc-"));
     const stub = basicRpcStub(dir);
     const fake = new FakeRunner();
     const mgr = new RpcManager({ piBin: stub, openshellPrefix: [], idleTtlMs: 300_000, sandboxRunner: fake });
@@ -358,9 +358,9 @@ describe("rpc through the runner (fake)", () => {
         onEvent: (e) => events.push(e),
       });
       expect(r.sawDone).toBe(true);
-      expect(fake.creates).toEqual(["cb-s1"]);
+      expect(fake.creates).toEqual(["laun-s1"]);
       expect(fake.spawns).toHaveLength(1);
-      expect(fake.spawns[0]!.name).toBe("cb-s1");
+      expect(fake.spawns[0]!.name).toBe("laun-s1");
       expect(fake.spawns[0]!.argv).toEqual([stub, ...buildRpcArgs({ sessionId: "s1", piSessionDir: dir, model: "m" })]);
       // Second run reuses the sandbox child: created once, spawned once.
       const pid1 = mgr.pidOf("s1");
@@ -374,7 +374,7 @@ describe("rpc through the runner (fake)", () => {
         onEvent: () => {},
       });
       expect(r2.sawDone).toBe(true);
-      expect(fake.creates).toEqual(["cb-s1"]);
+      expect(fake.creates).toEqual(["laun-s1"]);
       expect(fake.spawns).toHaveLength(1);
       expect(mgr.pidOf("s1")).toBe(pid1);
     } finally {
@@ -383,7 +383,7 @@ describe("rpc through the runner (fake)", () => {
   });
 
   test("disabled spawns directly with no runner involved", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-sbx-direct-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-sbx-direct-"));
     const mgr = new RpcManager({ piBin: basicRpcStub(dir), openshellPrefix: [], idleTtlMs: 300_000 });
     try {
       const events: AgentEvent[] = [];
@@ -404,7 +404,7 @@ describe("rpc through the runner (fake)", () => {
   });
 
   test("sandbox is removed on idle reap", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-sbx-reap-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-sbx-reap-"));
     const fake = new FakeRunner();
     const mgr = new RpcManager({ piBin: basicRpcStub(dir), openshellPrefix: [], idleTtlMs: 150, sandboxRunner: fake });
     try {
@@ -418,7 +418,7 @@ describe("rpc through the runner (fake)", () => {
         onEvent: () => {},
       });
       expect(r.sawDone).toBe(true);
-      await pollFor(() => fake.removes.includes("cb-s1"), "sandbox removal on idle reap");
+      await pollFor(() => fake.removes.includes("laun-s1"), "sandbox removal on idle reap");
       expect(mgr.has("s1")).toBe(false);
     } finally {
       mgr.close();
@@ -426,7 +426,7 @@ describe("rpc through the runner (fake)", () => {
   });
 
   test("sandbox is removed on timeout kill of a wedged child", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-sbx-wedge-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-sbx-wedge-"));
     const stub = join(dir, "wedge.sh");
     writeFileSync(
       stub,
@@ -454,8 +454,8 @@ describe("rpc through the runner (fake)", () => {
         onEvent: () => {},
       });
       expect(r.timedOut).toBe(true);
-      expect(fake.creates).toEqual(["cb-s1"]);
-      await pollFor(() => fake.removes.includes("cb-s1"), "sandbox removal on timeout kill", 20_000);
+      expect(fake.creates).toEqual(["laun-s1"]);
+      await pollFor(() => fake.removes.includes("laun-s1"), "sandbox removal on timeout kill", 20_000);
       expect(mgr.has("s1")).toBe(false);
     } finally {
       mgr.close();
@@ -463,7 +463,7 @@ describe("rpc through the runner (fake)", () => {
   }, 30_000);
 
   test("create failure rejects loudly and never spawns unsandboxed", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-sbx-createfail-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-sbx-createfail-"));
     const fake = new FakeRunner();
     fake.failCreate = new Error("gateway refused");
     const mgr = new RpcManager({ piBin: basicRpcStub(dir), openshellPrefix: [], idleTtlMs: 300_000, sandboxRunner: fake });
@@ -490,23 +490,23 @@ describe("json through the runner (fake)", () => {
   };
 
   test("enabled runs one-shot inside the sandbox and removes it after", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-sbx-json-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-sbx-json-"));
     const stub = oneShotJsonStub(dir);
     const fake = new FakeRunner();
     const events: AgentEvent[] = [];
     const r = await runPiStreaming({ ...base, piBin: stub, piSessionDir: dir, workdir: dir, onEvent: (e) => events.push(e), sandboxRunner: fake });
     expect(r.sawDone).toBe(true);
     expect(r.sawError).toBe(false);
-    expect(fake.creates).toEqual(["cb-s1"]);
+    expect(fake.creates).toEqual(["laun-s1"]);
     expect(fake.spawns).toHaveLength(1);
-    expect(fake.spawns[0]!.name).toBe("cb-s1");
+    expect(fake.spawns[0]!.name).toBe("laun-s1");
     expect(fake.spawns[0]!.argv).toEqual([stub, ...buildPiArgs({ sessionId: "s1", piSessionDir: dir, model: "m", prompt: "hi" })]);
     expect(fake.spawns[0]!.stdin).toBe("ignore");
-    await pollFor(() => fake.removes.includes("cb-s1"), "sandbox removal after one-shot");
+    await pollFor(() => fake.removes.includes("laun-s1"), "sandbox removal after one-shot");
   });
 
   test("create failure emits a loud error and never spawns unsandboxed", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-sbx-jsonfail-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-sbx-jsonfail-"));
     const fake = new FakeRunner();
     fake.failCreate = new Error("gateway refused");
     const events: AgentEvent[] = [];
@@ -528,11 +528,11 @@ describe("json through the runner (fake)", () => {
 
 describe("server wiring: enabled runs the agent inside a sandbox", () => {
   test("POST /run creates, execs through, and deletes the sandbox", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-sbx-server-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-sbx-server-"));
     for (const f of ["create.log", "exec.log", "delete.log"]) writeFileSync(join(dir, f), "");
-    process.env["CB_SANDBOX_CREATE_LOG"] = join(dir, "create.log");
-    process.env["CB_SANDBOX_EXEC_LOG"] = join(dir, "exec.log");
-    process.env["CB_SANDBOX_DELETE_LOG"] = join(dir, "delete.log");
+    process.env["LAUN_SANDBOX_CREATE_LOG"] = join(dir, "create.log");
+    process.env["LAUN_SANDBOX_EXEC_LOG"] = join(dir, "exec.log");
+    process.env["LAUN_SANDBOX_DELETE_LOG"] = join(dir, "delete.log");
     const openshellStub = writeOpenshellStub(dir);
     const piStub = oneShotJsonStub(dir);
     const cfg = loadConfig({
@@ -563,19 +563,19 @@ describe("server wiring: enabled runs the agent inside a sandbox", () => {
       expect(events.at(-1)).toMatchObject({ type: "status", status: "done" });
       // The agent ran inside the sandbox, with create flags from config.
       const created = readFileSync(join(dir, "create.log"), "utf8");
-      for (const flag of ["--name cb-ssbx", "--from pi-agent:local", "--provider prov-a", "--policy /pol.yaml", "--approval-mode auto"]) {
+      for (const flag of ["--name laun-ssbx", "--from pi-agent:local", "--provider prov-a", "--policy /pol.yaml", "--approval-mode auto"]) {
         expect(created).toContain(flag);
       }
       const execed = readFileSync(join(dir, "exec.log"), "utf8");
-      expect(execed).toContain("-n cb-ssbx");
+      expect(execed).toContain("-n laun-ssbx");
       expect(execed).toContain(piStub);
       // One-shot child closed: its sandbox was deleted.
-      await pollFor(() => readFileSync(join(dir, "delete.log"), "utf8").includes("cb-ssbx"), "sandbox deletion after run");
+      await pollFor(() => readFileSync(join(dir, "delete.log"), "utf8").includes("laun-ssbx"), "sandbox deletion after run");
       expect(handler.busy.size).toBe(0);
     } finally {
-      delete process.env["CB_SANDBOX_CREATE_LOG"];
-      delete process.env["CB_SANDBOX_EXEC_LOG"];
-      delete process.env["CB_SANDBOX_DELETE_LOG"];
+      delete process.env["LAUN_SANDBOX_CREATE_LOG"];
+      delete process.env["LAUN_SANDBOX_EXEC_LOG"];
+      delete process.env["LAUN_SANDBOX_DELETE_LOG"];
       handler.close();
     }
   });

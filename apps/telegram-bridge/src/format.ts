@@ -1,4 +1,4 @@
-import type { AgentEvent, SessionRecord } from "@cloudbear/protocol";
+import type { AgentEvent, SessionRecord } from "@laun/protocol";
 
 /** Max Telegram message length; we chunk below it. */
 export const TG_MAX = 4000;

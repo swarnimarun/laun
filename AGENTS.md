@@ -1,4 +1,4 @@
-# AGENTS.md — cloudbear conventions
+# AGENTS.md — laun conventions
 
 * Bun-only repo (`bun >= 1.2`). Run everything with `bun install`, `bun run`, `bun test`, `bun x`. No npm/node direct use.
 * TypeScript strict, ESM. Bun runs `src/*.ts` directly (`bun --hot apps/...`); `tsc -b` is only for typecheck/build. No new runtime deps without reason.

@@ -13,7 +13,7 @@
 # Build (on the gateway host, where the images are resolved):
 #   docker build -t pi-agent:local -f deploy/openshell/Dockerfile.pi .
 #
-# `cloudbear`'s OpenShell bring-up (deploy/openshell/install-and-verify.sh)
+# `laun`'s OpenShell bring-up (deploy/openshell/install-and-verify.sh)
 # expects this tag; override with PI_IMAGE=<ref> if you push it elsewhere.
 FROM node:24-bookworm-slim
 

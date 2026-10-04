@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseAgentKey } from "@cloudbear/protocol";
+import { parseAgentKey } from "@laun/protocol";
 import { UsageError, flagBool, flagString, parseArgs, requiredArg } from "./args.js";
 import {
   isValidTargetName,
@@ -45,23 +45,23 @@ describe("args", () => {
 
 describe("config", () => {
   test("saves 0600 in a 0700 dir and round-trips", () => {
-    const home = mkdtempSync(join(tmpdir(), "cb-home-"));
-    const path = saveTarget({ host: "203.0.113.9", port: 8080, scheme: "http", key: "cb_aabbccdd_secretsecretsecretsecret", keyId: "aabbccdd" }, home);
+    const home = mkdtempSync(join(tmpdir(), "laun-home-"));
+    const path = saveTarget({ host: "203.0.113.9", port: 8080, scheme: "http", key: "laun_aabbccdd_secretsecretsecretsecret", keyId: "aabbccdd" }, home);
     expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(statSync(join(home, ".cloudbear")).mode & 0o777).toBe(0o700);
+    expect(statSync(join(home, ".laun")).mode & 0o777).toBe(0o700);
     expect(loadTarget(home)?.host).toBe("203.0.113.9");
   });
 
   test("env overrides the saved target, and half a target is ignored", () => {
-    const home = mkdtempSync(join(tmpdir(), "cb-home-"));
-    saveTarget({ host: "saved", port: 8080, scheme: "http", key: "cb_aabbccdd_secretsecretsecretsecret" }, home);
+    const home = mkdtempSync(join(tmpdir(), "laun-home-"));
+    saveTarget({ host: "saved", port: 8080, scheme: "http", key: "laun_aabbccdd_secretsecretsecretsecret" }, home);
     expect(resolveTarget({} as NodeJS.ProcessEnv, home)?.host).toBe("saved");
-    expect(resolveTarget({ CLOUDBEAR_KEY: "k" } as NodeJS.ProcessEnv, home)?.host).toBe("saved");
-    expect(resolveTarget({ CLOUDBEAR_HOST: "envhost", CLOUDBEAR_KEY: "cb_aabbccdd_secretsecretsecretsecret" } as NodeJS.ProcessEnv, home)?.host).toBe("envhost");
+    expect(resolveTarget({ LAUN_KEY: "k" } as NodeJS.ProcessEnv, home)?.host).toBe("saved");
+    expect(resolveTarget({ LAUN_HOST: "envhost", LAUN_KEY: "laun_aabbccdd_secretsecretsecretsecret" } as NodeJS.ProcessEnv, home)?.host).toBe("envhost");
   });
 
   test("missing file yields null instead of throwing", () => {
-    expect(loadTarget(mkdtempSync(join(tmpdir(), "cb-home-"))) ).toBeNull();
+    expect(loadTarget(mkdtempSync(join(tmpdir(), "laun-home-"))) ).toBeNull();
   });
 
   test("targetUrl keeps IPv6 usable", () => {
@@ -75,17 +75,17 @@ describe("env generation", () => {
     // Regression: `setup ssh` writes this file to the host verbatim, so a key
     // missing locally silently reverted the remote — EXECUTOR_MODE=rpc was
     // wiped back to json by a later setup run.
-    const dir = mkdtempSync(join(tmpdir(), "cb-envseed-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-envseed-"));
     const envPath = join(dir, ".env");
     const examplePath = join(dir, "example.env");
-    writeFileSync(examplePath, "GATEWAY_TOKEN=change-me\nCLOUDBEAR_KEY=\nEXECUTOR_MODE=rpc\nRUN_TIMEOUT_MS=1800000\n");
-    writeFileSync(envPath, "GATEWAY_TOKEN=mine-keep-me\nCLOUDBEAR_KEY=\n");
+    writeFileSync(examplePath, "GATEWAY_TOKEN=change-me\nLAUN_KEY=\nEXECUTOR_MODE=rpc\nRUN_TIMEOUT_MS=1800000\n");
+    writeFileSync(envPath, "GATEWAY_TOKEN=mine-keep-me\nLAUN_KEY=\n");
 
     const first = ensureEnv(envPath, examplePath);
     expect(readEnvValue(first.content, "GATEWAY_TOKEN")).toBe("mine-keep-me"); // untouched
     expect(readEnvValue(first.content, "EXECUTOR_MODE")).toBe("rpc"); // seeded
     expect(readEnvValue(first.content, "RUN_TIMEOUT_MS")).toBe("1800000"); // seeded
-    expect(readEnvValue(first.content, "CLOUDBEAR_KEY")).toMatch(/^cb_/); // generated
+    expect(readEnvValue(first.content, "LAUN_KEY")).toMatch(/^laun_/); // generated
 
     const again = ensureEnv(envPath, examplePath);
     expect(readEnvValue(again.content, "EXECUTOR_MODE")).toBe("rpc"); // idempotent
@@ -95,11 +95,11 @@ describe("env generation", () => {
 
   test("fills placeholders and never clobbers a live secret", () => {
     const example = "GATEWAY_TOKEN=change-me-to-a-long-random-string\nOTHER=1\n";
-    const first = ensureEnv(join(mkdtempSync(join(tmpdir(), "cb-env-")), ".env"), "");
+    const first = ensureEnv(join(mkdtempSync(join(tmpdir(), "laun-env-")), ".env"), "");
     expect(first.token.length).toBeGreaterThan(20);
     expect(parseAgentKey(first.key)?.id).toBeDefined();
 
-    const dir = mkdtempSync(join(tmpdir(), "cb-env-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-env-"));
     const examplePath = join(dir, "example.env");
     const envPath = join(dir, ".env");
     writeFileSync(examplePath, example);
@@ -107,7 +107,7 @@ describe("env generation", () => {
     expect(created.created).toBe(true);
     expect(readEnvValue(created.content, "GATEWAY_TOKEN")).toBe(created.token);
     expect(readEnvValue(created.content, "OTHER")).toBe("1");
-    expect(parseAgentKey(readEnvValue(created.content, "CLOUDBEAR_KEY")!)).not.toBeNull();
+    expect(parseAgentKey(readEnvValue(created.content, "LAUN_KEY")!)).not.toBeNull();
 
     // re-running keeps the same gateway token and key
     const again = ensureEnv(envPath, examplePath);
@@ -116,9 +116,9 @@ describe("env generation", () => {
     expect(statSync(envPath).mode & 0o777).toBe(0o600);
 
     // an existing hand-written token is preserved verbatim
-    const custom = upsertEnv("GATEWAY_TOKEN=my-own-token\nCLOUDBEAR_KEY=\n", { GATEWAY_TOKEN: "generated", CLOUDBEAR_KEY: "cb_aabbccdd_x" });
+    const custom = upsertEnv("GATEWAY_TOKEN=my-own-token\nLAUN_KEY=\n", { GATEWAY_TOKEN: "generated", LAUN_KEY: "laun_aabbccdd_x" });
     expect(readEnvValue(custom, "GATEWAY_TOKEN")).toBe("my-own-token");
-    expect(readEnvValue(custom, "CLOUDBEAR_KEY")).toBe("cb_aabbccdd_x");
+    expect(readEnvValue(custom, "LAUN_KEY")).toBe("laun_aabbccdd_x");
   });
 });
 
@@ -144,26 +144,26 @@ describe("ssh layer", () => {
     const calls: Array<{ argv: string[]; stdin?: string }> = [];
     const runner: CommandRunner = async (argv, opts) => {
       calls.push({ argv, stdin: opts?.stdin });
-      return { code: 0, stdout: "==> done\nCLOUDBEAR_DIR=/opt/cloudbear\nCLOUDBEAR_PORT=8081\nCLOUDBEAR_KEY=cb_aabbccdd_secretsecretsecretsecret\n", stderr: "" };
+      return { code: 0, stdout: "==> done\nLAUN_DIR=/opt/laun\nLAUN_PORT=8081\nLAUN_KEY=laun_aabbccdd_secretsecretsecretsecret\n", stderr: "" };
     };
-    const key = "cb_aabbccdd_secretsecretsecretsecret";
+    const key = "laun_aabbccdd_secretsecretsecretsecret";
     const result = await runRemoteSetup({
       ...spec,
-      remoteDir: "/opt/cloudbear",
-      repoUrl: "git@github.com:me/cloudbear.git",
-      envContent: `GATEWAY_TOKEN=super-secret-token\nCLOUDBEAR_KEY=${key}\n`,
+      remoteDir: "/opt/laun",
+      repoUrl: "git@github.com:me/laun.git",
+      envContent: `GATEWAY_TOKEN=super-secret-token\nLAUN_KEY=${key}\n`,
       bootstrapScript: "#!/usr/bin/env bash\nset -euo pipefail\n",
       runner,
     });
 
-    expect(result).toEqual({ key, port: 8081, dir: "/opt/cloudbear" });
+    expect(result).toEqual({ key, port: 8081, dir: "/opt/laun" });
     expect(calls).toHaveLength(3);
-    expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain("mkdir -p '/opt/cloudbear'");
+    expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain("mkdir -p '/opt/laun'");
     // non-root users need the sudo fallback for paths such as /opt/...
-    expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain("sudo -n mkdir -p '/opt/cloudbear'");
+    expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain("sudo -n mkdir -p '/opt/laun'");
     expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain("$(id -u):$(id -g)");
-    expect(calls[1]!.argv[calls[1]!.argv.length - 1]).toContain("cat > '/opt/cloudbear'/.env");
-    expect(calls[2]!.argv[calls[2]!.argv.length - 1]).toBe("bash -s -- '/opt/cloudbear' 'git@github.com:me/cloudbear.git'");
+    expect(calls[1]!.argv[calls[1]!.argv.length - 1]).toContain("cat > '/opt/laun'/.env");
+    expect(calls[2]!.argv[calls[2]!.argv.length - 1]).toBe("bash -s -- '/opt/laun' 'git@github.com:me/laun.git'");
     // the env travels on stdin, and no secret ever appears in argv
     expect(calls[1]!.stdin).toContain(key);
     for (const call of calls) {
@@ -181,7 +181,7 @@ describe("ssh layer", () => {
     };
     await expect(
       runRemoteSetup({ ...spec, remoteDir: "/d", envContent: "x", bootstrapScript: "y", runner }),
-    ).rejects.toThrow(/remote setup failed.*CLOUDBEAR_KEY/s);
+    ).rejects.toThrow(/remote setup failed.*LAUN_KEY/s);
   });
 
   test("runRemoteSetup surfaces an ssh failure before bootstrapping", async () => {
@@ -237,8 +237,8 @@ describe("ssh layer", () => {
   });
 
   test("lastMatch returns the final occurrence", () => {
-    expect(lastMatch("CLOUDBEAR_KEY=a\nCLOUDBEAR_KEY=b\n", /^CLOUDBEAR_KEY=(.*)$/m)).toBe("b");
-    expect(lastMatch("nothing", /^CLOUDBEAR_KEY=(.*)$/m)).toBeNull();
+    expect(lastMatch("LAUN_KEY=a\nLAUN_KEY=b\n", /^LAUN_KEY=(.*)$/m)).toBe("b");
+    expect(lastMatch("nothing", /^LAUN_KEY=(.*)$/m)).toBeNull();
   });
 });
 
@@ -275,7 +275,7 @@ describe("bootstrap contract", () => {
     expect(body.startsWith("#!/usr/bin/env bash")).toBe(true);
     // the key must be the last summary line the CLI parses
     const lines = body.trimEnd().split("\n");
-    expect(lines[lines.length - 1]).toContain("CLOUDBEAR_KEY=");
+    expect(lines[lines.length - 1]).toContain("LAUN_KEY=");
     // and the service token must never be echoed
     expect(body).not.toMatch(/printf.*GATEWAY_TOKEN/);
   });
@@ -306,10 +306,10 @@ describe("bootstrap contract", () => {
   });
 });
 describe("named targets", () => {
-  const KEY = "cb_aabbccdd_" + "s".repeat(30);
+  const KEY = "laun_aabbccdd_" + "s".repeat(30);
 
   test("save/load round-trips with the same 0600/0700 conventions as the default file", () => {
-    const home = mkdtempSync(join(tmpdir(), "cb-targets-"));
+    const home = mkdtempSync(join(tmpdir(), "laun-targets-"));
     const path = saveNamedTarget("vps1", { host: "203.0.113.9", port: 8080, scheme: "http", key: KEY, keyId: "aabbccdd" }, home);
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(loadNamedTarget("vps1", home)).toEqual({ host: "203.0.113.9", port: 8080, scheme: "http", key: KEY, keyId: "aabbccdd" });
@@ -322,23 +322,23 @@ describe("named targets", () => {
     for (const bad of ["", "..", "../x", "a/b", "a b", ".hidden", "x".repeat(65)]) {
       expect(isValidTargetName(bad)).toBe(false);
     }
-    const home = mkdtempSync(join(tmpdir(), "cb-targets-"));
+    const home = mkdtempSync(join(tmpdir(), "laun-targets-"));
     expect(() => saveNamedTarget("../evil", { host: "h", port: 1, scheme: "http", key: KEY }, home)).toThrow();
   });
 
   test("list is sorted by name and skips corrupt files", () => {
-    const home = mkdtempSync(join(tmpdir(), "cb-targets-"));
+    const home = mkdtempSync(join(tmpdir(), "laun-targets-"));
     saveNamedTarget("b-host", { host: "b", port: 8080, scheme: "http", key: KEY }, home);
     saveNamedTarget("a-host", { host: "a", port: 8080, scheme: "http", key: KEY }, home);
-    writeFileSync(join(home, ".cloudbear", "targets", "broken.json"), "not json{");
+    writeFileSync(join(home, ".laun", "targets", "broken.json"), "not json{");
     expect(listNamedTargets(home).map((t) => t.name)).toEqual(["a-host", "b-host"]);
-    expect(listNamedTargets(mkdtempSync(join(tmpdir(), "cb-targets-")))).toEqual([]);
+    expect(listNamedTargets(mkdtempSync(join(tmpdir(), "laun-targets-")))).toEqual([]);
   });
 
   test("a named selection resolves; an absent flag keeps the current default", () => {
-    const home = mkdtempSync(join(tmpdir(), "cb-targets-"));
+    const home = mkdtempSync(join(tmpdir(), "laun-targets-"));
     saveNamedTarget("vps1", { host: "named-host", port: 8080, scheme: "http", key: KEY }, home);
-    const env = { HOME: home, CLOUDBEAR_HOST: "env-host", CLOUDBEAR_KEY: KEY } as NodeJS.ProcessEnv;
+    const env = { HOME: home, LAUN_HOST: "env-host", LAUN_KEY: KEY } as NodeJS.ProcessEnv;
     // Explicit --target wins over the env override.
     expect(resolveTarget(env, home, "vps1")?.host).toBe("named-host");
     // Without it, resolution is exactly what it always was (env here).
@@ -349,7 +349,7 @@ describe("named targets", () => {
 });
 
 describe("target + watch + doctor commands", () => {
-  const KEY = "cb_aabbccdd_" + "q".repeat(30);
+  const KEY = "laun_aabbccdd_" + "q".repeat(30);
   const rec = {
     id: "s1",
     goal: "a goal",
@@ -403,11 +403,11 @@ describe("target + watch + doctor commands", () => {
 
   function serverEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
     const u = new URL(base);
-    return { CLOUDBEAR_HOST: u.hostname, CLOUDBEAR_PORT: u.port, CLOUDBEAR_KEY: KEY, ...extra } as NodeJS.ProcessEnv;
+    return { LAUN_HOST: u.hostname, LAUN_PORT: u.port, LAUN_KEY: KEY, ...extra } as NodeJS.ProcessEnv;
   }
 
   test("target add/ls round-trips; ls shows the id, never the key", async () => {
-    const home = mkdtempSync(join(tmpdir(), "cb-targetcmd-"));
+    const home = mkdtempSync(join(tmpdir(), "laun-targetcmd-"));
     const env = { HOME: home } as NodeJS.ProcessEnv;
     const u = new URL(base);
     let io = makeIo();
@@ -424,7 +424,7 @@ describe("target + watch + doctor commands", () => {
   });
 
   test("target add validates its inputs", async () => {
-    const env = { HOME: mkdtempSync(join(tmpdir(), "cb-targetcmd-")) } as NodeJS.ProcessEnv;
+    const env = { HOME: mkdtempSync(join(tmpdir(), "laun-targetcmd-")) } as NodeJS.ProcessEnv;
     for (const args of [
       ["target", "add", "n1", "--host", "h"],
       ["target", "add", "n1", "--key", KEY],
@@ -437,7 +437,7 @@ describe("target + watch + doctor commands", () => {
   });
 
   test("--target selects the saved host; absent flag keeps the default (none here)", async () => {
-    const home = mkdtempSync(join(tmpdir(), "cb-targetcmd-"));
+    const home = mkdtempSync(join(tmpdir(), "laun-targetcmd-"));
     const u = new URL(base);
     expect(await main(["target", "add", "n1", "--host", u.hostname, "--port", u.port, "--key", KEY], { HOME: home } as NodeJS.ProcessEnv, makeIo())).toBe(0);
     let io = makeIo();
@@ -484,10 +484,10 @@ describe("target + watch + doctor commands", () => {
 
   test("doctor: no target, dead gateway, and bad usage exit 1, 1, 2", async () => {
     let io = makeIo();
-    expect(await main(["doctor"], { HOME: mkdtempSync(join(tmpdir(), "cb-doctor-")) } as NodeJS.ProcessEnv, io)).toBe(1);
+    expect(await main(["doctor"], { HOME: mkdtempSync(join(tmpdir(), "laun-doctor-")) } as NodeJS.ProcessEnv, io)).toBe(1);
     expect(io.lines.join("\n")).toContain("no target");
     io = makeIo();
-    const env = { HOME: mkdtempSync(join(tmpdir(), "cb-doctor-")), CLOUDBEAR_HOST: "127.0.0.1", CLOUDBEAR_PORT: "9", CLOUDBEAR_KEY: KEY } as NodeJS.ProcessEnv;
+    const env = { HOME: mkdtempSync(join(tmpdir(), "laun-doctor-")), LAUN_HOST: "127.0.0.1", LAUN_PORT: "9", LAUN_KEY: KEY } as NodeJS.ProcessEnv;
     expect(await main(["doctor"], env, io)).toBe(1);
     expect(io.lines.join("\n")).toContain("unreachable");
     io = makeIo();

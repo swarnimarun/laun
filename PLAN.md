@@ -1,8 +1,8 @@
-# Cloudbear plan
+# Laun plan
 
 Where the project is, what was verified, and what to build next.
 
-## What cloudbear is
+## What laun is
 
 A self-hosted remote agent service: one VPS, running 24/7, that you drive from
 Telegram, a terminal, or a browser.
@@ -146,7 +146,7 @@ RPC-only), and there was no way to stop a runaway session.
 | # | Task | Seam | Owner |
 | --- | --- | --- | --- |
 | M2.1 | RPC executor: one long-lived `pi --mode rpc` child per session, `set_auto_retry`, completion on `agent_settled`, idle TTL, `POST /abort`; `json` mode kept as a flag-guarded fallback | `apps/executor/**` | Lane A (worker + validator) |
-| M2.2 | CLI: `cloudbear list` aliases, `agent stop`, `agent continue`, `--json` everywhere | `apps/cli/**` | Lane B (worker + validator) |
+| M2.2 | CLI: `laun list` aliases, `agent stop`, `agent continue`, `--json` everywhere | `apps/laun/**` | Lane B (worker + validator) |
 | M2.3 | Gateway: `POST /sessions/:id/abort` routed to the executor; `steer` so a message can land mid-run | `apps/gateway/**` | integrator |
 | M2.4 | Run lease + heartbeat so a dead executor cannot leave a session `running` forever (today boot recovery only marks it `error`) | `apps/gateway/**` | integrator |
 | M2.5 | Surface pi's `usage` (tokens/cost) as events — the field is already on `message_update` and we currently drop it | `packages/protocol` + executor | later wave |
@@ -199,7 +199,7 @@ checkout with no `.jj`, so `jj log`/`jj status` fail inside it — that is a cop
 not a lane. Create it yourself and pass the child an explicit `cwd`:
 
 ```sh
-jj workspace add ../cloudbear-lane-<name>   # sibling, outside the repo tree
+jj workspace add ../laun-lane-<name>   # sibling, outside the repo tree
 ```
 
 **One writer per seam.** The worker owns exactly one directory subtree. The

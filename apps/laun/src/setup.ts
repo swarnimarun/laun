@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { formatAgentKey } from "@cloudbear/protocol";
+import { formatAgentKey } from "@laun/protocol";
 import { UsageError } from "./args.js";
 import { bunRunner, runRemoteSetup, type CommandRunner } from "./ssh.js";
 
@@ -70,7 +70,7 @@ export function ensureEnv(envPath: string, examplePath: string): EnvResult {
   const created = !existsSync(envPath);
   const example = existsSync(examplePath) ? readFileSync(examplePath, "utf8") : "";
   const base = created
-    ? example || "GATEWAY_TOKEN=\nCLOUDBEAR_KEY=\n"
+    ? example || "GATEWAY_TOKEN=\nLAUN_KEY=\n"
     : readFileSync(envPath, "utf8");
 
   // Carry every key the example defines but this file lacks. `setup ssh` writes
@@ -83,13 +83,13 @@ export function ensureEnv(envPath: string, examplePath: string): EnvResult {
     if (m) updates[m[1]!] = m[2]!;
   }
   updates["GATEWAY_TOKEN"] = randomToken();
-  updates["CLOUDBEAR_KEY"] = randomAgentKey();
+  updates["LAUN_KEY"] = randomAgentKey();
 
   const content = upsertEnv(base, updates);
   if (content !== base) writeFileSync(envPath, content, { mode: 0o600 });
   const token = readEnvValue(content, "GATEWAY_TOKEN");
-  const key = readEnvValue(content, "CLOUDBEAR_KEY");
-  if (!token || !key) throw new Error(`could not prepare ${envPath}: GATEWAY_TOKEN or CLOUDBEAR_KEY missing`);
+  const key = readEnvValue(content, "LAUN_KEY");
+  if (!token || !key) throw new Error(`could not prepare ${envPath}: GATEWAY_TOKEN or LAUN_KEY missing`);
   return { path: envPath, created, content, token, key };
 }
 
@@ -107,14 +107,14 @@ export function repoRoot(): string {
 export function connectionBlock(url: string, key: string, host: string): string {
   return [
     "",
-    "  cloudbear is ready.",
+    "  laun is ready.",
     "",
     `  URL   ${url}`,
     `  Key   ${key}`,
     `  UI    ${url}/   (paste the key)`,
     "",
     "  Save it for the CLI:",
-    `    cloudbear agent auth --host ${host} --key ${key}`,
+    `    laun agent auth --host ${host} --key ${key}`,
     "",
     "  The key is a password: it is shown once here and stored only as a hash",
     "  on the gateway. Keep it out of shell history and git.",
@@ -160,7 +160,7 @@ export interface SshUserAndHost {
  */
 export function parseSshTarget(rawHost: string, userFlag?: string, defaultUser = "root"): SshUserAndHost {
   const trimmed = rawHost.trim();
-  if (!trimmed) throw new UsageError(`missing host\n\nusage: cloudbear setup ssh -i <identity> [user@]host`);
+  if (!trimmed) throw new UsageError(`missing host\n\nusage: laun setup ssh -i <identity> [user@]host`);
   let host = trimmed;
   let user = userFlag?.trim() || undefined;
   const at = trimmed.lastIndexOf("@");

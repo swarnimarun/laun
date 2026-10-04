@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { parseAgentKey } from "@cloudbear/protocol";
+import { parseAgentKey } from "@laun/protocol";
 import { UsageError, flagBool, flagString, parseArgs, requiredArg } from "./args.js";
 import {
   createTranscript,
@@ -30,57 +30,57 @@ import { connectionBlock, localSetup, parseSshTarget, remoteSetup } from "./setu
 
 export const CLI_VERSION = "0.1.0";
 
-const HELP = `cloudbear — self-hosted remote agent control
+const HELP = `laun — self-hosted remote agent control
 
   Setup
-    cloudbear setup [--host <ip>] [--no-start] [--model <m>] [--env-file <path>]
+    laun setup [--host <ip>] [--no-start] [--model <m>] [--env-file <path>]
         Prepare .env locally (gateway token + agent key) and start the stack.
 
-    cloudbear setup ssh -i <identity> [--user <u>] [--port <n>] [--remote-dir <dir>]
+    laun setup ssh -i <identity> [--user <u>] [--port <n>] [--remote-dir <dir>]
         [--repo-url <url>] [--no-start] <host>
         Bootstrap a VPS over SSH and print its agent key.
 
   Connect
-    cloudbear agent auth --host <host> --key <key> [--port <n>] [--scheme http|https]
-        Verify the key and save it to ~/.cloudbear/auth.json (0600).
+    laun agent auth --host <host> --key <key> [--port <n>] [--scheme http|https]
+        Verify the key and save it to ~/.laun/auth.json (0600).
 
   Drive agents (all accept --target <name> for a saved host)
-    cloudbear agent new "<goal>" [--model <m>] [--json]
-    cloudbear agent ls [--json]
-    cloudbear agent status <id> [--json]
-    cloudbear agent log <id> [--follow] [--since <n>] [--json]
-    cloudbear agent say <id> <text> [--json]
-    cloudbear agent stop <id> [--json]
-    cloudbear agent continue <id> [--json]   (alias: retry)
-    cloudbear agent approve <id> <requestId> [--note <t>] [--json]
-    cloudbear agent deny <id> <requestId> [--note <t>] [--json]
-    cloudbear agent watch <id> [--poll-ms <ms>] [--timeout <dur>]
+    laun agent new "<goal>" [--model <m>] [--json]
+    laun agent ls [--json]
+    laun agent status <id> [--json]
+    laun agent log <id> [--follow] [--since <n>] [--json]
+    laun agent say <id> <text> [--json]
+    laun agent stop <id> [--json]
+    laun agent continue <id> [--json]   (alias: retry)
+    laun agent approve <id> <requestId> [--note <t>] [--json]
+    laun agent deny <id> <requestId> [--note <t>] [--json]
+    laun agent watch <id> [--poll-ms <ms>] [--timeout <dur>]
         Wait until the run settles; exit 0 done, 1 error, 2 timeout.
         Durations: bare numbers are ms; suffixes ms|s|m|h (e.g. 30s, 5m).
 
   Health + named hosts
-    cloudbear doctor [--target <name>]
+    laun doctor [--target <name>]
         Check gateway reachability, saved target, key, and common failures.
-    cloudbear target ls
-    cloudbear target add <name> --host <h> --key <k> [--port <n>] [--scheme http|https]
+    laun target ls
+    laun target add <name> --host <h> --key <k> [--port <n>] [--scheme http|https]
         Saved hosts; selected per-command with --target <name>. Without the
         flag the default target (env or auth file) is used, as before.
 
   Shortcuts (same as the agent command in brackets)
-    cloudbear list|ls                    (= agent ls)
-    cloudbear status <id>                (= agent status <id>)
-    cloudbear log <id> [--follow] [--since <n>] [--json]
-    cloudbear run "<goal>"               (= agent new; alias of new)
-    cloudbear stop <id> [--json]         (= agent stop <id>)
-    cloudbear approve|deny <id> <requestId>
+    laun list|ls                    (= agent ls)
+    laun status <id>                (= agent status <id>)
+    laun log <id> [--follow] [--since <n>] [--json]
+    laun run "<goal>"               (= agent new; alias of new)
+    laun stop <id> [--json]         (= agent stop <id>)
+    laun approve|deny <id> <requestId>
     (agent also accepts the aliases: list (= ls), run (= new), retry (= continue))
 
   Keys (needs GATEWAY_TOKEN, the service secret)
-    cloudbear keys ls
-    cloudbear keys create [--label <l>]
-    cloudbear keys revoke <id>
+    laun keys ls
+    laun keys create [--label <l>]
+    laun keys revoke <id>
 
-  Environment overrides: CLOUDBEAR_HOST, CLOUDBEAR_PORT, CLOUDBEAR_KEY
+  Environment overrides: LAUN_HOST, LAUN_PORT, LAUN_KEY
 `;
 
 export interface Io {
@@ -107,13 +107,13 @@ function requireTarget(env: NodeJS.ProcessEnv, io: Io, name?: string): Target {
     if (!named) {
       const known = listNamedTargets(home).map((t) => t.name);
       throw new UsageError(
-        known.length > 0 ? `unknown target "${name}" — saved targets: ${known.join(", ")}` : `unknown target "${name}" — no saved targets yet (add one with: cloudbear target add <name> --host <ip> --key <key>)`,
+        known.length > 0 ? `unknown target "${name}" — saved targets: ${known.join(", ")}` : `unknown target "${name}" — no saved targets yet (add one with: laun target add <name> --host <ip> --key <key>)`,
       );
     }
     return named;
   }
   const target = resolveTarget(env);
-  if (!target) throw new UsageError(`not connected to a cloudbear yet — run: cloudbear agent auth --host <ip> --key <key>`);
+  if (!target) throw new UsageError(`not connected to a laun yet — run: laun agent auth --host <ip> --key <key>`);
   return target;
 }
 
@@ -165,7 +165,7 @@ async function setupCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
       boolean: ["no-start", "json"],
       value: ["i", "identity", "user", "port", "remote-dir", "repo-url", "env-file"],
     });
-    const rawHost = requiredArg(parseArgs(rest, { boolean: ["no-start"], value: ["i", "identity", "user", "port", "remote-dir", "repo-url", "env-file"] }).positionals, 0, "host", "cloudbear setup ssh -i <identity> [user@]host");
+    const rawHost = requiredArg(parseArgs(rest, { boolean: ["no-start"], value: ["i", "identity", "user", "port", "remote-dir", "repo-url", "env-file"] }).positionals, 0, "host", "laun setup ssh -i <identity> [user@]host");
     const identity = flagString(flags, "i") ?? flagString(flags, "identity");
     if (!identity) throw new UsageError("setup ssh needs a private key: -i <identity>");
     const portRaw = flagString(flags, "port");
@@ -175,7 +175,7 @@ async function setupCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
       host: target.host,
       user: target.user,
       port: portRaw ? Number(portRaw) : undefined,
-      remoteDir: flagString(flags, "remote-dir") ?? "/opt/cloudbear",
+      remoteDir: flagString(flags, "remote-dir") ?? "/opt/laun",
       repoUrl: flagString(flags, "repo-url"),
       noStart: flagBool(flags, "no-start"),
       envFile: flagString(flags, "env-file") ?? ".env",
@@ -217,14 +217,14 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
   const sub = rawSub === undefined ? undefined : (AGENT_SUB_ALIASES[rawSub] ?? rawSub);
 
   if (sub === "auth" && split.target !== undefined) {
-    throw new UsageError("agent auth saves the default target — name it afterwards with: cloudbear target add <name> --host <host> --key <key>");
+    throw new UsageError("agent auth saves the default target — name it afterwards with: laun target add <name> --host <host> --key <key>");
   }
 
   if (sub === "auth") {
     const { flags } = parseArgs(rest, { boolean: ["json"], value: ["host", "key", "port", "scheme"] });
     const host = flagString(flags, "host");
     const key = flagString(flags, "key");
-    if (!host || !key) throw new UsageError("usage: cloudbear agent auth --host <host> --key <key> [--port <n>] [--scheme http|https]");
+    if (!host || !key) throw new UsageError("usage: laun agent auth --host <host> --key <key> [--port <n>] [--scheme http|https]");
     const target: Target = {
       host,
       port: Number(flagString(flags, "port") ?? 8080),
@@ -238,7 +238,7 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
     const health = await client.health();
     const { sessions } = await client.listSessions();
     // Home comes from the env this invocation was given, not a bare homedir(),
-    // so a test cannot write into the operator's real ~/.cloudbear.
+    // so a test cannot write into the operator's real ~/.laun.
     const saved = saveTarget(target, homeFor(env));
     if (flagBool(flags, "json")) io.out(JSON.stringify({ ...target, saved, sessions: sessions.length }));
     else {
@@ -254,7 +254,7 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
 
   if (sub === "new") {
     const parsed = parseArgs(rest, { boolean: ["json"], value: ["model"] });
-    const goal = requiredArg(parsed.positionals, 0, "goal", 'cloudbear agent new "<goal>"');
+    const goal = requiredArg(parsed.positionals, 0, "goal", 'laun agent new "<goal>"');
     const rec = await client.createSession(goal, flagString(parsed.flags, "model"));
     if (flagBool(parsed.flags, "json")) io.out(JSON.stringify(rec));
     else io.out(`🚀 ${rec.id} [${rec.status}] ${rec.model}`);
@@ -265,14 +265,14 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
     const { flags } = parseArgs(rest, { boolean: ["json"] });
     const { sessions } = await client.listSessions();
     if (flagBool(flags, "json")) io.out(JSON.stringify(sessions));
-    else if (sessions.length === 0) io.out("no sessions yet — start one with: cloudbear agent new \"<goal>\"");
+    else if (sessions.length === 0) io.out("no sessions yet — start one with: laun agent new \"<goal>\"");
     else for (const s of sessions) io.out(sessionLine(s));
     return 0;
   }
 
   if (sub === "status") {
     const parsed = parseArgs(rest, { boolean: ["json"] });
-    const id = requiredArg(parsed.positionals, 0, "session id", "cloudbear agent status <id>");
+    const id = requiredArg(parsed.positionals, 0, "session id", "laun agent status <id>");
     const { session, pendingApprovals } = await client.getSession(id);
     if (flagBool(parsed.flags, "json")) io.out(JSON.stringify({ session, pendingApprovals }));
     else {
@@ -284,7 +284,7 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
 
   if (sub === "log") {
     const parsed = parseArgs(rest, { boolean: ["follow", "json"], value: ["since"] });
-    const id = requiredArg(parsed.positionals, 0, "session id", "cloudbear agent log <id> [--follow]");
+    const id = requiredArg(parsed.positionals, 0, "session id", "laun agent log <id> [--follow]");
     const since = flagString(parsed.flags, "since");
     const asJson = flagBool(parsed.flags, "json");
     const emit = createTranscript(io, asJson);
@@ -311,8 +311,8 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
 
   if (sub === "say") {
     const parsed = parseArgs(rest, { boolean: ["json"] });
-    const id = requiredArg(parsed.positionals, 0, "session id", 'cloudbear agent say <id> "<text>"');
-    const text = requiredArg(parsed.positionals, 1, "text", 'cloudbear agent say <id> "<text>"');
+    const id = requiredArg(parsed.positionals, 0, "session id", 'laun agent say <id> "<text>"');
+    const text = requiredArg(parsed.positionals, 1, "text", 'laun agent say <id> "<text>"');
     const asJson = flagBool(parsed.flags, "json");
     try {
       const res = await client.sendMessage(id, text);
@@ -331,7 +331,7 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
 
   if (sub === "stop") {
     const parsed = parseArgs(rest, { boolean: ["json"] });
-    const id = requiredArg(parsed.positionals, 0, "session id", "cloudbear agent stop <id>");
+    const id = requiredArg(parsed.positionals, 0, "session id", "laun agent stop <id>");
     try {
       const result = await client.abortSession(id);
       if (flagBool(parsed.flags, "json")) io.out(JSON.stringify({ sessionId: id, ...result }));
@@ -352,9 +352,9 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
 
   if (sub === "continue") {
     const parsed = parseArgs(rest, { boolean: ["json"] });
-    const id = requiredArg(parsed.positionals, 0, "session id", "cloudbear agent continue <id>");
+    const id = requiredArg(parsed.positionals, 0, "session id", "laun agent continue <id>");
     const asJson = flagBool(parsed.flags, "json");
-    const busyMessage = `⏳ session ${id} is already running — send input with: cloudbear agent say ${id} "<text>"`;
+    const busyMessage = `⏳ session ${id} is already running — send input with: laun agent say ${id} "<text>"`;
     // A busy session must keep its single run; a second run would collide
     // with it, so refuse before sending anything.
     const { session } = await client.getSession(id);
@@ -380,7 +380,7 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
 
   if (sub === "watch") {
     const parsed = parseArgs(rest, { value: ["poll-ms", "timeout"] });
-    const id = requiredArg(parsed.positionals, 0, "session id", "cloudbear agent watch <id> [--poll-ms <ms>] [--timeout <dur>]");
+    const id = requiredArg(parsed.positionals, 0, "session id", "laun agent watch <id> [--poll-ms <ms>] [--timeout <dur>]");
     const pollRaw = flagString(parsed.flags, "poll-ms");
     const timeoutRaw = flagString(parsed.flags, "timeout");
     const pollMs = pollRaw === undefined ? 2000 : parseDurationMs(pollRaw);
@@ -390,8 +390,8 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
 
   if (sub === "approve" || sub === "deny") {
     const parsed = parseArgs(rest, { boolean: ["json"], value: ["note"] });
-    const id = requiredArg(parsed.positionals, 0, "session id", `cloudbear agent ${sub} <id> <requestId>`);
-    const requestId = requiredArg(parsed.positionals, 1, "request id", `cloudbear agent ${sub} <id> <requestId>`);
+    const id = requiredArg(parsed.positionals, 0, "session id", `laun agent ${sub} <id> <requestId>`);
+    const requestId = requiredArg(parsed.positionals, 1, "request id", `laun agent ${sub} <id> <requestId>`);
     const res = await client.decideApproval(id, requestId, sub, flagString(parsed.flags, "note"));
     if (flagBool(parsed.flags, "json")) io.out(JSON.stringify({ sessionId: id, requestId, decision: sub, ...res }));
     else io.out(`${sub === "approve" ? "✅ approved" : "⛔ denied"} ${requestId} (session ${id})`);
@@ -423,7 +423,7 @@ async function keysCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Prom
   }
   if (sub === "revoke") {
     const parsed = parseArgs(rest);
-    const id = requiredArg(parsed.positionals, 0, "key id", "cloudbear keys revoke <id>");
+    const id = requiredArg(parsed.positionals, 0, "key id", "laun keys revoke <id>");
     const { ok } = await client.revokeKey(id);
     io.out(ok ? `revoked ${id}` : `key ${id} not found`);
     return ok ? 0 : 1;
@@ -433,7 +433,7 @@ async function keysCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Prom
 
 async function doctorCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Promise<number> {
   const { flags, positionals } = parseArgs(argv, { value: ["target"] });
-  if (positionals.length > 0) throw new UsageError("usage: cloudbear doctor [--target <name>]");
+  if (positionals.length > 0) throw new UsageError("usage: laun doctor [--target <name>]");
   const name = flagString(flags, "target");
   const home = homeFor(env);
   let resolved: Target | null;
@@ -448,7 +448,7 @@ async function doctorCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pr
   } else {
     resolved = resolveTarget(env);
   }
-  const fromEnv = name === undefined && Boolean((env["CLOUDBEAR_HOST"] ?? "").trim() && (env["CLOUDBEAR_KEY"] ?? "").trim());
+  const fromEnv = name === undefined && Boolean((env["LAUN_HOST"] ?? "").trim() && (env["LAUN_KEY"] ?? "").trim());
   const savedPresent = loadTarget(home) !== null;
   const probe = async (): Promise<DoctorProbe> => {
     if (!resolved) return { version: CLI_VERSION, target: null, savedPresent, keyPresent: false, gateway: null };
@@ -484,7 +484,7 @@ async function targetCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pr
     const named = listNamedTargets(home);
     const def = loadTarget(home);
     if (named.length === 0 && !def) {
-      io.out("no targets yet — save one with: cloudbear target add <name> --host <ip> --key <key>");
+      io.out("no targets yet — save one with: laun target add <name> --host <ip> --key <key>");
       return 0;
     }
     // Keys never printed here: the id is enough to correlate with `keys ls`.
@@ -495,11 +495,11 @@ async function targetCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pr
 
   if (sub === "add") {
     const parsed = parseArgs(rest, { value: ["host", "key", "port", "scheme"] });
-    const name = requiredArg(parsed.positionals, 0, "target name", "cloudbear target add <name> --host <host> --key <key> [--port <n>] [--scheme http|https]");
+    const name = requiredArg(parsed.positionals, 0, "target name", "laun target add <name> --host <host> --key <key> [--port <n>] [--scheme http|https]");
     if (!isValidTargetName(name)) throw new UsageError(`invalid target name "${name}" (use letters, numbers, - and _)`);
     const host = flagString(parsed.flags, "host");
     const key = flagString(parsed.flags, "key");
-    if (!host || !key) throw new UsageError("usage: cloudbear target add <name> --host <host> --key <key> [--port <n>] [--scheme http|https]");
+    if (!host || !key) throw new UsageError("usage: laun target add <name> --host <host> --key <key> [--port <n>] [--scheme http|https]");
     const portRaw = flagString(parsed.flags, "port");
     const port = portRaw === undefined ? 8080 : Number(portRaw);
     if (!Number.isInteger(port) || port <= 0 || port > 65535) throw new UsageError(`invalid port "${portRaw}"`);
@@ -540,7 +540,7 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
     return 0;
   }
   if (command === "--version" || command === "-v") {
-    io.out(`cloudbear ${CLI_VERSION}`);
+    io.out(`laun ${CLI_VERSION}`);
     return 0;
   }
   try {

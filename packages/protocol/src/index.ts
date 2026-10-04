@@ -1,4 +1,4 @@
-// Shared contract for cloudbear services.
+// Shared contract for laun services.
 // Gateway, executor, and telegram-bridge must import from here.
 // No pi/goose/dots-specific wire details outside the executor.
 
@@ -123,13 +123,13 @@ export function checkBearer(authHeader: string | null | undefined, expectedToken
 }
 
 // ---------------------------------------------------------------------------
-// Agent keys: the human-facing credential minted by `cloudbear setup` and used
+// Agent keys: the human-facing credential minted by `laun setup` and used
 // by the CLI and web UI. Distinct from GATEWAY_TOKEN, which stays service-only.
-// Wire form: cb_<id>_<secret>. Only the sha256 of <secret> is ever stored.
+// Wire form: laun_<id>_<secret>. Only the sha256 of <secret> is ever stored.
 // ---------------------------------------------------------------------------
 
-export const AGENT_KEY_PREFIX = "cb";
-const AGENT_KEY_RE = /^cb_([0-9a-f]{8,32})_([A-Za-z0-9_-]{20,128})$/;
+export const AGENT_KEY_PREFIX = "laun";
+const AGENT_KEY_RE = /^laun_([0-9a-f]{8,32})_([A-Za-z0-9_-]{20,128})$/;
 const KEY_ID_RE = /^[0-9a-f]{8,32}$/;
 
 export interface AgentKeyParts {

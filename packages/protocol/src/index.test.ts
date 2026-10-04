@@ -45,7 +45,7 @@ describe("agent keys", () => {
 
   test("format -> parse round trip", () => {
     const key = formatAgentKey(ID, SECRET);
-    expect(key).toBe(`cb_${ID}_${SECRET}`);
+    expect(key).toBe(`laun_${ID}_${SECRET}`);
     expect(parseAgentKey(key)).toEqual({ id: ID, secret: SECRET });
   });
 
@@ -54,16 +54,16 @@ describe("agent keys", () => {
     expect(parseAgentKey(null)).toBeNull();
     expect(parseAgentKey("")).toBeNull();
     expect(parseAgentKey(SECRET)).toBeNull();
-    expect(parseAgentKey(`cb_${ID}`)).toBeNull();
-    expect(parseAgentKey(`cb_${ID}_${SECRET}+`)).toBeNull();
-    expect(parseAgentKey(`cb_${ID}_${SECRET} _x`)).toBeNull();
+    expect(parseAgentKey(`laun_${ID}`)).toBeNull();
+    expect(parseAgentKey(`laun_${ID}_${SECRET}+`)).toBeNull();
+    expect(parseAgentKey(`laun_${ID}_${SECRET} _x`)).toBeNull();
     // surrounding whitespace from a paste is tolerated
-    expect(parseAgentKey(`  cb_${ID}_${SECRET}\n`)).toEqual({ id: ID, secret: SECRET });
+    expect(parseAgentKey(`  laun_${ID}_${SECRET}\n`)).toEqual({ id: ID, secret: SECRET });
     // id must be lowercase hex, secret must stay in the url-safe alphabet
-    expect(parseAgentKey(`cb_${ID.toUpperCase()}_${SECRET}`)).toBeNull();
-    expect(parseAgentKey(`cb_zz_${SECRET}`)).toBeNull();
-    expect(parseAgentKey(`cb_${ID}_short`)).toBeNull();
-    expect(parseAgentKey(`cb_${ID}_${SECRET}!`)).toBeNull();
+    expect(parseAgentKey(`laun_${ID.toUpperCase()}_${SECRET}`)).toBeNull();
+    expect(parseAgentKey(`laun_zz_${SECRET}`)).toBeNull();
+    expect(parseAgentKey(`laun_${ID}_short`)).toBeNull();
+    expect(parseAgentKey(`laun_${ID}_${SECRET}!`)).toBeNull();
     // a gateway service token must never look like an agent key
     expect(parseAgentKey("service-token-abc1234567890")).toBeNull();
   });

@@ -1,4 +1,4 @@
-import type { AgentEvent, SessionRecord } from "@cloudbear/protocol";
+import type { AgentEvent, SessionRecord } from "@laun/protocol";
 
 export class GatewayError extends Error {
   constructor(
@@ -34,7 +34,7 @@ export function connectionHint(base: string, cause: string): string {
     `  The gateway's port is likely firewalled — providers block 8080 by default.`,
     `  Open a tunnel and point the CLI at it:`,
     `    ssh -N -L 18080:localhost:8080 user@${host}`,
-    `    cloudbear agent auth --host 127.0.0.1 --port 18080 --key <cb_...>`,
+    `    laun agent auth --host 127.0.0.1 --port 18080 --key <laun_...>`,
   ].join("\n");
 }
 
@@ -46,7 +46,7 @@ export interface PendingApproval {
   detail?: string;
 }
 
-/** Minimal typed client for the cloudbear gateway. */
+/** Minimal typed client for the laun gateway. */
 export class GatewayClient {
   constructor(
     private readonly base: string,

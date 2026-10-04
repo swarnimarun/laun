@@ -7,7 +7,7 @@ import { createGateway } from "./server.js";
 import { SessionStore } from "./store.js";
 
 function testGw() {
-  const dir = mkdtempSync(join(tmpdir(), "cb-gw-"));
+  const dir = mkdtempSync(join(tmpdir(), "laun-gw-"));
   const store = new SessionStore(dir);
   return createGateway(
     { port: 8080, gatewayToken: "t", executorUrl: "http://localhost:9", dataDir: dir, publicDir: dir },
@@ -23,7 +23,7 @@ describe("gateway config", () => {
 
 describe("session store", () => {
   test("create/get/list/setStatus round-trip + persist", () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-store-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-store-"));
     const s = new SessionStore(dir);
     const rec = s.create({ goal: "do thing", model: "m", runtime: "pi" });
     expect(rec.id).toHaveLength(8);
@@ -72,7 +72,7 @@ describe("event persistence + boot recovery", () => {
   }
 
   test("events survive a restart via JSONL replay", () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-persist-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-persist-"));
     const gw1 = gwAt(dir);
     const rec = gw1.sessions.create({ goal: "g", model: "m", runtime: "pi" });
     gw1.publish(rec.id, { type: "text", sessionId: rec.id, delta: "hello" });
@@ -92,7 +92,7 @@ describe("event persistence + boot recovery", () => {
   });
 
   test("stale running sessions become errors on boot", () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-stale-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-stale-"));
     const gw1 = gwAt(dir);
     const rec = gw1.sessions.create({ goal: "g", model: "m", runtime: "pi" });
     gw1.sessions.setStatus(rec.id, "running");

@@ -1,5 +1,5 @@
 {
-  "name": "cloudbear-executor",
+  "name": "laun-executor",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,7 +11,7 @@
     "start": "bun src/index.ts"
   },
   "dependencies": {
-    "@cloudbear/policy": "workspace:*",
-    "@cloudbear/protocol": "workspace:*"
+    "@laun/policy": "workspace:*",
+    "@laun/protocol": "workspace:*"
   }
 }

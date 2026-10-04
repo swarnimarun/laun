@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseAgentKey } from "@cloudbear/protocol";
+import { parseAgentKey } from "@laun/protocol";
 import { AgentKeyStore } from "./keys.js";
 
 function tmpDataDir(): string {
-  return mkdtempSync(join(tmpdir(), "cb-keys-"));
+  return mkdtempSync(join(tmpdir(), "laun-keys-"));
 }
 
 describe("AgentKeyStore", () => {
@@ -20,9 +20,9 @@ describe("AgentKeyStore", () => {
 
     expect(s.verify(key)?.id).toBe(record.id);
     // wrong secret, same id
-    expect(s.verify(`cb_${record.id}_${"A".repeat(43)}`)).toBeNull();
+    expect(s.verify(`laun_${record.id}_${"A".repeat(43)}`)).toBeNull();
     // unknown id
-    expect(s.verify(`cb_${"0".repeat(8)}_${parts!.secret}`)).toBeNull();
+    expect(s.verify(`laun_${"0".repeat(8)}_${parts!.secret}`)).toBeNull();
     // malformed / empty / null
     expect(s.verify("nope")).toBeNull();
     expect(s.verify("")).toBeNull();
@@ -59,13 +59,13 @@ describe("AgentKeyStore", () => {
     expect(s.importKey(key).id).toBe(record.id);
     expect(s.list()).toHaveLength(1);
     // ...and a regenerated key for the same id replaces the stored hash.
-    const regenerated = `cb_${record.id}_${"B".repeat(43)}`;
+    const regenerated = `laun_${record.id}_${"B".repeat(43)}`;
     expect(s.importKey(regenerated).id).toBe(record.id);
     expect(s.list()).toHaveLength(1);
     expect(s.verify(regenerated)?.id).toBe(record.id);
     expect(s.verify(key)).toBeNull();
 
-    expect(() => s.importKey("not-a-key")).toThrow("CLOUDBEAR_KEY");
+    expect(() => s.importKey("not-a-key")).toThrow("LAUN_KEY");
     expect(() => new AgentKeyStore(dir)).not.toThrow();
   });
 

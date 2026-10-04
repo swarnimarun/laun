@@ -1,6 +1,6 @@
-# Models with cloudbear: Muse via opencode-go (through pi)
+# Models with laun: Muse via opencode-go (through pi)
 
-Cloudbear doesn't talk to models directly — `pi` does (`pi-ai`). The default is:
+Laun doesn't talk to models directly — `pi` does (`pi-ai`). The default is:
 
 ```
 MODEL=opencode-go/muse-spark-1.3-contributor

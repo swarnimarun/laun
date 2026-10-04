@@ -1,4 +1,4 @@
-# Cloudbear model provider profile.
+# Laun model provider profile.
 #
 # Declares the model endpoint and the credential OpenShell injects ONLY for
 # approved endpoints, so the agent inside the sandbox never sees the real key.
@@ -11,14 +11,14 @@
 #   1. substitute MODEL_HOST into a COPY of this file (never edit the host in
 #      place -- this file must stay generic and must never contain a secret);
 #   2. openshell profile lint -f <rendered> && openshell profile import -f <rendered>
-#   3. MODEL_API_KEY=<real key> openshell provider create --name cloudbear-model
-#        --type cloudbear-model --from-existing
+#   3. MODEL_API_KEY=<real key> openshell provider create --name laun-model
+#        --type laun-model --from-existing
 # The key travels only via the environment into OpenShell's credential store.
 # This file contains no secret material by construction (tests assert that).
 
-id: cloudbear-model
-display_name: Cloudbear Model
-description: Model/inference endpoint for cloudbear agent sandboxes. The API key is injected by OpenShell only for the approved endpoint.
+id: laun-model
+display_name: Laun Model
+description: Model/inference endpoint for laun agent sandboxes. The API key is injected by OpenShell only for the approved endpoint.
 category: inference
 inference_capable: true
 

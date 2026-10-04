@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Cloudbear remote bootstrap. Invoked over SSH by `cloudbear setup ssh`:
+# Laun remote bootstrap. Invoked over SSH by `laun setup ssh`:
 #
 #   ssh -i <key> -o BatchMode=yes <user>@<host> \
-#     CB_NO_START=false bash -s -- <remote-dir> [repo-url]
+#     LAUN_NO_START=false bash -s -- <remote-dir> [repo-url]
 #
 # The caller MUST have written <remote-dir>/.env (mode 600, containing at least
-# GATEWAY_TOKEN and CLOUDBEAR_KEY) before this runs. Idempotent: safe to re-run.
+# GATEWAY_TOKEN and LAUN_KEY) before this runs. Idempotent: safe to re-run.
 #
 # Output: progress lines prefixed "==>", then a summary whose LAST line is the
 # agent key so the CLI can read it back:
-#   CLOUDBEAR_DIR=...
-#   CLOUDBEAR_PORT=...
-#   CLOUDBEAR_KEY=...
+#   LAUN_DIR=...
+#   LAUN_PORT=...
+#   LAUN_KEY=...
 # GATEWAY_TOKEN is never printed.
 set -euo pipefail
 
@@ -29,7 +29,7 @@ die() {
 [ -d "$REMOTE_DIR" ] || die "remote dir does not exist: $REMOTE_DIR (create it and write .env first)"
 REMOTE_DIR="$(cd "$REMOTE_DIR" && pwd)"
 ENV_FILE="$REMOTE_DIR/.env"
-[ -f "$ENV_FILE" ] || die "missing $ENV_FILE — write it before bootstrapping (cloudbear setup ssh does this)"
+[ -f "$ENV_FILE" ] || die "missing $ENV_FILE — write it before bootstrapping (laun setup ssh does this)"
 
 # The checkout may overwrite .env, so keep the authoritative copy aside.
 ENV_BACKUP="$(mktemp)"
@@ -78,9 +78,9 @@ fi
 # --- docker ---------------------------------------------------------------------
 if ! command -v docker >/dev/null 2>&1; then
   log "installing docker"
-  curl -fsSL https://get.docker.com -o /tmp/cloudbear-get-docker.sh || die "could not download the docker installer"
-  $SUDO sh /tmp/cloudbear-get-docker.sh >/dev/null || die "docker install failed"
-  rm -f /tmp/cloudbear-get-docker.sh
+  curl -fsSL https://get.docker.com -o /tmp/laun-get-docker.sh || die "could not download the docker installer"
+  $SUDO sh /tmp/laun-get-docker.sh >/dev/null || die "docker install failed"
+  rm -f /tmp/laun-get-docker.sh
 fi
 if command -v systemctl >/dev/null 2>&1; then
   $SUDO systemctl enable --now docker >/dev/null 2>&1 || warn "could not enable docker through systemctl"
@@ -148,8 +148,8 @@ fi
 GATEWAY_PORT="$(sed -n 's/^GATEWAY_PORT=\([0-9]*\).*/\1/p' "$ENV_FILE" | tail -1)"
 GATEWAY_PORT="${GATEWAY_PORT:-8080}"
 
-if [ "${CB_NO_START:-false}" = "true" ]; then
-  log "CB_NO_START=true — leaving the stack stopped"
+if [ "${LAUN_NO_START:-false}" = "true" ]; then
+  log "LAUN_NO_START=true — leaving the stack stopped"
 else
   # `sudo docker compose` sets HOME=/root, which would make compose bind-mount
   # /root/.pi (empty) instead of the operator's pi credentials. Resolve the real
@@ -196,10 +196,10 @@ else
 fi
 
 # --- summary (last line is the agent key) ---------------------------------------
-CLOUDBEAR_KEY="$(sed -n 's/^CLOUDBEAR_KEY=\(.*\)$/\1/p' "$ENV_FILE" | tail -1 | tr -d '[:space:]')"
-[ -n "$CLOUDBEAR_KEY" ] || die "no CLOUDBEAR_KEY in $ENV_FILE — run cloudbear setup to generate one"
+LAUN_KEY="$(sed -n 's/^LAUN_KEY=\(.*\)$/\1/p' "$ENV_FILE" | tail -1 | tr -d '[:space:]')"
+[ -n "$LAUN_KEY" ] || die "no LAUN_KEY in $ENV_FILE — run laun setup to generate one"
 
 log "done"
-printf 'CLOUDBEAR_DIR=%s\n' "$REMOTE_DIR"
-printf 'CLOUDBEAR_PORT=%s\n' "$GATEWAY_PORT"
-printf 'CLOUDBEAR_KEY=%s\n' "$CLOUDBEAR_KEY"
+printf 'LAUN_DIR=%s\n' "$REMOTE_DIR"
+printf 'LAUN_PORT=%s\n' "$GATEWAY_PORT"
+printf 'LAUN_KEY=%s\n' "$LAUN_KEY"

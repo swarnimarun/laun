@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
-import type { AgentEvent, ExecutorRunRequest } from "@cloudbear/protocol";
-import { checkBearer } from "@cloudbear/protocol";
+import type { AgentEvent, ExecutorRunRequest } from "@laun/protocol";
+import { checkBearer } from "@laun/protocol";
 import type { ExecutorConfig, ExecutorMode } from "./config.js";
 import { clampTimeout, ensureWorkdir, resolveSessionDir, resolveWorkdir, assertValidPrompt, assertValidSessionId } from "./paths.js";
 import { runPiStreaming } from "./pi.js";

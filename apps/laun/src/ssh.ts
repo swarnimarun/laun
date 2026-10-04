@@ -119,8 +119,8 @@ export async function runRemoteSetup(opts: RemoteSetupOptions): Promise<RemoteSe
   // Every remote step echoes: a silent multi-minute bootstrap reads as "stuck".
   const show = { echo: true } as const;
 
-  // Creating a path like /opt/cloudbear needs root on a stock Ubuntu box, but
-  // /home/<user>/cloudbear does not — try plainly first, then passwordless sudo,
+  // Creating a path like /opt/laun needs root on a stock Ubuntu box, but
+  // /home/<user>/laun does not — try plainly first, then passwordless sudo,
   // and always hand the dir back to the calling user so the env write works.
   const mkdirCmd =
     `{ mkdir -p ${dir} && chmod 700 ${dir}; } 2>/dev/null || ` +
@@ -130,7 +130,7 @@ export async function runRemoteSetup(opts: RemoteSetupOptions): Promise<RemoteSe
     const why = mkdir.stderr.trim();
     throw new Error(
       `ssh mkdir failed (${mkdir.code}): ${why ||
-        "cannot create the remote directory — it needs write access or passwordless sudo; use a writable --remote-dir such as ~/cloudbear"}`,
+        "cannot create the remote directory — it needs write access or passwordless sudo; use a writable --remote-dir such as ~/laun"}`,
     );
   }
 
@@ -140,17 +140,17 @@ export async function runRemoteSetup(opts: RemoteSetupOptions): Promise<RemoteSe
   });
   if (writeEnv.code !== 0) throw new Error(`ssh env write failed (${writeEnv.code}): ${writeEnv.stderr.trim()}`);
 
-  const bootstrapCmd = `${opts.noStart ? "CB_NO_START=true " : ""}bash -s -- ${dir}${opts.repoUrl ? ` ${shQuote(opts.repoUrl)}` : ""}`;
+  const bootstrapCmd = `${opts.noStart ? "LAUN_NO_START=true " : ""}bash -s -- ${dir}${opts.repoUrl ? ` ${shQuote(opts.repoUrl)}` : ""}`;
   const boot = await run(sshArgv(opts, bootstrapCmd), { stdin: opts.bootstrapScript, echo: true });
-  const key = lastMatch(boot.stdout, /^CLOUDBEAR_KEY=(cb_[0-9a-f]{8,32}_[A-Za-z0-9_-]{20,128})\s*$/m);
+  const key = lastMatch(boot.stdout, /^LAUN_KEY=(laun_[0-9a-f]{8,32}_[A-Za-z0-9_-]{20,128})\s*$/m);
   if (boot.code !== 0 || !key) {
     const tail = boot.stderr.trim() || boot.stdout.trim();
-    throw new Error(`remote setup failed (${boot.code})${key ? "" : ": no CLOUDBEAR_KEY in bootstrap output"}\n${tail.slice(-2000)}`);
+    throw new Error(`remote setup failed (${boot.code})${key ? "" : ": no LAUN_KEY in bootstrap output"}\n${tail.slice(-2000)}`);
   }
   return {
     key,
-    port: Number(lastMatch(boot.stdout, /^CLOUDBEAR_PORT=(\d+)\s*$/m) ?? 8080),
-    dir: lastMatch(boot.stdout, /^CLOUDBEAR_DIR=(.+)\s*$/m) ?? opts.remoteDir,
+    port: Number(lastMatch(boot.stdout, /^LAUN_PORT=(\d+)\s*$/m) ?? 8080),
+    dir: lastMatch(boot.stdout, /^LAUN_DIR=(.+)\s*$/m) ?? opts.remoteDir,
   };
 }
 

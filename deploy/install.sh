@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cloudbear VPS bootstrap (Debian/Ubuntu). Idempotent: safe to re-run.
+# Laun VPS bootstrap (Debian/Ubuntu). Idempotent: safe to re-run.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

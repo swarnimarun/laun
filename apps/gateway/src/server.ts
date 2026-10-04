@@ -6,8 +6,8 @@ import type {
   CreateSessionRequest,
   SendMessageRequest,
   SessionRecord,
-} from "@cloudbear/protocol";
-import { bearerToken, checkBearer, normalizeCreateSession } from "@cloudbear/protocol";
+} from "@laun/protocol";
+import { bearerToken, checkBearer, normalizeCreateSession } from "@laun/protocol";
 import type { GatewayConfig } from "./config.js";
 import { streamExecutorRun, abortExecutorRun, executorKnowsAbort } from "./executorClient.js";
 import { AgentKeyStore } from "./keys.js";
@@ -40,7 +40,7 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
       const rec = keys.importKey(cfg.bootstrapKey);
       console.log(`[gateway] agent key ${rec.id} ready (${rec.label})`);
     } catch (e) {
-      throw new Error(`CLOUDBEAR_KEY invalid: ${(e as Error).message}`);
+      throw new Error(`LAUN_KEY invalid: ${(e as Error).message}`);
     }
   }
 

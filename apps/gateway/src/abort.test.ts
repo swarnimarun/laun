@@ -28,7 +28,7 @@ function stubExecutor(status: number, body = '{"ok":true}'): { url: string; call
 }
 
 function gwAt(executorUrl: string): { gw: Gateway; id: string; dir: string } {
-  const dir = mkdtempSync(join(tmpdir(), "cb-abort-"));
+  const dir = mkdtempSync(join(tmpdir(), "laun-abort-"));
   const gw = createGateway(
     { port: 8080, gatewayToken: "t", executorUrl, dataDir: dir, publicDir: dir },
     new SessionStore(dir),

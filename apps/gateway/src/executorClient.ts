@@ -1,4 +1,4 @@
-import type { AgentEvent, ExecutorRunRequest } from "@cloudbear/protocol";
+import type { AgentEvent, ExecutorRunRequest } from "@laun/protocol";
 
 /** POSTs a run to the executor and yields AgentEvents from the NDJSON stream. */
 export async function* streamExecutorRun(

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cloudbear OpenShell bring-up + verification probe (runs on the VPS).
+# Laun OpenShell bring-up + verification probe (runs on the VPS).
 #
 # Idempotent and safe to re-run. Proves the sandbox boundary works instead of
 # claiming it: applies our rendered restrictive policy to a fresh sandbox and
@@ -15,12 +15,12 @@
 #                    baked into policy + provider profile; no default on purpose)
 #   WORKDIR          in-sandbox working directory (default /workspace).
 #                    This is the path INSIDE the sandbox, not the host path.
-#   OS_SANDBOX       probe sandbox name (default cloudbear-probe)
-#   OS_PROVIDER      provider instance name (default cloudbear-model).
+#   OS_SANDBOX       probe sandbox name (default laun-probe)
+#   OS_PROVIDER      provider instance name (default laun-model).
 #                    MODEL_PROVIDER overrides it when set (same thing: the
 #                    instance NAME, never secret, printed in the summary).
 #   MODEL_PROVIDER_TYPE provider type for `provider create --type` (default
-#                    cloudbear-model; must match the profile id in
+#                    laun-model; must match the profile id in
 #                    provider-model.yaml)
 #   OS_APPROVAL_MODE approval mode passed as `sandbox create --approval-mode`
 #                    (default auto). Scoped: network egress proposals may
@@ -38,7 +38,7 @@
 #                    skipped cleanly (OS_PROVIDER=none) and only the filesystem
 #                    half of the boundary is probed. The key is never printed.
 #   RENDER_DIR       where rendered policy/profile copies land
-#                    (default /tmp/cloudbear-openshell)
+#                    (default /tmp/laun-openshell)
 #   OPENSHELL_VERSION  pinned OpenShell release for install.sh (default: latest)
 #
 # Output: progress lines, a PROBE=pass|fail line, and as its LAST lines a
@@ -56,12 +56,12 @@
 # else prints the summary first (OS_PROBE=fail) and exits non-zero.
 set -euo pipefail
 
-OS_SANDBOX="${OS_SANDBOX:-cloudbear-probe}"
-OS_PROVIDER="${OS_PROVIDER:-cloudbear-model}"
+OS_SANDBOX="${OS_SANDBOX:-laun-probe}"
+OS_PROVIDER="${OS_PROVIDER:-laun-model}"
 # MODEL_PROVIDER is an alias override for the instance name (spec roadmaps
 # P0 #2 spells it `--name <MODEL_PROVIDER|default>`); OS_PROVIDER keeps
 # working exactly as before.
-MODEL_PROVIDER_TYPE="${MODEL_PROVIDER_TYPE:-cloudbear-model}"
+MODEL_PROVIDER_TYPE="${MODEL_PROVIDER_TYPE:-laun-model}"
 if [ -n "${MODEL_PROVIDER:-}" ]; then OS_PROVIDER="$MODEL_PROVIDER"; fi
 # Scoped auto-approval mode (roadmap P0 #3a). The VALUE travels here; the
 # enforcement is the flag at sandbox create + the `rule get` audit later.
@@ -71,7 +71,7 @@ EFFECTIVE_APPROVAL="none"
 PI_IMAGE="${PI_IMAGE:-pi-agent:local}"
 MODEL_HOST="${MODEL_HOST:-}"
 WORKDIR="${WORKDIR:-/workspace}"
-RENDER_DIR="${RENDER_DIR:-/tmp/cloudbear-openshell}"
+RENDER_DIR="${RENDER_DIR:-/tmp/laun-openshell}"
 OS_POLICY="$RENDER_DIR/restrictive.yaml"
 OS_GATEWAY="https://127.0.0.1:17670"
 OS_PROBE="fail"
@@ -180,11 +180,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 POLICY_RENDER="$REPO_ROOT/packages/policy/src/render.ts"
 PROFILE_SRC="$SCRIPT_DIR/provider-model.yaml"
-[ -f "$POLICY_RENDER" ] || fail "cannot find $POLICY_RENDER (run from the cloudbear checkout)"
+[ -f "$POLICY_RENDER" ] || fail "cannot find $POLICY_RENDER (run from the laun checkout)"
 [ -f "$PROFILE_SRC" ] || fail "cannot find $PROFILE_SRC"
 # bun installs itself into ~/.bun/bin, which is NOT on PATH for non-interactive
 # ssh sessions — which is exactly how this script is normally run (over ssh by
-# `cloudbear setup ssh`). Without this the script died before probing anything.
+# `laun setup ssh`). Without this the script died before probing anything.
 if ! command -v bun >/dev/null 2>&1 && [ -x "$HOME/.bun/bin/bun" ]; then
   PATH="$HOME/.bun/bin:$PATH"
   export PATH
@@ -236,8 +236,8 @@ openshell profile lint -f "$RENDERED_PROFILE" || fail "'openshell profile lint' 
 if openshell profile import --global -f "$RENDERED_PROFILE" 2> /tmp/os-profile-import.err; then
   say "provider profile imported"
 else
-  if openshell profile list 2>/dev/null | grep -q "cloudbear-model"; then
-    warn "profile import reported an error but id cloudbear-model already exists; continuing with the existing profile"
+  if openshell profile list 2>/dev/null | grep -q "laun-model"; then
+    warn "profile import reported an error but id laun-model already exists; continuing with the existing profile"
   else
     warn "$(cat /tmp/os-profile-import.err)"
     fail "'openshell profile import' failed for a new profile id"

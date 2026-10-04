@@ -80,7 +80,7 @@ describe("bring-up dry-run (no openshell, no network)", () => {
       MODEL_HOST: "model.example.com",
     });
     expect(code).toBe(0);
-    expect(out).toContain("OS_PROVIDER=cloudbear-model");
+    expect(out).toContain("OS_PROVIDER=laun-model");
     expect(out).toContain("MODEL_API_KEY is set (value hidden)");
     expect(out).not.toContain(sentinel);
   });

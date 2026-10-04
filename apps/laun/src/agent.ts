@@ -1,4 +1,4 @@
-import type { AgentEvent, SessionRecord } from "@cloudbear/protocol";
+import type { AgentEvent, SessionRecord } from "@laun/protocol";
 import { UsageError } from "./args.js";
 import { GatewayError, type GatewayClient, type PendingApproval } from "./client.js";
 
@@ -20,7 +20,7 @@ export function renderEvent(e: AgentEvent): string[] {
       return e.delta ? [`💭 ${e.delta}`] : [];
     }
     case "approval_request":
-      return [`🛑 ${e.reason}`, `   approve: cloudbear agent approve ${e.sessionId} ${e.requestId}`];
+      return [`🛑 ${e.reason}`, `   approve: laun agent approve ${e.sessionId} ${e.requestId}`];
     case "done":
       return [e.summary ? `✅ done: ${e.summary}` : "✅ done"];
     case "error":
@@ -201,7 +201,7 @@ export function formatApprovals(approvals: PendingApproval[]): string[] {
   const lines = [`pending approvals: ${approvals.length}`];
   for (const a of approvals) {
     lines.push(`  🛑 ${a.requestId}  ${a.reason}`);
-    lines.push(`     cloudbear agent approve ${a.sessionId} ${a.requestId}`);
+    lines.push(`     laun agent approve ${a.sessionId} ${a.requestId}`);
   }
   return lines;
 }
@@ -309,10 +309,10 @@ export async function watchSession(
   return 2;
 }
 
-/** Gateway reachability for `cloudbear doctor` (null = skipped, no target). */
+/** Gateway reachability for `laun doctor` (null = skipped, no target). */
 export type DoctorGateway = { ok: true; service: string } | { ok: false; error: string };
 
-/** Everything `cloudbear doctor` reports on. Built by the caller so tests
+/** Everything `laun doctor` reports on. Built by the caller so tests
  * can stub the gateway probe; values (keys, tokens) never appear here. */
 export interface DoctorProbe {
   version: string;
@@ -325,17 +325,17 @@ export interface DoctorProbe {
 
 /** Render the doctor report. Returns the lines and whether all is well. */
 export function renderDoctor(p: DoctorProbe): { lines: string[]; healthy: boolean } {
-  const lines = [`cloudbear doctor (cli ${p.version})`];
+  const lines = [`laun doctor (cli ${p.version})`];
   const problems: string[] = [];
   if (p.target) {
     lines.push(`target: ${p.target.url} (from ${p.target.source})`);
     lines.push(`key: present${p.target.keyId ? ` (id ${p.target.keyId})` : ""}`);
   } else {
     lines.push("target: none");
-    problems.push("no target — connect first: cloudbear agent auth --host <ip> --key <key>");
+    problems.push("no target — connect first: laun agent auth --host <ip> --key <key>");
   }
   lines.push(`saved target file: ${p.savedPresent ? "present" : "missing (env override or nothing configured)"}`);
-  if (!p.keyPresent && p.target) problems.push("target has no key — re-run cloudbear agent auth with a fresh key");
+  if (!p.keyPresent && p.target) problems.push("target has no key — re-run laun agent auth with a fresh key");
   if (p.gateway === null) {
     lines.push("gateway: skipped (no target)");
   } else if (p.gateway.ok) {
@@ -354,7 +354,7 @@ export function renderDoctor(p: DoctorProbe): { lines: string[]; healthy: boolea
   lines.push("common failures + fixes:");
   lines.push("  - cannot reach a local gateway: start the stack (bun run dev:executor, bun run dev:gateway)");
   lines.push("  - cannot reach a remote gateway: providers block 8080 by default — tunnel: ssh -N -L 18080:localhost:8080 user@<host>, then auth against 127.0.0.1:18080");
-  lines.push("  - unauthorized (wrong or revoked key): re-run cloudbear agent auth --host <host> --key <key>");
+  lines.push("  - unauthorized (wrong or revoked key): re-run laun agent auth --host <host> --key <key>");
   return { lines, healthy: problems.length === 0 };
 }
 

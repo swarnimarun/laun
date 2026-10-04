@@ -1,4 +1,4 @@
-# Cloudbear "standard-dev" OpenShell policy template.
+# Laun "standard-dev" OpenShell policy template.
 #
 # Restrictive + egress to git forges and package registries. Use per-repo after
 # reviewing advisor proposals (`openshell rule get <sandbox> --status pending`).

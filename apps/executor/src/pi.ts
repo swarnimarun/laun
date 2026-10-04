@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import type { AgentEvent } from "@cloudbear/protocol";
+import type { AgentEvent } from "@laun/protocol";
 import { sandboxNameForSession, type SandboxRunner } from "./sandbox.js";
 
 /** Cap on forwarded tool output — protects gateway memory and Telegram limits. */

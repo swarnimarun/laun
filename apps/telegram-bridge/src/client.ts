@@ -1,4 +1,4 @@
-import type { AgentEvent, SessionRecord } from "@cloudbear/protocol";
+import type { AgentEvent, SessionRecord } from "@laun/protocol";
 
 export class GatewayClient {
   constructor(

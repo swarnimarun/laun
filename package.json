@@ -1,5 +1,5 @@
 {
-  "name": "cloudbear",
+  "name": "laun",
   "version": "0.1.0",
   "private": true,
   "description": "Self-hosted remote agent executor: Pi-first, OpenShell policy sandbox, Telegram bridge. Single VPS, 24/7.",
@@ -16,8 +16,8 @@
     "build": "bun x tsc -b",
     "typecheck": "bun x tsc -b",
     "clean": "rm -rf dist tsconfig.tsbuildinfo packages/*/dist packages/*/tsconfig.tsbuildinfo apps/*/dist apps/*/tsconfig.tsbuildinfo",
-    "test": "bun test ./packages/protocol/src ./packages/policy/src ./apps/executor/src ./apps/gateway/src ./apps/telegram-bridge/src ./apps/cli/src",
-    "cli": "bun apps/cli/src/index.ts",
+    "test": "bun test ./packages/protocol/src ./packages/policy/src ./apps/executor/src ./apps/gateway/src ./apps/telegram-bridge/src ./apps/laun/src",
+    "laun": "bun apps/laun/src/index.ts",
     "dev:gateway": "bun run build && bun --hot apps/gateway/src/index.ts",
     "dev:executor": "bun run build && bun --hot apps/executor/src/index.ts",
     "dev:bridge": "bun run build && bun --hot apps/telegram-bridge/src/index.ts"

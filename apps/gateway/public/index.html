@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
-    <title>cloudbear</title>
+    <title>laun</title>
     <link rel="icon" href="data:," />
     <!-- The page is served by GET /; assets are served by GET /ui/<file>. -->
     <link rel="stylesheet" href="/ui/style.css" />
@@ -13,10 +13,10 @@
     <!-- Login: shown until the gateway accepts a stored or pasted agent key. -->
     <section id="login" class="login">
       <form id="login-form" class="card">
-        <h1>🐻 cloudbear</h1>
-        <p class="muted">Paste the agent key printed by <code>cloudbear setup</code>.</p>
+        <h1>🐻 laun</h1>
+        <p class="muted">Paste the agent key printed by <code>laun setup</code>.</p>
         <label for="key-input">Agent key</label>
-        <input id="key-input" type="password" placeholder="cb_..." autocomplete="off" spellcheck="false" />
+        <input id="key-input" type="password" placeholder="laun_..." autocomplete="off" spellcheck="false" />
         <p id="login-error" class="error" role="alert"></p>
         <button id="login-btn" class="primary" type="submit">Connect</button>
       </form>
@@ -25,7 +25,7 @@
     <div id="app" class="app" hidden>
       <aside class="sidebar">
         <header class="sidebar-head">
-          <span class="brand">🐻 cloudbear</span>
+          <span class="brand">🐻 laun</span>
           <span class="head-actions">
             <button id="new-session-btn" type="button" title="New session">+ New</button>
             <button id="refresh-btn" type="button" title="Refresh sessions">⟳</button>

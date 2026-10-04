@@ -10,6 +10,6 @@
     { "path": "./apps/executor" },
     { "path": "./apps/gateway" },
     { "path": "./apps/telegram-bridge" },
-    { "path": "./apps/cli" }
+    { "path": "./apps/laun" }
   ]
 }

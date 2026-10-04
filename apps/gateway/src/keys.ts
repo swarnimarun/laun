@@ -1,7 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { formatAgentKey, parseAgentKey } from "@cloudbear/protocol";
+import { formatAgentKey, parseAgentKey } from "@laun/protocol";
 
 /**
  * A stored agent key. Only the sha256 of the secret half is kept — the
@@ -71,14 +71,14 @@ export class AgentKeyStore {
   }
 
   /**
-   * Import a key minted before the gateway started (setup writes CLOUDBEAR_KEY
+   * Import a key minted before the gateway started (setup writes LAUN_KEY
    * into .env). Idempotent: the same key is a no-op, a regenerated key for the
    * same id replaces the stored hash. Throws on a malformed key (fail closed at
    * boot rather than starting with a silently unusable credential).
    */
   importKey(raw: string, label = "bootstrap"): PublicAgentKeyRecord {
     const parsed = parseAgentKey(raw);
-    if (!parsed) throw new Error("CLOUDBEAR_KEY is not a valid agent key (expected cb_<id>_<secret>)");
+    if (!parsed) throw new Error("LAUN_KEY is not a valid agent key (expected laun_<id>_<secret>)");
     const hash = hashSecret(parsed.secret);
     const existing = this.keys.get(parsed.id);
     if (existing && existing.hash === hash) return this.public(existing);

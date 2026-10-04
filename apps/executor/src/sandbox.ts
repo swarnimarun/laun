@@ -17,7 +17,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 
 /** Deterministic sandbox name for a session (sessionId is already [A-Za-z0-9_-]). */
 export function sandboxNameForSession(sessionId: string): string {
-  return `cb-${sessionId}`;
+  return `laun-${sessionId}`;
 }
 
 export interface SandboxCreateOptions {

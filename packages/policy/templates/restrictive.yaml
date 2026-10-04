@@ -1,4 +1,4 @@
-# Cloudbear "restrictive" OpenShell policy template.
+# Laun "restrictive" OpenShell policy template.
 #
 # Valid OpenShell policy YAML (schema: version 1 + filesystem_policy, landlock,
 # process, network_policies, network_middlewares). Render with

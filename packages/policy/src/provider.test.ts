@@ -31,7 +31,7 @@ describe("provider profile", () => {
 
   test("declares required fields and credential flow", () => {
     const p = renderedProfile() as Record<string, unknown>;
-    expect(p["id"]).toBe("cloudbear-model");
+    expect(p["id"]).toBe("laun-model");
     expect(p["category"]).toBe("inference");
     expect(p["inference_capable"]).toBe(true);
     const creds = p["credentials"] as Array<Record<string, unknown>>;

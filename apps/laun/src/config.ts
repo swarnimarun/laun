@@ -1,7 +1,7 @@
 import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { parseAgentKey } from "@cloudbear/protocol";
+import { parseAgentKey } from "@laun/protocol";
 
 /** A resolved gateway target: where to connect and which key to present. */
 export interface Target {
@@ -15,14 +15,14 @@ export interface Target {
 /**
  * Which home directory this run should use. Reading it from the env passed in
  * (not a bare homedir()) is what lets tests point the CLI at a temp directory
- * instead of writing to the operator's real ~/.cloudbear.
+ * instead of writing to the operator's real ~/.laun.
  */
 export function homeFor(env: NodeJS.ProcessEnv = process.env): string {
   return env["HOME"] ?? homedir();
 }
 
 export function authFilePath(home: string = homedir()): string {
-  return join(home, ".cloudbear", "auth.json");
+  return join(home, ".laun", "auth.json");
 }
 
 export function loadTarget(home: string = homedir()): Target | null {
@@ -70,13 +70,13 @@ export function resolveTarget(
   name?: string,
 ): Target | null {
   if (name) return loadNamedTarget(name, home);
-  const key = (env["CLOUDBEAR_KEY"] ?? "").trim();
-  const host = (env["CLOUDBEAR_HOST"] ?? "").trim();
+  const key = (env["LAUN_KEY"] ?? "").trim();
+  const host = (env["LAUN_HOST"] ?? "").trim();
   if (key && host) {
     return {
       host,
-      port: Number(env["CLOUDBEAR_PORT"] ?? 8080),
-      scheme: env["CLOUDBEAR_SCHEME"] === "https" ? "https" : "http",
+      port: Number(env["LAUN_PORT"] ?? 8080),
+      scheme: env["LAUN_SCHEME"] === "https" ? "https" : "http",
       key,
       keyId: parseAgentKey(key)?.id,
     };
@@ -85,7 +85,7 @@ export function resolveTarget(
 }
 
 /**
- * Named targets: extra saved hosts under `~/.cloudbear/targets/<name>.json`,
+ * Named targets: extra saved hosts under `~/.laun/targets/<name>.json`,
  * each file holding the same Target shape as the default auth file (0600 in
  * a 0700 dir, atomic tmp+rename write). The default file is untouched, so
  * behaviour without `--target` is exactly what it always was.
@@ -97,7 +97,7 @@ export function isValidTargetName(name: string): boolean {
 }
 
 export function targetsDir(home: string = homedir()): string {
-  return join(home, ".cloudbear", "targets");
+  return join(home, ".laun", "targets");
 }
 
 export function targetFilePath(home: string, name: string): string {

@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { SessionRecord, SessionStatus } from "@cloudbear/protocol";
+import type { SessionRecord, SessionStatus } from "@laun/protocol";
 
 /** Tiny JSON-file session index. Atomic writes (tmp + rename). */
 export class SessionStore {

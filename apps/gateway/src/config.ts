@@ -6,7 +6,7 @@ export interface GatewayConfig {
   gatewayToken: string;
   executorUrl: string;
   dataDir: string;
-  /** Agent key minted by `cloudbear setup`; imported into the key store at boot. */
+  /** Agent key minted by `laun setup`; imported into the key store at boot. */
   bootstrapKey?: string;
   /** Directory holding the browser UI (apps/gateway/public). */
   publicDir: string;
@@ -21,7 +21,7 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig {
   const port = Number(env["GATEWAY_PORT"] ?? 8080);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("GATEWAY_PORT must be 1-65535");
-  const bootstrapKey = (env["CLOUDBEAR_KEY"] ?? "").trim();
+  const bootstrapKey = (env["LAUN_KEY"] ?? "").trim();
   return {
     port,
     gatewayToken: required(env, "GATEWAY_TOKEN"),

@@ -3,62 +3,62 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "cloudbear",
+      "name": "laun",
       "devDependencies": {
         "@types/node": "^22.19.0",
         "bun-types": "latest",
         "typescript": "^5.9.3",
       },
     },
-    "apps/cli": {
-      "name": "cloudbear-cli",
+    "apps/laun": {
+      "name": "laun-cli",
       "version": "0.1.0",
       "bin": {
-        "cloudbear": "./src/index.ts",
+        "laun": "./src/index.ts",
       },
       "dependencies": {
-        "@cloudbear/protocol": "workspace:*",
+        "@laun/protocol": "workspace:*",
       },
     },
     "apps/executor": {
-      "name": "cloudbear-executor",
+      "name": "laun-executor",
       "version": "0.1.0",
       "dependencies": {
-        "@cloudbear/policy": "workspace:*",
-        "@cloudbear/protocol": "workspace:*",
+        "@laun/policy": "workspace:*",
+        "@laun/protocol": "workspace:*",
       },
     },
     "apps/gateway": {
-      "name": "cloudbear-gateway",
+      "name": "laun-gateway",
       "version": "0.1.0",
       "dependencies": {
-        "@cloudbear/protocol": "workspace:*",
+        "@laun/protocol": "workspace:*",
       },
     },
     "apps/telegram-bridge": {
-      "name": "cloudbear-telegram-bridge",
+      "name": "laun-telegram-bridge",
       "version": "0.1.0",
       "dependencies": {
-        "@cloudbear/protocol": "workspace:*",
+        "@laun/protocol": "workspace:*",
         "grammy": "^1.37.0",
       },
     },
     "packages/policy": {
-      "name": "@cloudbear/policy",
+      "name": "@laun/policy",
       "version": "0.1.0",
       "dependencies": {
         "yaml": "^2.9.1",
       },
     },
     "packages/protocol": {
-      "name": "@cloudbear/protocol",
+      "name": "@laun/protocol",
       "version": "0.1.0",
     },
   },
   "packages": {
-    "@cloudbear/policy": ["@cloudbear/policy@workspace:packages/policy"],
+    "@laun/policy": ["@laun/policy@workspace:packages/policy"],
 
-    "@cloudbear/protocol": ["@cloudbear/protocol@workspace:packages/protocol"],
+    "@laun/protocol": ["@laun/protocol@workspace:packages/protocol"],
 
     "@grammyjs/types": ["@grammyjs/types@5.0.0", "", {}, "sha512-iq1Qrq1iPKkB8yAa0qSuIURMZOCuqTY5pWy5gHpCeL1oQ+GPadGhw/cDTVE8waJwuCzacUzuIjRv1sESvk7u7A=="],
 
@@ -68,13 +68,13 @@
 
     "bun-types": ["bun-types@1.4.2", "", { "dependencies": { "@types/node": "*" } }, "sha512-bxV1FgK7yBIzjRe5zBozIM4Bem11ZJcCXSrjWRG3YWLt8yFDePu4cLjpebO8OvPeIE9trbyPF4fuj3Cia4Fj3w=="],
 
-    "cloudbear-cli": ["cloudbear-cli@workspace:apps/cli"],
+    "laun-cli": ["laun-cli@workspace:apps/laun"],
 
-    "cloudbear-executor": ["cloudbear-executor@workspace:apps/executor"],
+    "laun-executor": ["laun-executor@workspace:apps/executor"],
 
-    "cloudbear-gateway": ["cloudbear-gateway@workspace:apps/gateway"],
+    "laun-gateway": ["laun-gateway@workspace:apps/gateway"],
 
-    "cloudbear-telegram-bridge": ["cloudbear-telegram-bridge@workspace:apps/telegram-bridge"],
+    "laun-telegram-bridge": ["laun-telegram-bridge@workspace:apps/telegram-bridge"],
 
     "debug": ["debug@4.4.3", "", { "dependencies": { "ms": "^2.1.3" } }, "sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA=="],
 

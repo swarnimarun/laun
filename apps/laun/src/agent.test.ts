@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseAgentKey, type AgentEvent, type SessionRecord } from "@cloudbear/protocol";
+import { parseAgentKey, type AgentEvent, type SessionRecord } from "@laun/protocol";
 import { UsageError } from "./args.js";
 import { createTranscript, follow, isTerminal, parseDurationMs, renderDoctor, renderEvent, runDoctor, sessionLine, watchSession, type DoctorProbe } from "./agent.js";
 import { GatewayClient, GatewayError, connectionHint } from "./client.js";
@@ -97,7 +97,7 @@ beforeAll(() => {
       }
       if (url.pathname === "/keys" && req.method === "POST") {
         if (token === "agent-key") return Response.json({ error: "service token required" }, { status: 403 });
-        return Response.json({ key: "cb_aabbccdd_" + "x".repeat(30), record: { id: "aabbccdd", label: "l", createdAt: "now" } }, { status: 201 });
+        return Response.json({ key: "laun_aabbccdd_" + "x".repeat(30), record: { id: "aabbccdd", label: "l", createdAt: "now" } }, { status: 201 });
       }
       return Response.json({ error: "not found" }, { status: 404 });
     },
@@ -112,10 +112,10 @@ afterAll(() => {
 describe("GatewayClient", () => {
   test("sends the bearer token and parses documented routes", async () => {
     seenAuth.length = 0;
-    const c = new GatewayClient(base, "cb_aabbccdd_" + "x".repeat(30));
+    const c = new GatewayClient(base, "laun_aabbccdd_" + "x".repeat(30));
     const { sessions } = await c.listSessions();
     expect(sessions[0]?.id).toBe("s1");
-    expect(seenAuth.every((a) => a.startsWith("Bearer cb_"))).toBe(true);
+    expect(seenAuth.every((a) => a.startsWith("Bearer laun_"))).toBe(true);
     expect((await c.health()).service).toBe("gateway");
   });
 
@@ -141,7 +141,7 @@ describe("GatewayClient", () => {
     expect(hint).toContain("cannot reach http://203.0.113.9:8080");
     expect(hint).toContain("firewalled");
     expect(hint).toContain("ssh -N -L 18080:localhost:8080 user@203.0.113.9");
-    expect(hint).toContain("cloudbear agent auth --host 127.0.0.1 --port 18080");
+    expect(hint).toContain("laun agent auth --host 127.0.0.1 --port 18080");
   });
 
   test("connection errors on loopback point at the local services instead", () => {
@@ -182,7 +182,7 @@ describe("agent rendering + follow", () => {
     expect(renderEvent({ type: "error", sessionId: "s", message: "nope" })).toEqual(["❌ nope"]);
     expect(renderEvent({ type: "approval_request", sessionId: "s", requestId: "r1", reason: "needs sudo" })).toEqual([
       "🛑 needs sudo",
-      "   approve: cloudbear agent approve s r1",
+      "   approve: laun agent approve s r1",
     ]);
   });
 
@@ -308,10 +308,10 @@ describe("main dispatch", () => {
   test("help and version", async () => {
     const a = io();
     expect(await main(["--help"], {} as NodeJS.ProcessEnv, a)).toBe(0);
-    expect(a.lines.join("\n")).toContain("cloudbear setup ssh");
+    expect(a.lines.join("\n")).toContain("laun setup ssh");
     const b = io();
     expect(await main(["--version"], {} as NodeJS.ProcessEnv, b)).toBe(0);
-    expect(b.lines[0]).toContain("cloudbear");
+    expect(b.lines[0]).toContain("laun");
   });
 
   test("unknown commands exit 2 with usage", async () => {
@@ -335,7 +335,7 @@ describe("main dispatch", () => {
   test("agent commands without a target explain how to connect", async () => {
     const a = io();
     // $HOME with no auth file: nothing saved, nothing in env
-    const env = { HOME: mkdtempSync(join(tmpdir(), "cb-nohome-")) } as NodeJS.ProcessEnv;
+    const env = { HOME: mkdtempSync(join(tmpdir(), "laun-nohome-")) } as NodeJS.ProcessEnv;
     expect(await main(["agent", "ls"], env, a)).toBe(2);
     expect(a.errs.join("\n")).toContain("agent auth");
   });
@@ -352,9 +352,9 @@ describe("top-level aliases", () => {
   function targetEnv(): NodeJS.ProcessEnv {
     const u = new URL(base);
     return {
-      CLOUDBEAR_HOST: u.hostname,
-      CLOUDBEAR_PORT: u.port,
-      CLOUDBEAR_KEY: "cb_aabbccdd_" + "x".repeat(30),
+      LAUN_HOST: u.hostname,
+      LAUN_PORT: u.port,
+      LAUN_KEY: "laun_aabbccdd_" + "x".repeat(30),
     } as NodeJS.ProcessEnv;
   }
 
@@ -408,9 +408,9 @@ describe("agent stop", () => {
   function targetEnv(): NodeJS.ProcessEnv {
     const u = new URL(base);
     return {
-      CLOUDBEAR_HOST: u.hostname,
-      CLOUDBEAR_PORT: u.port,
-      CLOUDBEAR_KEY: "cb_aabbccdd_" + "x".repeat(30),
+      LAUN_HOST: u.hostname,
+      LAUN_PORT: u.port,
+      LAUN_KEY: "laun_aabbccdd_" + "x".repeat(30),
     } as NodeJS.ProcessEnv;
   }
 
@@ -453,9 +453,9 @@ describe("agent continue", () => {
   function targetEnv(): NodeJS.ProcessEnv {
     const u = new URL(base);
     return {
-      CLOUDBEAR_HOST: u.hostname,
-      CLOUDBEAR_PORT: u.port,
-      CLOUDBEAR_KEY: "cb_aabbccdd_" + "x".repeat(30),
+      LAUN_HOST: u.hostname,
+      LAUN_PORT: u.port,
+      LAUN_KEY: "laun_aabbccdd_" + "x".repeat(30),
     } as NodeJS.ProcessEnv;
   }
 
@@ -504,9 +504,9 @@ describe("--json on say, approve, and deny", () => {
     return { lines, errs, written, out: (l) => void lines.push(l), err: (l) => void errs.push(l), write: (t) => void written.push(t) };
   }
 
-  function targetEnv(key = "cb_aabbccdd_" + "x".repeat(30)): NodeJS.ProcessEnv {
+  function targetEnv(key = "laun_aabbccdd_" + "x".repeat(30)): NodeJS.ProcessEnv {
     const u = new URL(base);
-    return { CLOUDBEAR_HOST: u.hostname, CLOUDBEAR_PORT: u.port, CLOUDBEAR_KEY: key } as NodeJS.ProcessEnv;
+    return { LAUN_HOST: u.hostname, LAUN_PORT: u.port, LAUN_KEY: key } as NodeJS.ProcessEnv;
   }
 
   test("say --json prints the accepted receipt", async () => {
@@ -533,11 +533,11 @@ describe("--json on say, approve, and deny", () => {
   test("auth persists the key id alongside the key", async () => {
     // The saved artifact should be able to say WHICH key it holds; otherwise
     // `keys ls` output can never be correlated with what is on disk.
-    const home = mkdtempSync(join(tmpdir(), "cb-authid-"));
+    const home = mkdtempSync(join(tmpdir(), "laun-authid-"));
     const prevHome = process.env.HOME;
     process.env.HOME = home;
     try {
-      const key = "cb_aabbccdd_" + "x".repeat(30);
+      const key = "laun_aabbccdd_" + "x".repeat(30);
       const a = makeIo();
       const code = await main(
         ["agent", "auth", "--host", "127.0.0.1", "--port", String(new URL(base).port), "--key", key],
@@ -545,7 +545,7 @@ describe("--json on say, approve, and deny", () => {
         a,
       );
       expect(code).toBe(0);
-      const file = join(home, ".cloudbear", "auth.json");
+      const file = join(home, ".laun", "auth.json");
       expect(statSync(file).mode & 0o777).toBe(0o600);
       const saved = JSON.parse(readFileSync(file, "utf8")) as Record<string, string>;
       expect(saved["keyId"]).toBe("aabbccdd");

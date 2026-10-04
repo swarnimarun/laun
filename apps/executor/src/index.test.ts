@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent } from "@cloudbear/protocol";
+import type { AgentEvent } from "@laun/protocol";
 import { loadConfig } from "./config.js";
 import { assertValidPrompt, assertValidSessionId, clampTimeout, resolveWorkdir } from "./paths.js";
 import {
@@ -210,7 +210,7 @@ describe("runPiStreaming (stub binaries, no model needed)", () => {
   };
 
   test("exit 0 resolves cleanly with no events", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-pi-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-pi-"));
     const events: AgentEvent[] = [];
     const r = await runPiStreaming({ ...base, piBin: "true", piSessionDir: dir, workdir: dir, onEvent: (e) => events.push(e) });
     expect(r.exitCode).toBe(0);
@@ -220,7 +220,7 @@ describe("runPiStreaming (stub binaries, no model needed)", () => {
   });
 
   test("non-zero exit emits an error event", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-pi-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-pi-"));
     const events: AgentEvent[] = [];
     const r = await runPiStreaming({ ...base, piBin: "false", piSessionDir: dir, workdir: dir, onEvent: (e) => events.push(e) });
     expect(r.exitCode).toBe(1);
@@ -229,11 +229,11 @@ describe("runPiStreaming (stub binaries, no model needed)", () => {
   });
 
   test("missing binary emits a start error, not a hang", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-pi-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-pi-"));
     const events: AgentEvent[] = [];
     const r = await runPiStreaming({
       ...base,
-      piBin: "cloudbear-definitely-not-a-binary",
+      piBin: "laun-definitely-not-a-binary",
       piSessionDir: dir,
       workdir: dir,
       timeoutMs: 5000,
@@ -248,7 +248,7 @@ describe("runPiStreaming (stub binaries, no model needed)", () => {
     // Regression: spawn() defaults stdin to a pipe nobody closes, and pi 1.0.2
     // blocks until EOF — every run hung forever with no output. The stub only
     // reaches its done event if stdin is already at EOF (i.e. "ignore").
-    const dir = mkdtempSync(join(tmpdir(), "cb-stdin-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-stdin-"));
     const stub = join(dir, "stub.sh");
     writeFileSync(stub, '#!/bin/sh\ncat >/dev/null\necho \'{"type":"agent_settled"}\'\nexit 0\n');
     chmodSync(stub, 0o755);
@@ -269,7 +269,7 @@ describe("runPiStreaming (stub binaries, no model needed)", () => {
 
 describe("POST /run terminal status (stub binaries)", () => {
   function testHandler(piBin: string) {
-    const dir = mkdtempSync(join(tmpdir(), "cb-run-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-run-"));
     return createHandler({
       port: 0,
       gatewayToken: "t",
@@ -313,7 +313,7 @@ describe("POST /run terminal status (stub binaries)", () => {
     // Regression: enqueue() after the consumer cancelled threw "Invalid state:
     // Controller is already closed" from pi's stdout handler, which took down
     // the whole executor process — every in-flight run with it.
-    const dir = mkdtempSync(join(tmpdir(), "cb-cancel-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-cancel-"));
     const stub = join(dir, "slow.sh");
     writeFileSync(
       stub,
@@ -463,7 +463,7 @@ async function pollFor(cond: () => boolean, what: string, timeoutMs = 5000): Pro
 
 describe("rpc mode: prompt -> agent_settled (stub child)", () => {
   test("prompt streams text and completes only on agent_settled", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rpc-basic-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rpc-basic-"));
     const log = join(dir, "cmds.log");
     writeFileSync(log, "");
     const stub = writeRpcStub(dir, "rpc.sh", basicRpcStub());
@@ -497,7 +497,7 @@ describe("rpc mode: prompt -> agent_settled (stub child)", () => {
   });
 
   test("agent_end alone never completes a run", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rpc-noend-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rpc-noend-"));
     const stub = writeRpcStub(
       dir,
       "rpc.sh",
@@ -534,7 +534,7 @@ describe("rpc mode: prompt -> agent_settled (stub child)", () => {
     // pi docs warn against readline: it also splits on U+2028/U+2029, which
     // are valid inside JSON strings. A delta containing U+2028 must arrive
     // intact in a single text event.
-    const dir = mkdtempSync(join(tmpdir(), "cb-rpc-u2028-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rpc-u2028-"));
     const line = JSON.stringify({
       type: "message_update",
       assistantMessageEvent: { type: "text_delta", delta: "a b" },
@@ -573,7 +573,7 @@ describe("rpc mode: prompt -> agent_settled (stub child)", () => {
   }, 30_000);
 
   test("provider error with retry heals to done and surfaces retry status", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rpc-retry-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rpc-retry-"));
     const stub = writeRpcStub(
       dir,
       "rpc.sh",
@@ -614,7 +614,7 @@ describe("rpc mode: prompt -> agent_settled (stub child)", () => {
   });
 
   test("exhausted retries surface an error", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rpc-exhaust-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rpc-exhaust-"));
     const stub = writeRpcStub(
       dir,
       "rpc.sh",
@@ -651,7 +651,7 @@ describe("rpc mode: prompt -> agent_settled (stub child)", () => {
   });
 
   test("reuses the same child across runs and reaps it after idle TTL", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rpc-reuse-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rpc-reuse-"));
     const stub = writeRpcStub(dir, "rpc.sh", basicRpcStub());
     const mgr = new RpcManager({ piBin: stub, openshellPrefix: [], idleTtlMs: 250 });
     try {
@@ -671,7 +671,7 @@ describe("rpc mode: prompt -> agent_settled (stub child)", () => {
   });
 
   test("openshell prefix applies to the rpc child argv", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rpc-shell-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rpc-shell-"));
     const stub = writeRpcStub(dir, "rpc.sh", basicRpcStub());
     const ok = new RpcManager({ piBin: stub, openshellPrefix: ["env"], idleTtlMs: 300_000 });
     try {
@@ -709,7 +709,7 @@ describe("rpc mode: prompt -> agent_settled (stub child)", () => {
   });
 
   test("uses steer when pi reports streaming", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rpc-steer-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rpc-steer-"));
     const log = join(dir, "cmds.log");
     writeFileSync(log, "");
     const stub = writeRpcStub(
@@ -749,7 +749,7 @@ describe("rpc mode: prompt -> agent_settled (stub child)", () => {
 
 describe("POST /run in rpc mode", () => {
   test("prompt streams NDJSON and ends with done", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rpc-run-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rpc-run-"));
     const stub = writeRpcStub(dir, "rpc.sh", basicRpcStub());
     const handler = rpcHandler(dir, stub);
     try {
@@ -773,7 +773,7 @@ describe("POST /run in rpc mode", () => {
   });
 
   test("concurrent run returns 409", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rpc-busy-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rpc-busy-"));
     const stub = writeRpcStub(
       dir,
       "rpc.sh",
@@ -815,7 +815,7 @@ describe("POST /run in rpc mode", () => {
   });
 
   test("a consumer that disconnects mid-run does not crash the rpc run", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rpc-cancel-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rpc-cancel-"));
     const stub = writeRpcStub(
       dir,
       "rpc.sh",
@@ -892,7 +892,7 @@ describe("POST /abort", () => {
   }
 
   test("json mode: abort returns 200 and emits aborted status", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-abort-json-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-abort-json-"));
     const handler = createHandler({
       port: 0,
       gatewayToken: "t",
@@ -936,7 +936,7 @@ describe("POST /abort", () => {
   });
 
   test("rpc mode: abort returns 200, emits aborted status, keeps child for reuse", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-abort-rpc-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-abort-rpc-"));
     const log = join(dir, "cmds.log");
     writeFileSync(log, "");
     const handler = rpcHandler(dir, slowRpcStub(dir));
@@ -986,7 +986,7 @@ describe("POST /abort", () => {
     // while pi still owes a trailing settled. The next prompt must gate
     // until that stale event is consumed idle; otherwise it lands mid-run
     // and completes the new generation early with a false sawDone.
-    const dir = mkdtempSync(join(tmpdir(), "cb-rpc-stale-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rpc-stale-"));
     const marker = join(dir, "order.log");
     writeFileSync(marker, "");
     const stub = writeRpcStub(
@@ -1087,7 +1087,7 @@ describe("POST /abort", () => {
   });
 
   test("abort returns 404 for unknown sessions and 409 when idle", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-abort-codes-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-abort-codes-"));
     const stub = writeRpcStub(dir, "rpc.sh", basicRpcStub());
     const handler = rpcHandler(dir, stub);
     try {
@@ -1123,7 +1123,7 @@ describe("POST /abort", () => {
   });
 
   test("abort validates auth and body", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-abort-auth-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-abort-auth-"));
     const handler = rpcHandler(dir, writeRpcStub(dir, "rpc.sh", basicRpcStub()));
     try {
       const badToken = await handler.handleAbort(
@@ -1154,7 +1154,7 @@ describe("json mode unchanged (regression)", () => {
     // these exact bytes. Comparing two handlers built from the same code
     // would pass even if the json path had diverged, so the bytes below
     // are the spec (captured from the parent's one-shot behaviour).
-    const dir = mkdtempSync(join(tmpdir(), "cb-json-compat-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-json-compat-"));
     const stub = join(dir, "ok.sh");
     writeFileSync(
       stub,
@@ -1194,7 +1194,7 @@ describe("json mode unchanged (regression)", () => {
   });
 
   test("default handler stays byte-for-byte compatible with one-shot json", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-json-compat-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-json-compat-"));
     const stub = join(dir, "ok.sh");
     writeFileSync(
       stub,
@@ -1453,13 +1453,13 @@ describe("json recovery (stub pi binaries)", () => {
   function writeArgvLog(dir: string): void {
     writeFileSync(join(dir, "argv.log"), "");
     writeFileSync(join(dir, "pids.log"), "");
-    process.env["CB_ARGV"] = join(dir, "argv.log");
-    process.env["CB_PIDS"] = join(dir, "pids.log");
+    process.env["LAUN_ARGV"] = join(dir, "argv.log");
+    process.env["LAUN_PIDS"] = join(dir, "pids.log");
   }
 
   function clearArgvLog(): void {
-    delete process.env["CB_ARGV"];
-    delete process.env["CB_PIDS"];
+    delete process.env["LAUN_ARGV"];
+    delete process.env["LAUN_PIDS"];
   }
 
   function argvLines(dir: string): string[] {
@@ -1485,8 +1485,8 @@ describe("json recovery (stub pi binaries)", () => {
     writeFileSync(
       p,
       "#!/bin/sh\n" +
-        'echo "$*" >> "${CB_ARGV:-/dev/null}"\n' +
-        'echo "$$" >> "${CB_PIDS:-/dev/null}"\n' +
+        'echo "$*" >> "${LAUN_ARGV:-/dev/null}"\n' +
+        'echo "$$" >> "${LAUN_PIDS:-/dev/null}"\n' +
         'case "$*" in\n' +
         "  *transport*)\n" +
         '    echo \'{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"resumed"}}\';\n' +
@@ -1539,7 +1539,7 @@ describe("json recovery (stub pi binaries)", () => {
   }
 
   test("a transport error recovers with the continuation prompt and ends done", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rec-json-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rec-json-"));
     writeArgvLog(dir);
     const handler = jsonRecoveryHandler(dir, writeFailoverStub(dir, "pi.sh"));
     try {
@@ -1573,14 +1573,14 @@ describe("json recovery (stub pi binaries)", () => {
   });
 
   test("an always-failing run stops after the configured attempts and names the count", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rec-json-fail-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rec-json-fail-"));
     writeArgvLog(dir);
     const stub = join(dir, "fail.sh");
     writeFileSync(
       stub,
       "#!/bin/sh\n" +
-        'echo "$*" >> "${CB_ARGV:-/dev/null}"\n' +
-        'echo "$$" >> "${CB_PIDS:-/dev/null}"\n' +
+        'echo "$*" >> "${LAUN_ARGV:-/dev/null}"\n' +
+        'echo "$$" >> "${LAUN_PIDS:-/dev/null}"\n' +
         'echo \'{"type":"error","message":"always broken"}\';\n' +
         "exit 1\n",
     );
@@ -1617,10 +1617,10 @@ describe("json recovery (stub pi binaries)", () => {
   });
 
   test("attempts=0 disables recovery: single run, legacy terminal", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rec-json-off-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rec-json-off-"));
     writeArgvLog(dir);
     const stub = join(dir, "fail.sh");
-    writeFileSync(stub, "#!/bin/sh\n" + 'echo "$*" >> "${CB_ARGV:-/dev/null}"\n' + "exit 1\n");
+    writeFileSync(stub, "#!/bin/sh\n" + 'echo "$*" >> "${LAUN_ARGV:-/dev/null}"\n' + "exit 1\n");
     chmodSync(stub, 0o755);
     const handler = jsonRecoveryHandler(dir, stub, { recoveryAttempts: 0 });
     try {
@@ -1636,13 +1636,13 @@ describe("json recovery (stub pi binaries)", () => {
   });
 
   test("a run that settles then errors is finished, not recovered", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rec-json-settled-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rec-json-settled-"));
     writeArgvLog(dir);
     const stub = join(dir, "late.sh");
     writeFileSync(
       stub,
       "#!/bin/sh\n" +
-        'echo "$*" >> "${CB_ARGV:-/dev/null}"\n' +
+        'echo "$*" >> "${LAUN_ARGV:-/dev/null}"\n' +
         'echo \'{"type":"agent_settled"}\';\n' +
         'echo \'{"type":"error","message":"late failure"}\';\n' +
         "exit 0\n",
@@ -1665,13 +1665,13 @@ describe("json recovery (stub pi binaries)", () => {
   });
 
   test("operator abort during backoff ends the run with no further attempt", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rec-json-abort-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rec-json-abort-"));
     writeArgvLog(dir);
     const stub = join(dir, "fail.sh");
     writeFileSync(
       stub,
       "#!/bin/sh\n" +
-        'echo "$*" >> "${CB_ARGV:-/dev/null}"\n' +
+        'echo "$*" >> "${LAUN_ARGV:-/dev/null}"\n' +
         'echo \'{"type":"error","message":"first broken"}\';\n' +
         "exit 1\n",
     );
@@ -1780,7 +1780,7 @@ describe("rpc recovery (stub rpc child)", () => {
   }
 
   test("a transport error re-issues the continuation prompt and ends done", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rec-rpc-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rec-rpc-"));
     const log = join(dir, "cmds.log");
     writeFileSync(log, "");
     const handler = rpcRecoveryHandler(dir, writeFailoverStub(dir));
@@ -1818,7 +1818,7 @@ describe("rpc recovery (stub rpc child)", () => {
   });
 
   test("an always-failing rpc run stops at the bound and names the count", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rec-rpc-fail-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rec-rpc-fail-"));
     const log = join(dir, "cmds.log");
     writeFileSync(log, "");
     const handler = rpcRecoveryHandler(dir, writeAlwaysFailStub(dir), { recoveryAttempts: 1, recoveryBackoffMs: 50 });
@@ -1852,7 +1852,7 @@ describe("rpc recovery (stub rpc child)", () => {
   });
 
   test("attempts=0 disables rpc recovery: single prompt, legacy terminal", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rec-rpc-off-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rec-rpc-off-"));
     const log = join(dir, "cmds.log");
     writeFileSync(log, "");
     const handler = rpcRecoveryHandler(dir, writeAlwaysFailStub(dir), { recoveryAttempts: 0 });
@@ -1871,7 +1871,7 @@ describe("rpc recovery (stub rpc child)", () => {
   });
 
   test("an rpc run that settles then errors is finished, not recovered", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rec-rpc-settled-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rec-rpc-settled-"));
     const log = join(dir, "cmds.log");
     writeFileSync(log, "");
     const stub = writeRpcStub(
@@ -1906,7 +1906,7 @@ describe("rpc recovery (stub rpc child)", () => {
   });
 
   test("operator abort during rpc backoff ends the run with no further prompt", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-rec-rpc-abort-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-rec-rpc-abort-"));
     const log = join(dir, "cmds.log");
     writeFileSync(log, "");
     const handler = rpcRecoveryHandler(dir, writeAlwaysFailStub(dir), { recoveryBackoffMs: 5000 });
@@ -2106,7 +2106,7 @@ describe("usage passthrough (lane-exec-think)", () => {
 
 describe("thinking end to end (lane-exec-think, stub binaries)", () => {
   test("json mode: 10k thinking coalesces, usage forwards, done stays last", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-think-json-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-think-json-"));
     const delta = "abcdefghij"; // 10 chars
     const lines = 1000; // 10 000 chars of reasoning
     const stub = join(dir, "think.sh");
@@ -2148,7 +2148,7 @@ describe("thinking end to end (lane-exec-think, stub binaries)", () => {
   });
 
   test("rpc mode: thinking coalesces through the shared helper", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-think-rpc-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-think-rpc-"));
     const delta = "0123456789"; // 10 chars
     const lines = 1000;
     const thinkLine = JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta } });
@@ -2194,7 +2194,7 @@ describe("thinking end to end (lane-exec-think, stub binaries)", () => {
   });
 
   test("rpc abort flushes buffered thinking before the aborted status", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-think-abort-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-think-abort-"));
     const marker = join(dir, "emitted");
     const stub = writeRpcStub(
       dir,
@@ -2260,7 +2260,7 @@ describe("lane-exec-wedge: wedged-slot release (reproduce-first)", () => {
     // a respawned child (spawn >= 2) succeeds. Without the fix the first
     // child stays alive, settling stays true, and the second run reuses the
     // wedged pid and times out again.
-    const dir = mkdtempSync(join(tmpdir(), "cb-wedge-kill-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-wedge-kill-"));
     const log = join(dir, "spawns.log");
     writeFileSync(log, "");
     const stub = writeRpcStub(
@@ -2332,7 +2332,7 @@ describe("lane-exec-wedge: wedged-slot release (reproduce-first)", () => {
     // ~2s while the next run is already in flight. Without a generation
     // guard the old finally deletes the new run's busy entry, so a third
     // concurrent run wrongly succeeds (200) instead of 409.
-    const dir = mkdtempSync(join(tmpdir(), "cb-wedge-clobber-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-wedge-clobber-"));
     const started = join(dir, "started");
     const stub = join(dir, "slow.sh");
     writeFileSync(
@@ -2412,7 +2412,7 @@ describe("lane-exec-wedge: wedged-slot release (reproduce-first)", () => {
   }, 30_000);
 
   test("handleAbort on a busy-but-settled desync frees busy", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-wedge-desync-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-wedge-desync-"));
     const stub = writeRpcStub(dir, "rpc.sh", basicRpcStub());
     const handler = rpcHandler(dir, stub);
     try {
@@ -2433,7 +2433,7 @@ describe("lane-exec-wedge: wedged-slot release (reproduce-first)", () => {
   });
 
   test("a synchronous exception between busy.add and the stream try still frees busy", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cb-wedge-exc-"));
+    const dir = mkdtempSync(join(tmpdir(), "laun-wedge-exc-"));
     const stub = writeRpcStub(dir, "rpc.sh", basicRpcStub());
     const handler = rpcHandler(dir, stub);
     const OrigStream = globalThis.ReadableStream;

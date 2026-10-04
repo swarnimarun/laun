@@ -7,7 +7,7 @@
 //   https://docs.nvidia.com/openshell/latest/tutorials/run-pi-with-openrouter
 //
 // The profile lives at deploy/openshell/provider-model.yaml (outside this
-// package). Tests resolve it from the repo root; CLOUDBEAR_PROVIDER_PROFILE
+// package). Tests resolve it from the repo root; LAUN_PROVIDER_PROFILE
 // overrides the path.
 
 import { readFileSync } from "node:fs";
@@ -19,7 +19,7 @@ import { validateBinaryObject, validateEndpointObject } from "./openshell.js";
 const here = dirname(fileURLToPath(import.meta.url));
 
 export function defaultProviderProfilePath(): string {
-  if (process.env["CLOUDBEAR_PROVIDER_PROFILE"]) return resolve(process.env["CLOUDBEAR_PROVIDER_PROFILE"]!);
+  if (process.env["LAUN_PROVIDER_PROFILE"]) return resolve(process.env["LAUN_PROVIDER_PROFILE"]!);
   // packages/policy/src -> repo root -> deploy/openshell/provider-model.yaml
   return join(here, "..", "..", "..", "deploy", "openshell", "provider-model.yaml");
 }

@@ -1,4 +1,4 @@
-import { parseAllowlist } from "@cloudbear/protocol";
+import { parseAllowlist } from "@laun/protocol";
 
 export interface BridgeConfig {
   /** May be empty: an empty token means "disabled", handled in index.ts. */

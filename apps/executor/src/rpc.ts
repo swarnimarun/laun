@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import type { AgentEvent } from "@cloudbear/protocol";
+import type { AgentEvent } from "@laun/protocol";
 import { handlePiLine, ThinkingCoalescer, parsePiJsonLine } from "./pi.js";
 import { sandboxNameForSession, type SandboxRunner } from "./sandbox.js";
 

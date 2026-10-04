@@ -24,7 +24,7 @@ services:
       # No model keys here on purpose: pi authenticates from the executor host's
       # ~/.pi/agent/auth.json (see examples/models.md). Never bake keys into images.
     volumes:
-      - cloudbear-data:/data
+      - laun-data:/data
       # pi's config + credentials. Two traps avoided deliberately:
       #  * the source must be the INVOKING USER's home — compose is started under
       #    sudo by deploy/bootstrap.sh, where HOME=/root would silently bind an
@@ -55,11 +55,11 @@ services:
       GATEWAY_TOKEN: ${GATEWAY_TOKEN:?set GATEWAY_TOKEN in .env}
       # Human-facing key for the CLI and browser UI. The gateway hashes it on
       # boot; it never reaches session files or logs.
-      CLOUDBEAR_KEY: ${CLOUDBEAR_KEY:-}
+      LAUN_KEY: ${LAUN_KEY:-}
       EXECUTOR_URL: http://executor:8081
       DATA_DIR: /data
     volumes:
-      - cloudbear-data:/data
+      - laun-data:/data
     depends_on:
       executor:
         condition: service_started
@@ -94,4 +94,4 @@ services:
     restart: on-failure
 
 volumes:
-  cloudbear-data:
+  laun-data:

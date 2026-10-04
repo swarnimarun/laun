@@ -1,5 +1,5 @@
 {
-  "name": "cloudbear-gateway",
+  "name": "laun-gateway",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,6 +11,6 @@
     "start": "bun src/index.ts"
   },
   "dependencies": {
-    "@cloudbear/protocol": "workspace:*"
+    "@laun/protocol": "workspace:*"
   }
 }

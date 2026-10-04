@@ -7,7 +7,7 @@ import { createGateway } from "./server.js";
 import { SessionStore } from "./store.js";
 
 function gwWithKeys(bootstrapKey?: string) {
-  const dir = mkdtempSync(join(tmpdir(), "cb-auth-"));
+  const dir = mkdtempSync(join(tmpdir(), "laun-auth-"));
   const keys = new AgentKeyStore(dir);
   const gw = createGateway(
     { port: 8080, gatewayToken: "service-token", executorUrl: "http://localhost:9", dataDir: dir, bootstrapKey, publicDir: dir },
@@ -45,7 +45,7 @@ describe("gateway auth: service token vs agent key", () => {
     expect(gw.authenticate(req("Bearer nope"))).toBeNull();
     expect(gw.authenticate(req("Basic abc"))).toBeNull();
     // the service token must not be accepted as an agent key and vice versa
-    expect(gw.authenticate(req(`Bearer cb_${record.id}_${"Z".repeat(43)}`))).toBeNull();
+    expect(gw.authenticate(req(`Bearer laun_${record.id}_${"Z".repeat(43)}`))).toBeNull();
     keys.revoke(record.id);
     expect(gw.authenticate(req(`Bearer ${key}`))).toBeNull();
   });
@@ -54,7 +54,7 @@ describe("gateway auth: service token vs agent key", () => {
     const { gw, keys } = gwWithKeys();
     const { key, record } = keys.add("bootstrap-source");
     // simulate: setup wrote this key into .env, gateway restarts and imports it
-    const dir2 = mkdtempSync(join(tmpdir(), "cb-auth2-"));
+    const dir2 = mkdtempSync(join(tmpdir(), "laun-auth2-"));
     const gw2 = createGateway(
       {
         port: 8080,
@@ -70,7 +70,7 @@ describe("gateway auth: service token vs agent key", () => {
     expect(gw2.authenticate(req(`Bearer ${key}`))).toEqual({ kind: "agent", keyId: record.id, label: "bootstrap" });
   });
 
-  test("an invalid CLOUDBEAR_KEY refuses to start", () => {
-    expect(() => gwWithKeys("garbage")).toThrow("CLOUDBEAR_KEY");
+  test("an invalid LAUN_KEY refuses to start", () => {
+    expect(() => gwWithKeys("garbage")).toThrow("LAUN_KEY");
   });
 });

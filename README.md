@@ -1,4 +1,4 @@
-# Cloudbear
+# Laun
 
 Self-hosted remote agent runner. Pi-first executor, OpenShell policy sandbox, Telegram bridge. One VPS, on 24/7.
 
@@ -10,24 +10,24 @@ Telegram / CLI / browser -> gateway -> executor (pi inside OpenShell sandbox) ->
 
 ```bash
 # from a checkout (works before the CLI is on your PATH)
-bun install && bun run cli -- setup ssh -i ~/.ssh/id_ed25519 root@203.0.113.9
+bun install && bun run laun -- setup ssh -i ~/.ssh/id_ed25519 root@203.0.113.9
 # ...or locally in this checkout
-bun run cli -- setup
+bun run laun -- setup
 
-# once installed (`bun link apps/cli`), the short form works anywhere
-cloudbear setup ssh -i ~/.ssh/id_ed25519 root@203.0.113.9
+# once installed (`bun link apps/laun`), the short form works anywhere
+laun setup ssh -i ~/.ssh/id_ed25519 root@203.0.113.9
 ```
 
 Either way it prints a connection block with a URL and a one-time **agent key**:
 
 ```
   URL   http://203.0.113.9:8080
-  Key   cb_01234567_XXXX…
+  Key   laun_01234567_XXXX…
   UI    http://203.0.113.9:8080/   (paste the key)
 
-cloudbear agent auth --host 203.0.113.9 --key cb_01234567_XXXX…
-cloudbear agent new "fix the failing tests"
-cloudbear agent log <id> --follow
+laun agent auth --host 203.0.113.9 --key laun_01234567_XXXX…
+laun agent new "fix the failing tests"
+laun agent log <id> --follow
 ```
 
 See `deploy/remote-setup.md` for flags, prerequisites, and troubleshooting, and
@@ -41,17 +41,17 @@ transcript, new session, follow-up messages, and approve/deny buttons.
 ### Remote control (CLI)
 
 ```bash
-cloudbear agent auth --host <host> --key <cb_...>   # verify + save (0600)
-cloudbear agent new "<goal>" [--model <m>]
-cloudbear agent ls | status <id> | log <id> [--follow] | say <id> "<text>"
-cloudbear agent approve <id> <requestId> | deny <id> <requestId>
-cloudbear keys ls | create [--label <l>] | revoke <id>   # needs GATEWAY_TOKEN
+laun agent auth --host <host> --key <laun_...>   # verify + save (0600)
+laun agent new "<goal>" [--model <m>]
+laun agent ls | status <id> | log <id> [--follow] | say <id> "<text>"
+laun agent approve <id> <requestId> | deny <id> <requestId>
+laun keys ls | create [--label <l>] | revoke <id>   # needs GATEWAY_TOKEN
 ```
 
 ## Quick start (manual, VPS)
 
 ```bash
-git clone <this-repo> cloudbear && cd cloudbear
+git clone <this-repo> laun && cd laun
 cp deploy/.env.example .env   # fill in TELEGRAM_BOT_TOKEN, GATEWAY_TOKEN, allowlist
 chmod +x deploy/install.sh && ./deploy/install.sh
 ```
@@ -60,7 +60,7 @@ chmod +x deploy/install.sh && ./deploy/install.sh
 `docker compose -f deploy/docker-compose.yml --env-file .env up -d --build`.
 Containers restart automatically (`unless-stopped`) — that plus the Docker
 daemon starting at boot is the whole 24/7 story. Sessions live in the
-`cloudbear-data` volume (`/data/sessions` + gateway `index.json`).
+`laun-data` volume (`/data/sessions` + gateway `index.json`).
 
 Useful:
 
@@ -102,14 +102,14 @@ bun run dev:bridge     # long-polling Telegram
 * `apps/executor` — spawns `pi -p --mode json` per session, streams JSONL events. Wraps with OpenShell when `OPENSHELL_ENABLED=true`.
 * `apps/gateway` — tiny HTTP API + SSE + agent-key management. Serves the browser UI from `apps/gateway/public`.
 * `apps/telegram-bridge` — grammY long-polling bot, allowlisted user IDs only.
-* `apps/cli` — the `cloudbear` command: local/remote setup, agent auth, and agent/key control.
+* `apps/laun` — the `laun` command: local/remote setup, agent auth, and agent/key control.
 * `deploy/` — compose, env example, install script, remote bootstrap, remote setup guide.
 * `examples/` — model setup, OpenShell policy notes, agent keys.
 
 ## API (gateway :8080)
 
 Auth: `Authorization: Bearer <token>`, where the token is either `GATEWAY_TOKEN`
-(internal services) or an agent key `cb_<id>_<secret>` (CLI and browser).
+(internal services) or an agent key `laun_<id>_<secret>` (CLI and browser).
 
 * `POST /sessions` `{ goal, repo?, model? }` -> the full session record (201)
 * `GET /sessions` -> `{ sessions: [...] }`
