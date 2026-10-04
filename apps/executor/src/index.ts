@@ -22,6 +22,8 @@ Bun.serve({
     }
     if (url.pathname === "/run") return handler.handleRun(req);
     if (url.pathname === "/abort") return handler.handleAbort(req);
+    if (url.pathname === "/steer") return handler.handleSteer(req);
+    if (url.pathname === "/approvals") return handler.handleApprovals(req);
     return new Response(JSON.stringify({ error: "not found" }), {
       status: 404,
       headers: { "content-type": "application/json" },
