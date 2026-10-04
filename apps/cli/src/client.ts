@@ -94,6 +94,15 @@ export class GatewayClient {
     });
   }
 
+  /**
+   * Ask the gateway to stop a running session. 200 {ok:true} on success,
+   * 404 for an unknown session, 409 when the session is not running.
+   * (Integrator-owned route: POST /sessions/:id/abort.)
+   */
+  abortSession(id: string): Promise<{ ok: boolean }> {
+    return this.request(`/sessions/${id}/abort`, { method: "POST" });
+  }
+
   createKey(label?: string): Promise<{ key: string; record: { id: string; label: string; createdAt: string } }> {
     return this.request("/keys", { method: "POST", body: JSON.stringify(label ? { label } : {}) });
   }

@@ -24,9 +24,20 @@ const HELP = `cloudbear — self-hosted remote agent control
     cloudbear agent ls [--json]
     cloudbear agent status <id> [--json]
     cloudbear agent log <id> [--follow] [--since <n>] [--json]
-    cloudbear agent say <id> <text>
-    cloudbear agent approve <id> <requestId> [--note <t>]
-    cloudbear agent deny <id> <requestId> [--note <t>]
+    cloudbear agent say <id> <text> [--json]
+    cloudbear agent stop <id> [--json]
+    cloudbear agent continue <id> [--json]   (alias: retry)
+    cloudbear agent approve <id> <requestId> [--note <t>] [--json]
+    cloudbear agent deny <id> <requestId> [--note <t>] [--json]
+
+  Shortcuts (same as the agent command in brackets)
+    cloudbear list|ls                    (= agent ls)
+    cloudbear status <id>                (= agent status <id>)
+    cloudbear log <id> [--follow] [--since <n>] [--json]
+    cloudbear run "<goal>"               (= agent new; alias of new)
+    cloudbear stop <id> [--json]         (= agent stop <id>)
+    cloudbear approve|deny <id> <requestId>
+    (agent also accepts the aliases: list (= ls), run (= new), retry (= continue))
 
   Keys (needs GATEWAY_TOKEN, the service secret)
     cloudbear keys ls
@@ -102,8 +113,19 @@ async function setupCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
   return 0;
 }
 
+/** Fixed prompt sent by `agent continue` to resume a run that died. */
+export const CONTINUE_PROMPT = "Please continue from where you left off.";
+
+/** Subcommand aliases accepted under `agent` (mirrored at the top level). */
+const AGENT_SUB_ALIASES: Record<string, string> = {
+  list: "ls",
+  run: "new",
+  retry: "continue",
+};
+
 async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Promise<number> {
-  const [sub, ...rest] = argv;
+  const [rawSub, ...rest] = argv;
+  const sub = rawSub === undefined ? undefined : (AGENT_SUB_ALIASES[rawSub] ?? rawSub);
 
   if (sub === "auth") {
     const { flags } = parseArgs(rest, { boolean: ["json"], value: ["host", "key", "port", "scheme"] });
@@ -183,15 +205,18 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
   }
 
   if (sub === "say") {
-    const parsed = parseArgs(rest);
+    const parsed = parseArgs(rest, { boolean: ["json"] });
     const id = requiredArg(parsed.positionals, 0, "session id", 'cloudbear agent say <id> "<text>"');
     const text = requiredArg(parsed.positionals, 1, "text", 'cloudbear agent say <id> "<text>"');
+    const asJson = flagBool(parsed.flags, "json");
     try {
-      await client.sendMessage(id, text);
-      io.out(`↗️ sent to ${id}`);
+      const res = await client.sendMessage(id, text);
+      if (asJson) io.out(JSON.stringify(res));
+      else io.out(`↗️ sent to ${id}`);
     } catch (e) {
       if (e instanceof GatewayError && e.status === 409) {
-        io.out(`⏳ session ${id} is busy — try again shortly`);
+        if (asJson) io.out(JSON.stringify({ sessionId: id, busy: true }));
+        else io.out(`⏳ session ${id} is busy — try again shortly`);
         return 0;
       }
       throw e;
@@ -199,12 +224,62 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
     return 0;
   }
 
+  if (sub === "stop") {
+    const parsed = parseArgs(rest, { boolean: ["json"] });
+    const id = requiredArg(parsed.positionals, 0, "session id", "cloudbear agent stop <id>");
+    try {
+      const result = await client.abortSession(id);
+      if (flagBool(parsed.flags, "json")) io.out(JSON.stringify({ sessionId: id, ...result }));
+      else io.out(`🛑 stopped ${id}`);
+    } catch (e) {
+      if (e instanceof GatewayError && e.status === 404) {
+        io.err(`no such session: ${id}`);
+        return 1;
+      }
+      if (e instanceof GatewayError && e.status === 409) {
+        io.err(`session ${id} is not running`);
+        return 1;
+      }
+      throw e;
+    }
+    return 0;
+  }
+
+  if (sub === "continue") {
+    const parsed = parseArgs(rest, { boolean: ["json"] });
+    const id = requiredArg(parsed.positionals, 0, "session id", "cloudbear agent continue <id>");
+    const asJson = flagBool(parsed.flags, "json");
+    const busyMessage = `⏳ session ${id} is already running — send input with: cloudbear agent say ${id} "<text>"`;
+    // A busy session must keep its single run; a second run would collide
+    // with it, so refuse before sending anything.
+    const { session } = await client.getSession(id);
+    if (session.status === "running") {
+      io.err(busyMessage);
+      return 1;
+    }
+    try {
+      await client.sendMessage(id, CONTINUE_PROMPT);
+    } catch (e) {
+      if (e instanceof GatewayError && e.status === 409) {
+        io.err(busyMessage);
+        return 1;
+      }
+      throw e;
+    }
+    // Watch the resumed run, skipping history (which usually already ends in
+    // the terminal event of the run that died).
+    const emit = createTranscript(io, asJson);
+    await follow(client, id, { fromLatest: true, onEvent: emit });
+    return 0;
+  }
+
   if (sub === "approve" || sub === "deny") {
-    const parsed = parseArgs(rest, { value: ["note"] });
+    const parsed = parseArgs(rest, { boolean: ["json"], value: ["note"] });
     const id = requiredArg(parsed.positionals, 0, "session id", `cloudbear agent ${sub} <id> <requestId>`);
     const requestId = requiredArg(parsed.positionals, 1, "request id", `cloudbear agent ${sub} <id> <requestId>`);
-    await client.decideApproval(id, requestId, sub, flagString(parsed.flags, "note"));
-    io.out(`${sub === "approve" ? "✅ approved" : "⛔ denied"} ${requestId} (session ${id})`);
+    const res = await client.decideApproval(id, requestId, sub, flagString(parsed.flags, "note"));
+    if (flagBool(parsed.flags, "json")) io.out(JSON.stringify({ sessionId: id, requestId, decision: sub, ...res }));
+    else io.out(`${sub === "approve" ? "✅ approved" : "⛔ denied"} ${requestId} (session ${id})`);
     return 0;
   }
 
@@ -240,6 +315,18 @@ async function keysCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Prom
   throw new UsageError(`unknown keys command "${sub}"\n\n${HELP}`);
 }
 
+/** Top-level shortcuts, each mapping onto the `agent` subcommand in brackets. */
+const TOP_LEVEL_AGENT_ALIAS: Record<string, string> = {
+  list: "ls",
+  ls: "ls",
+  status: "status",
+  log: "log",
+  run: "new",
+  stop: "stop",
+  approve: "approve",
+  deny: "deny",
+};
+
 /** Entry point. Returns the process exit code. */
 export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env, io: Io = defaultIo): Promise<number> {
   const [command, ...rest] = argv;
@@ -255,6 +342,8 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
     if (command === "setup") return await setupCommand(rest, env, io);
     if (command === "agent") return await agentCommand(rest, env, io);
     if (command === "keys") return await keysCommand(rest, env, io);
+    const aliased = TOP_LEVEL_AGENT_ALIAS[command];
+    if (aliased !== undefined) return await agentCommand([aliased, ...rest], env, io);
     throw new UsageError(`unknown command "${command}"\n\n${HELP}`);
   } catch (e) {
     if (e instanceof UsageError) {
