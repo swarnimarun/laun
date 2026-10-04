@@ -101,6 +101,15 @@ function appendToolFailure(name, output) {
   const text = typeof output === "string" && output.trim() ? clamp(output.trim(), 500) : "(no output)";
   appendSystem(`⚠️ ${name} failed: ${text}`, "warn");
 }
+/** One compact accounting line; unknown/absent fields render, never crash. */
+function usageLine(e) {
+  const parts = [];
+  for (const [k, label] of [["inputTokens", "in"], ["outputTokens", "out"], ["totalTokens", "total"]]) {
+    if (typeof e[k] === "number") parts.push(`${label} ${e[k]}`);
+  }
+  if (typeof e.costUsd === "number") parts.push(`$${e.costUsd.toFixed(4)}`);
+  return parts.length ? `📊 usage: ${parts.join(", ")}` : `📊 usage`;
+}
 /** Keep sidebar badges and the session header in sync with streamed status events. */
 function setSessionStatus(sessionId, status) {
   const rec = state.sessions.find((s) => s.id === sessionId);
@@ -118,6 +127,8 @@ function applyEvent(ev) {
     case "tool_call": appendToolCall(ev.name, ev.args); return "continue";
     case "tool_result": if (ev.ok === false) appendToolFailure(ev.name, ev.output); return "continue";
     case "approval_request": addApprovalCard(ev, $("approvals")); return "continue";
+    case "thinking": if (typeof ev.delta === "string" && ev.delta) appendSystem(`💭 ${ev.delta}`, "info"); return "continue";
+    case "usage": appendSystem(usageLine(ev), "info"); return "continue";
     case "status": {
       setSessionStatus(ev.sessionId, ev.status);
       // The gateway pings a bare "running" at the start of every run; the badge already shows it.
