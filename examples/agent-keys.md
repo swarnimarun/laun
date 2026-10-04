@@ -15,10 +15,10 @@ Two credentials, two audiences:
 An agent key can never mint or revoke other keys, so a leaked key is a
 contained incident: you rotate it, not the whole deployment.
 
-## Anatomy
+## Anatomy (synthetic example — never a real key)
 
 ```
-cb_5ca79d23_1awjHbvawLLTDzSdVlaWzkJ5Beg-RMUQbirZaiozpkE
+cb_01234567_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 │  │        │
 │  │        └── secret: 32 random bytes, base64url
 │  └─────────── id: 4 random bytes, 8 hex characters
@@ -51,10 +51,10 @@ recovered from the gateway.
 cloudbear setup ssh -i ~/.ssh/id_ed25519 root@203.0.113.9
 
 # save it for later CLI use
-cloudbear agent auth --host 203.0.113.9 --key cb_5ca79d23_1awj…
+cloudbear agent auth --host 203.0.113.9 --key cb_01234567_XXXX…
 
 # or skip the file entirely
-CLOUDBEAR_HOST=203.0.113.9 CLOUDBEAR_KEY=cb_5ca79d23_1awj… cloudbear agent ls
+CLOUDBEAR_HOST=203.0.113.9 CLOUDBEAR_KEY=cb_01234567_XXXX… cloudbear agent ls
 
 # browser: open http://203.0.113.9:8080/ and paste the key
 ```
@@ -65,7 +65,7 @@ CLOUDBEAR_HOST=203.0.113.9 CLOUDBEAR_KEY=cb_5ca79d23_1awj… cloudbear agent ls
 # mint a second key (needs the service token from the env file)
 GATEWAY_TOKEN=… cloudbear keys create --label laptop
 GATEWAY_TOKEN=… cloudbear keys ls
-GATEWAY_TOKEN=… cloudbear keys revoke 5ca79d23
+GATEWAY_TOKEN=… cloudbear keys revoke 01234567
 ```
 
 Rotation is two steps on purpose: create the replacement, confirm it works

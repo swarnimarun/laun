@@ -38,11 +38,11 @@ The command ends with a connection block:
 
 ```
   URL   http://203.0.113.9:8080
-  Key   cb_5ca79d23_1awj…
+  Key   cb_01234567_XXXX…
   UI    http://203.0.113.9:8080/   (paste the key)
 
   Save it for the CLI:
-    cloudbear agent auth --host 203.0.113.9 --key cb_5ca79d23_1awj…
+    cloudbear agent auth --host 203.0.113.9 --key cb_01234567_XXXX…
 ```
 
 ## What it does
