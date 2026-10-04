@@ -149,6 +149,40 @@ RPC-only), and there was no way to stop a runaway session.
 
 Why now: it is the difference between "runs a turn" and "controls an agent".
 
+## Wave 2 — make it safe to leave running unattended
+
+Objective: close the two gaps that stop a long task from surviving on its own
+(provider runs dying mid-flight, and nothing actually being sandboxed), then
+add the `dots` runtime once research says what that means.
+
+| Track | Seam | Lane | State |
+| --- | --- | --- | --- |
+| **W2.1** Executor recovery (M2.7) — our own retry, because pi's `set_auto_retry` does not cover the socket-drop class that kills real runs | `apps/executor/**` | Lane R | worker in flight |
+| **W2.2** OpenShell policy layer — real YAML schema our templates can actually be applied as, provider profile for credential injection, VPS bring-up script that *probes* a denial instead of claiming one | `packages/policy/**`, `deploy/openshell/**` | Lane P | worker in flight |
+| **W2.3** `dots` runtime — adapter behind the same executor interface | TBD (`packages/` scaffold first) | blocked on research | research in flight |
+| **W2.4** Executor → sandbox wiring, then enable it for real | `apps/executor/**`, `deploy/**` | **integrator** | after W2.1/W2.2 land |
+
+**Ordering and why:** W2.1 and W2.2 are disjoint seams, so they run in
+parallel; W2.4 must wait for both because it consumes Lane P's bring-up script
+*and* touches the executor Lane R is editing. One lane lands at a time with the
+gates re-run by the integrator, exactly as in M2.
+
+**Definition of done for the wave (all measured on the VPS, none assumed):**
+
+1. A long run that hits the socket-drop failure recovers on its own and reaches
+   `done` without operator intervention, with `retrying (` visible in the log.
+2. `deploy/openshell/install-and-verify.sh` prints `OS_PROBE=pass`, meaning a
+   policy denial was observed — not merely that the sandbox started.
+3. The executor runs the agent **inside** a sandbox with `OPENSHELL_ENABLED=true`,
+   and the model credential reaches the provider without existing in the
+   sandbox.
+4. `stop` still works, and an abort during recovery never resurrects a run.
+5. Lanes land only after a validator verdict and an independent gate run.
+
+**Explicitly out of this wave:** M2.4 lease/heartbeat, M2.5 `usage`, M2.6
+`get_entries`, TLS, and the Telegram token — all still required before this is
+production-grade, none of them blocking the wave's goal.
+
 ## Handing work to a cloud agent: lanes, workers, validators
 
 The loop that produced M2.1/M2.2 is designed to run unattended on a remote
