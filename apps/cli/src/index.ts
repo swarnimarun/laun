@@ -1,10 +1,34 @@
 #!/usr/bin/env bun
 import { parseAgentKey } from "@cloudbear/protocol";
 import { UsageError, flagBool, flagString, parseArgs, requiredArg } from "./args.js";
-import { createTranscript, follow, formatApprovals, sessionLine } from "./agent.js";
+import {
+  createTranscript,
+  follow,
+  formatApprovals,
+  parseDurationMs,
+  runDoctor,
+  sessionLine,
+  watchSession,
+  type DoctorGateway,
+  type DoctorProbe,
+} from "./agent.js";
 import { GatewayClient, GatewayError } from "./client.js";
-import { authFilePath, homeFor, resolveTarget, saveTarget, targetUrl, type Target } from "./config.js";
+import {
+  authFilePath,
+  homeFor,
+  isValidTargetName,
+  listNamedTargets,
+  loadNamedTarget,
+  loadTarget,
+  resolveTarget,
+  saveNamedTarget,
+  saveTarget,
+  targetUrl,
+  type Target,
+} from "./config.js";
 import { connectionBlock, localSetup, parseSshTarget, remoteSetup } from "./setup.js";
+
+export const CLI_VERSION = "0.1.0";
 
 const HELP = `cloudbear — self-hosted remote agent control
 
@@ -20,7 +44,7 @@ const HELP = `cloudbear — self-hosted remote agent control
     cloudbear agent auth --host <host> --key <key> [--port <n>] [--scheme http|https]
         Verify the key and save it to ~/.cloudbear/auth.json (0600).
 
-  Drive agents
+  Drive agents (all accept --target <name> for a saved host)
     cloudbear agent new "<goal>" [--model <m>] [--json]
     cloudbear agent ls [--json]
     cloudbear agent status <id> [--json]
@@ -30,6 +54,17 @@ const HELP = `cloudbear — self-hosted remote agent control
     cloudbear agent continue <id> [--json]   (alias: retry)
     cloudbear agent approve <id> <requestId> [--note <t>] [--json]
     cloudbear agent deny <id> <requestId> [--note <t>] [--json]
+    cloudbear agent watch <id> [--poll-ms <ms>] [--timeout <dur>]
+        Wait until the run settles; exit 0 done, 1 error, 2 timeout.
+        Durations: bare numbers are ms; suffixes ms|s|m|h (e.g. 30s, 5m).
+
+  Health + named hosts
+    cloudbear doctor [--target <name>]
+        Check gateway reachability, saved target, key, and common failures.
+    cloudbear target ls
+    cloudbear target add <name> --host <h> --key <k> [--port <n>] [--scheme http|https]
+        Saved hosts; selected per-command with --target <name>. Without the
+        flag the default target (env or auth file) is used, as before.
 
   Shortcuts (same as the agent command in brackets)
     cloudbear list|ls                    (= agent ls)
@@ -65,10 +100,62 @@ function clientFor(target: Target, tokenOverride?: string): GatewayClient {
   return new GatewayClient(targetUrl(target), tokenOverride ?? target.key);
 }
 
-function requireTarget(env: NodeJS.ProcessEnv, io: Io): Target {
+function requireTarget(env: NodeJS.ProcessEnv, io: Io, name?: string): Target {
+  if (name) {
+    const home = homeFor(env);
+    const named = loadNamedTarget(name, home);
+    if (!named) {
+      const known = listNamedTargets(home).map((t) => t.name);
+      throw new UsageError(
+        known.length > 0 ? `unknown target "${name}" — saved targets: ${known.join(", ")}` : `unknown target "${name}" — no saved targets yet (add one with: cloudbear target add <name> --host <ip> --key <key>)`,
+      );
+    }
+    return named;
+  }
   const target = resolveTarget(env);
   if (!target) throw new UsageError(`not connected to a cloudbear yet — run: cloudbear agent auth --host <ip> --key <key>`);
   return target;
+}
+
+/**
+ * Pull `--target <name>` / `--target=<name>` out of a subcommand's argv
+ * before its own strict flag parser runs (which would reject the shared
+ * flag). Stops at `--` so a literal `--target` in message text survives.
+ */
+function splitTargetFlag(argv: string[]): { argv: string[]; target?: string } {
+  const rest: string[] = [];
+  let target: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (arg === "--") {
+      rest.push(...argv.slice(i));
+      break;
+    }
+    if (arg === "--target") {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith("-")) throw new UsageError("--target requires a value");
+      target = value;
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--target=")) {
+      const value = arg.slice("--target=".length);
+      if (!value) throw new UsageError("--target requires a value");
+      target = value;
+      continue;
+    }
+    rest.push(arg);
+  }
+  return { argv: rest, target };
+}
+
+/** Race a promise against a timeout so a hung gateway cannot hang the CLI. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 async function setupCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Promise<number> {
@@ -125,8 +212,13 @@ const AGENT_SUB_ALIASES: Record<string, string> = {
 };
 
 async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Promise<number> {
-  const [rawSub, ...rest] = argv;
+  const split = splitTargetFlag(argv);
+  const [rawSub, ...rest] = split.argv;
   const sub = rawSub === undefined ? undefined : (AGENT_SUB_ALIASES[rawSub] ?? rawSub);
+
+  if (sub === "auth" && split.target !== undefined) {
+    throw new UsageError("agent auth saves the default target — name it afterwards with: cloudbear target add <name> --host <host> --key <key>");
+  }
 
   if (sub === "auth") {
     const { flags } = parseArgs(rest, { boolean: ["json"], value: ["host", "key", "port", "scheme"] });
@@ -157,7 +249,7 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
     return 0;
   }
 
-  const target = requireTarget(env, io);
+  const target = requireTarget(env, io, split.target);
   const client = clientFor(target);
 
   if (sub === "new") {
@@ -286,6 +378,16 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
     return 0;
   }
 
+  if (sub === "watch") {
+    const parsed = parseArgs(rest, { value: ["poll-ms", "timeout"] });
+    const id = requiredArg(parsed.positionals, 0, "session id", "cloudbear agent watch <id> [--poll-ms <ms>] [--timeout <dur>]");
+    const pollRaw = flagString(parsed.flags, "poll-ms");
+    const timeoutRaw = flagString(parsed.flags, "timeout");
+    const pollMs = pollRaw === undefined ? 2000 : parseDurationMs(pollRaw);
+    const maxMs = timeoutRaw === undefined ? 30 * 60 * 1000 : parseDurationMs(timeoutRaw);
+    return await watchSession(client, id, io, { pollMs, maxMs });
+  }
+
   if (sub === "approve" || sub === "deny") {
     const parsed = parseArgs(rest, { boolean: ["json"], value: ["note"] });
     const id = requiredArg(parsed.positionals, 0, "session id", `cloudbear agent ${sub} <id> <requestId>`);
@@ -300,11 +402,12 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
 }
 
 async function keysCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Promise<number> {
+  const split = splitTargetFlag(argv);
   const token = (env["GATEWAY_TOKEN"] ?? "").trim();
   if (!token) throw new UsageError("keys commands need the service secret: export GATEWAY_TOKEN=<token from .env>");
-  const target = requireTarget(env, io);
+  const target = requireTarget(env, io, split.target);
   const client = clientFor(target, token);
-  const [sub, ...rest] = argv;
+  const [sub, ...rest] = split.argv;
 
   if (sub === "ls" || sub === undefined) {
     const { keys } = await client.listKeys();
@@ -328,6 +431,95 @@ async function keysCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Prom
   throw new UsageError(`unknown keys command "${sub}"\n\n${HELP}`);
 }
 
+async function doctorCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Promise<number> {
+  const { flags, positionals } = parseArgs(argv, { value: ["target"] });
+  if (positionals.length > 0) throw new UsageError("usage: cloudbear doctor [--target <name>]");
+  const name = flagString(flags, "target");
+  const home = homeFor(env);
+  let resolved: Target | null;
+  if (name !== undefined) {
+    resolved = loadNamedTarget(name, home);
+    if (!resolved) {
+      const known = listNamedTargets(home).map((t) => t.name);
+      throw new UsageError(
+        known.length > 0 ? `unknown target "${name}" — saved targets: ${known.join(", ")}` : `unknown target "${name}" — no saved targets yet`,
+      );
+    }
+  } else {
+    resolved = resolveTarget(env);
+  }
+  const fromEnv = name === undefined && Boolean((env["CLOUDBEAR_HOST"] ?? "").trim() && (env["CLOUDBEAR_KEY"] ?? "").trim());
+  const savedPresent = loadTarget(home) !== null;
+  const probe = async (): Promise<DoctorProbe> => {
+    if (!resolved) return { version: CLI_VERSION, target: null, savedPresent, keyPresent: false, gateway: null };
+    let gateway: DoctorGateway;
+    try {
+      const health = await withTimeout(new GatewayClient(targetUrl(resolved), resolved.key).health(), 8000);
+      gateway = { ok: true, service: health.service };
+    } catch (e) {
+      // First line only, and never a secret: our gateway errors carry the
+      // URL and the cause, never the key or token.
+      gateway = { ok: false, error: (e as Error).message.split("\n")[0]!.slice(0, 300) };
+    }
+    return {
+      version: CLI_VERSION,
+      target: {
+        url: targetUrl(resolved),
+        source: name !== undefined ? `saved target "${name}"` : fromEnv ? "environment" : "saved file",
+        keyId: resolved.keyId,
+      },
+      savedPresent,
+      keyPresent: resolved.key.length > 0,
+      gateway,
+    };
+  };
+  return runDoctor(io, probe);
+}
+
+async function targetCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Promise<number> {
+  const [sub, ...rest] = argv;
+  const home = homeFor(env);
+
+  if (sub === "ls" || sub === undefined) {
+    const named = listNamedTargets(home);
+    const def = loadTarget(home);
+    if (named.length === 0 && !def) {
+      io.out("no targets yet — save one with: cloudbear target add <name> --host <ip> --key <key>");
+      return 0;
+    }
+    // Keys never printed here: the id is enough to correlate with `keys ls`.
+    if (def) io.out(`default  ${targetUrl(def)}${def.keyId ? `  ${def.keyId}` : ""}`);
+    for (const { name, target } of named) io.out(`${name}  ${targetUrl(target)}${target.keyId ? `  ${target.keyId}` : ""}`);
+    return 0;
+  }
+
+  if (sub === "add") {
+    const parsed = parseArgs(rest, { value: ["host", "key", "port", "scheme"] });
+    const name = requiredArg(parsed.positionals, 0, "target name", "cloudbear target add <name> --host <host> --key <key> [--port <n>] [--scheme http|https]");
+    if (!isValidTargetName(name)) throw new UsageError(`invalid target name "${name}" (use letters, numbers, - and _)`);
+    const host = flagString(parsed.flags, "host");
+    const key = flagString(parsed.flags, "key");
+    if (!host || !key) throw new UsageError("usage: cloudbear target add <name> --host <host> --key <key> [--port <n>] [--scheme http|https]");
+    const portRaw = flagString(parsed.flags, "port");
+    const port = portRaw === undefined ? 8080 : Number(portRaw);
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) throw new UsageError(`invalid port "${portRaw}"`);
+    const scheme = flagString(parsed.flags, "scheme");
+    if (scheme !== undefined && scheme !== "http" && scheme !== "https") throw new UsageError(`invalid scheme "${scheme}" (http or https)`);
+    const target: Target = {
+      host,
+      port,
+      scheme: scheme === "https" ? "https" : "http",
+      key,
+      keyId: parseAgentKey(key)?.id,
+    };
+    const saved = saveNamedTarget(name, target, home);
+    io.out(`saved target "${name}" -> ${targetUrl(target)} (${saved})`);
+    return 0;
+  }
+
+  throw new UsageError(`unknown target command "${sub}"\n\n${HELP}`);
+}
+
 /** Top-level shortcuts, each mapping onto the `agent` subcommand in brackets. */
 const TOP_LEVEL_AGENT_ALIAS: Record<string, string> = {
   list: "ls",
@@ -348,13 +540,15 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
     return 0;
   }
   if (command === "--version" || command === "-v") {
-    io.out("cloudbear 0.1.0");
+    io.out(`cloudbear ${CLI_VERSION}`);
     return 0;
   }
   try {
     if (command === "setup") return await setupCommand(rest, env, io);
     if (command === "agent") return await agentCommand(rest, env, io);
     if (command === "keys") return await keysCommand(rest, env, io);
+    if (command === "doctor") return await doctorCommand(rest, env, io);
+    if (command === "target") return await targetCommand(rest, env, io);
     const aliased = TOP_LEVEL_AGENT_ALIAS[command];
     if (aliased !== undefined) return await agentCommand([aliased, ...rest], env, io);
     throw new UsageError(`unknown command "${command}"\n\n${HELP}`);

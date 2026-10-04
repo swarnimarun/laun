@@ -3,7 +3,8 @@ import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAgentKey, type AgentEvent, type SessionRecord } from "@cloudbear/protocol";
-import { follow, isTerminal, renderEvent, sessionLine } from "./agent.js";
+import { UsageError } from "./args.js";
+import { createTranscript, follow, isTerminal, parseDurationMs, renderDoctor, renderEvent, runDoctor, sessionLine, watchSession, type DoctorProbe } from "./agent.js";
 import { GatewayClient, GatewayError, connectionHint } from "./client.js";
 import { CONTINUE_PROMPT, main, type Io } from "./index.js";
 
@@ -553,5 +554,224 @@ describe("--json on say, approve, and deny", () => {
     } finally {
       process.env.HOME = prevHome;
     }
+  });
+});
+
+describe("thinking render", () => {
+  function tio(): { lines: string[]; written: string[]; out: (l: string) => void; write: (t: string) => void } {
+    const lines: string[] = [];
+    const written: string[] = [];
+    return { lines, written, out: (l) => void lines.push(l), write: (t) => void written.push(t) };
+  }
+
+  test("human line carries the thinking prefix; empty thinking stays quiet", () => {
+    expect(renderEvent({ type: "thinking", sessionId: "s", delta: "checking the plan" })).toEqual(["💭 checking the plan"]);
+    expect(renderEvent({ type: "thinking", sessionId: "s", delta: "" })).toEqual([]);
+    expect(isTerminal({ type: "thinking", sessionId: "s", delta: "x" })).toBe(false);
+  });
+
+  test("--json passes the raw thinking event untouched", () => {
+    const io = tio();
+    const emit = createTranscript(io, true);
+    const raw = { type: "thinking", sessionId: "s", delta: "hmm" } as const;
+    emit(raw);
+    expect(io.lines).toEqual([JSON.stringify(raw)]);
+    expect(io.written).toEqual([]);
+  });
+
+  test("coalesced chunks print as one block, not shredded lines", () => {
+    const io = tio();
+    const emit = createTranscript(io, false);
+    emit({ type: "thinking", sessionId: "s", delta: "hello " });
+    emit({ type: "thinking", sessionId: "s", delta: "world" });
+    emit({ type: "done", sessionId: "s" });
+    // One prefix for the whole block; the done line starts on a fresh line.
+    expect(io.written.join("")).toBe("💭 hello world\n");
+    expect(io.lines).toEqual(["✅ done"]);
+  });
+
+  test("thinking and text terminate each other's blocks", () => {
+    const io = tio();
+    const emit = createTranscript(io, false);
+    emit({ type: "text", sessionId: "s", delta: "answer " });
+    emit({ type: "thinking", sessionId: "s", delta: "wait, " });
+    emit({ type: "thinking", sessionId: "s", delta: "rechecking" });
+    emit({ type: "text", sessionId: "s", delta: "final" });
+    emit({ type: "done", sessionId: "s" });
+    expect(io.written.join("")).toBe("answer \n💭 wait, rechecking\nfinal\n");
+    expect(io.lines).toEqual(["✅ done"]);
+  });
+});
+
+describe("parseDurationMs", () => {
+  test("bare numbers are ms; ms|s|m|h suffixes scale", () => {
+    expect(parseDurationMs("5000")).toBe(5000);
+    expect(parseDurationMs("250ms")).toBe(250);
+    expect(parseDurationMs("30s")).toBe(30_000);
+    expect(parseDurationMs("5m")).toBe(300_000);
+    expect(parseDurationMs("1h")).toBe(3_600_000);
+  });
+
+  test("garbage and non-positive values are usage errors", () => {
+    expect(() => parseDurationMs("soon")).toThrow(UsageError);
+    expect(() => parseDurationMs("")).toThrow(UsageError);
+    expect(() => parseDurationMs("0")).toThrow(UsageError);
+    expect(() => parseDurationMs("-5s")).toThrow(UsageError);
+  });
+});
+
+describe("watchSession", () => {
+  const running: SessionRecord = {
+    id: "s1",
+    goal: "a long job",
+    model: "m",
+    runtime: "pi",
+    status: "running",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+  const doneEvent = { type: "done", sessionId: "s1", summary: "all green" } as AgentEvent;
+
+  function watchIo(): { lines: string[]; errs: string[]; out: (l: string) => void; err: (l: string) => void } {
+    const lines: string[] = [];
+    const errs: string[] = [];
+    return { lines, errs, out: (l) => void lines.push(l), err: (l) => void errs.push(l) };
+  }
+
+  test("done settles exit 0 with the settling line, then stops polling", async () => {
+    let logCalls = 0;
+    const fake = {
+      getSession: async () => ({ session: running, pendingApprovals: [] }),
+      log: async (_id: string, since: number) => {
+        logCalls++;
+        // fromLatest head call carries nothing new; the first real poll settles.
+        return since === 0 ? { sessionId: "s1", events: [], next: 1 } : { sessionId: "s1", events: [doneEvent], next: 2 };
+      },
+    } as unknown as GatewayClient;
+    const io = watchIo();
+    const code = await watchSession(fake, "s1", io, { pollMs: 1, maxMs: 5000, sleep: async () => {} });
+    expect(code).toBe(0);
+    expect(io.lines).toEqual(["✅ done: all green"]);
+    expect(logCalls).toBe(2);
+  });
+
+  test("error settles exit 1", async () => {
+    const fake = {
+      getSession: async () => ({ session: running, pendingApprovals: [] }),
+      log: async (_id: string, since: number) =>
+        since === 0
+          ? { sessionId: "s1", events: [], next: 1 }
+          : { sessionId: "s1", events: [{ type: "error", sessionId: "s1", message: "boom" } as AgentEvent], next: 2 },
+    } as unknown as GatewayClient;
+    const io = watchIo();
+    expect(await watchSession(fake, "s1", io, { sleep: async () => {} })).toBe(1);
+    expect(io.lines).toEqual(["❌ boom"]);
+  });
+
+  test("no terminal before the timeout exits 2", async () => {
+    const fake = {
+      getSession: async () => ({ session: running, pendingApprovals: [] }),
+      log: async () => ({ sessionId: "s1", events: [], next: 0 }),
+    } as unknown as GatewayClient;
+    const io = watchIo();
+    // maxMs already past: follow returns after one poll without sleeping.
+    expect(await watchSession(fake, "s1", io, { maxMs: -1, sleep: async () => {} })).toBe(2);
+    expect(io.lines).toEqual([]);
+    expect(io.errs.join("\n")).toMatch(/timed out/);
+  });
+
+  test("a stale terminal event in history never ends a live watch early", async () => {
+    const fake = {
+      getSession: async () => ({ session: running, pendingApprovals: [] }),
+      log: async (_id: string, since: number) =>
+        since === 0
+          ? { sessionId: "s1", events: [{ type: "error", sessionId: "s1", message: "previous failure" } as AgentEvent], next: 1 }
+          : { sessionId: "s1", events: [doneEvent], next: 2 },
+    } as unknown as GatewayClient;
+    const io = watchIo();
+    expect(await watchSession(fake, "s1", io, { sleep: async () => {} })).toBe(0);
+    expect(io.lines).toEqual(["✅ done: all green"]);
+  });
+
+  test("an already-settled session reports from history without waiting", async () => {
+    let logCalls = 0;
+    const fake = {
+      getSession: async () => ({ session: { ...running, status: "done" }, pendingApprovals: [] }),
+      log: async () => {
+        logCalls++;
+        return { sessionId: "s1", events: [doneEvent], next: 1 };
+      },
+    } as unknown as GatewayClient;
+    const io = watchIo();
+    expect(await watchSession(fake, "s1", io, { sleep: async () => {} })).toBe(0);
+    expect(io.lines).toEqual(["✅ done: all green"]);
+    expect(logCalls).toBe(1);
+  });
+
+  test("settled without a terminal event falls back to the record", async () => {
+    const fake = {
+      getSession: async () => ({ session: { ...running, status: "error" }, pendingApprovals: [] }),
+      log: async () => ({ sessionId: "s1", events: [], next: 0 }),
+    } as unknown as GatewayClient;
+    const io = watchIo();
+    expect(await watchSession(fake, "s1", io, { sleep: async () => {} })).toBe(1);
+    expect(io.lines.join("\n")).toContain("error");
+  });
+
+  test("an unknown session fails fast instead of polling to the timeout", async () => {
+    let logCalls = 0;
+    const fake = {
+      getSession: async () => {
+        throw new GatewayError("unknown session", 404);
+      },
+      log: async () => {
+        logCalls++;
+        return { sessionId: "nope", events: [], next: 0 };
+      },
+    } as unknown as GatewayClient;
+    const io = watchIo();
+    expect(await watchSession(fake, "nope", io, { maxMs: 60_000, sleep: async () => {} })).toBe(1);
+    expect(logCalls).toBe(0);
+    expect(io.errs.join("\n")).toContain("no such session: nope");
+  });
+});
+
+describe("doctor report", () => {
+  const healthy: DoctorProbe = {
+    version: "0.1.0",
+    target: { url: "http://127.0.0.1:8080", source: "saved file", keyId: "aabbccdd" },
+    savedPresent: true,
+    keyPresent: true,
+    gateway: { ok: true, service: "gateway" },
+  };
+
+  test("healthy matrix entry", () => {
+    const { lines, healthy: ok } = renderDoctor(healthy);
+    expect(ok).toBe(true);
+    expect(lines.join("\n")).toContain("reachable");
+    expect(lines.join("\n")).toContain("aabbccdd");
+  });
+
+  test("missing target, missing key, and dead gateway are each unhealthy", () => {
+    expect(renderDoctor({ ...healthy, target: null, keyPresent: false, gateway: null }).healthy).toBe(false);
+    expect(renderDoctor({ ...healthy, keyPresent: false }).healthy).toBe(false);
+    const down = renderDoctor({ ...healthy, gateway: { ok: false, error: "refused" } });
+    expect(down.healthy).toBe(false);
+    expect(down.lines.join("\n")).toContain("refused");
+  });
+
+  test("the three common failure modes are always listed with fixes", () => {
+    const text = renderDoctor(healthy).lines.join("\n");
+    expect(text).toContain("bun run dev:executor");
+    expect(text).toContain("ssh -N -L 18080:localhost:8080");
+    expect(text).toContain("agent auth");
+  });
+
+  test("runDoctor maps the matrix to exit codes with stubbed probes", async () => {
+    const out: string[] = [];
+    const io = { out: (l: string) => void out.push(l), err: (_l: string) => {} };
+    expect(await runDoctor(io, async () => healthy)).toBe(0);
+    expect(await runDoctor(io, async () => ({ ...healthy, gateway: { ok: false, error: "down" } }))).toBe(1);
+    expect(await runDoctor(io, async () => ({ ...healthy, target: null, keyPresent: false, gateway: null }))).toBe(1);
   });
 });

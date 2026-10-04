@@ -1,10 +1,20 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAgentKey } from "@cloudbear/protocol";
 import { UsageError, flagBool, flagString, parseArgs, requiredArg } from "./args.js";
-import { loadTarget, resolveTarget, saveTarget, targetUrl } from "./config.js";
+import {
+  isValidTargetName,
+  listNamedTargets,
+  loadNamedTarget,
+  loadTarget,
+  resolveTarget,
+  saveNamedTarget,
+  saveTarget,
+  targetUrl,
+} from "./config.js";
+import { main, type Io } from "./index.js";
 import { ensureEnv, parseSshTarget, readEnvValue, upsertEnv } from "./setup.js";
 import { bunRunner, lastMatch, runRemoteSetup, shQuote, sshArgv, type CommandRunner } from "./ssh.js";
 
@@ -293,5 +303,194 @@ describe("bootstrap contract", () => {
     // (which never runs this script) cannot fall back to HOME=/root
     expect(bootstrap).toContain("^PI_CONFIG_DIR=");
     expect(bootstrap).toContain("PI_CONFIG_DIR=%s");
+  });
+});
+describe("named targets", () => {
+  const KEY = "cb_aabbccdd_" + "s".repeat(30);
+
+  test("save/load round-trips with the same 0600/0700 conventions as the default file", () => {
+    const home = mkdtempSync(join(tmpdir(), "cb-targets-"));
+    const path = saveNamedTarget("vps1", { host: "203.0.113.9", port: 8080, scheme: "http", key: KEY, keyId: "aabbccdd" }, home);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(loadNamedTarget("vps1", home)).toEqual({ host: "203.0.113.9", port: 8080, scheme: "http", key: KEY, keyId: "aabbccdd" });
+    expect(loadNamedTarget("missing", home)).toBeNull();
+  });
+
+  test("names are safe slugs — traversal and slashes rejected", () => {
+    expect(isValidTargetName("vps1")).toBe(true);
+    expect(isValidTargetName("my-host_2")).toBe(true);
+    for (const bad of ["", "..", "../x", "a/b", "a b", ".hidden", "x".repeat(65)]) {
+      expect(isValidTargetName(bad)).toBe(false);
+    }
+    const home = mkdtempSync(join(tmpdir(), "cb-targets-"));
+    expect(() => saveNamedTarget("../evil", { host: "h", port: 1, scheme: "http", key: KEY }, home)).toThrow();
+  });
+
+  test("list is sorted by name and skips corrupt files", () => {
+    const home = mkdtempSync(join(tmpdir(), "cb-targets-"));
+    saveNamedTarget("b-host", { host: "b", port: 8080, scheme: "http", key: KEY }, home);
+    saveNamedTarget("a-host", { host: "a", port: 8080, scheme: "http", key: KEY }, home);
+    writeFileSync(join(home, ".cloudbear", "targets", "broken.json"), "not json{");
+    expect(listNamedTargets(home).map((t) => t.name)).toEqual(["a-host", "b-host"]);
+    expect(listNamedTargets(mkdtempSync(join(tmpdir(), "cb-targets-")))).toEqual([]);
+  });
+
+  test("a named selection resolves; an absent flag keeps the current default", () => {
+    const home = mkdtempSync(join(tmpdir(), "cb-targets-"));
+    saveNamedTarget("vps1", { host: "named-host", port: 8080, scheme: "http", key: KEY }, home);
+    const env = { HOME: home, CLOUDBEAR_HOST: "env-host", CLOUDBEAR_KEY: KEY } as NodeJS.ProcessEnv;
+    // Explicit --target wins over the env override.
+    expect(resolveTarget(env, home, "vps1")?.host).toBe("named-host");
+    // Without it, resolution is exactly what it always was (env here).
+    expect(resolveTarget(env, home)?.host).toBe("env-host");
+    expect(resolveTarget({} as NodeJS.ProcessEnv, home)?.host).toBeUndefined();
+    expect(resolveTarget({} as NodeJS.ProcessEnv, home)).toBeNull();
+  });
+});
+
+describe("target + watch + doctor commands", () => {
+  const KEY = "cb_aabbccdd_" + "q".repeat(30);
+  const rec = {
+    id: "s1",
+    goal: "a goal",
+    model: "m",
+    runtime: "pi",
+    status: "running",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+  let server: ReturnType<typeof Bun.serve>;
+  let base = "";
+
+  beforeAll(() => {
+    server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/health") return Response.json({ ok: true, service: "gateway", executor: "http://x" });
+        if (url.pathname === "/sessions" && req.method === "GET") return Response.json({ sessions: [rec] });
+        const sess = url.pathname.match(/^\/sessions\/([^/]+)$/);
+        if (sess && req.method === "GET") {
+          const id = sess[1]!;
+          if (id === "s1") return Response.json({ session: rec, pendingApprovals: [] });
+          if (id === "quiet") return Response.json({ session: { ...rec, id: "quiet" }, pendingApprovals: [] });
+          return Response.json({ error: "unknown session" }, { status: 404 });
+        }
+        const logm = url.pathname.match(/^\/sessions\/([^/]+)\/log$/);
+        if (logm) {
+          const id = logm[1]!;
+          if (id !== "s1" && id !== "quiet") return Response.json({ error: "unknown session" }, { status: 404 });
+          const since = Number(url.searchParams.get("since") ?? 0);
+          const events = id === "s1" ? [{ type: "done", sessionId: "s1", summary: "served" }] : [];
+          return Response.json({ sessionId: id, events, next: since + events.length });
+        }
+        return Response.json({ error: "not found" }, { status: 404 });
+      },
+    });
+    base = `http://localhost:${server.port}`;
+  });
+
+  afterAll(() => {
+    server.stop(true);
+  });
+
+  function makeIo(): Io & { lines: string[]; errs: string[]; written: string[] } {
+    const lines: string[] = [];
+    const errs: string[] = [];
+    const written: string[] = [];
+    return { lines, errs, written, out: (l) => void lines.push(l), err: (l) => void errs.push(l), write: (t) => void written.push(t) };
+  }
+
+  function serverEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+    const u = new URL(base);
+    return { CLOUDBEAR_HOST: u.hostname, CLOUDBEAR_PORT: u.port, CLOUDBEAR_KEY: KEY, ...extra } as NodeJS.ProcessEnv;
+  }
+
+  test("target add/ls round-trips; ls shows the id, never the key", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cb-targetcmd-"));
+    const env = { HOME: home } as NodeJS.ProcessEnv;
+    const u = new URL(base);
+    let io = makeIo();
+    expect(await main(["target", "add", "n1", "--host", u.hostname, "--port", u.port, "--key", KEY], env, io)).toBe(0);
+    expect(io.lines.join("\n")).toContain('saved target "n1"');
+    io = makeIo();
+    expect(await main(["target", "ls"], env, io)).toBe(0);
+    const text = io.lines.join("\n");
+    expect(text).toContain("n1");
+    expect(text).toContain(u.hostname);
+    expect(text).toContain("aabbccdd");
+    expect(text).not.toContain(KEY);
+    expect(text).not.toContain("q".repeat(10));
+  });
+
+  test("target add validates its inputs", async () => {
+    const env = { HOME: mkdtempSync(join(tmpdir(), "cb-targetcmd-")) } as NodeJS.ProcessEnv;
+    for (const args of [
+      ["target", "add", "n1", "--host", "h"],
+      ["target", "add", "n1", "--key", KEY],
+      ["target", "add", "../evil", "--host", "h", "--key", KEY],
+      ["target", "add", "n1", "--host", "h", "--key", KEY, "--port", "banana"],
+      ["target", "frobnicate"],
+    ]) {
+      expect(await main(args, env, makeIo())).toBe(2);
+    }
+  });
+
+  test("--target selects the saved host; absent flag keeps the default (none here)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cb-targetcmd-"));
+    const u = new URL(base);
+    expect(await main(["target", "add", "n1", "--host", u.hostname, "--port", u.port, "--key", KEY], { HOME: home } as NodeJS.ProcessEnv, makeIo())).toBe(0);
+    let io = makeIo();
+    expect(await main(["agent", "ls", "--target", "n1"], { HOME: home } as NodeJS.ProcessEnv, io)).toBe(0);
+    expect(io.lines.join("\n")).toContain("s1");
+    io = makeIo();
+    expect(await main(["agent", "ls", "--target=n1"], { HOME: home } as NodeJS.ProcessEnv, io)).toBe(0);
+    expect(io.lines.join("\n")).toContain("s1");
+    // No flag, no default file, no env: the old \"not connected\" path, unchanged.
+    io = makeIo();
+    expect(await main(["agent", "ls"], { HOME: home } as NodeJS.ProcessEnv, io)).toBe(2);
+    expect(io.errs.join("\n")).toContain("agent auth");
+    // Unknown name is a usage error naming the problem.
+    io = makeIo();
+    expect(await main(["agent", "ls", "--target", "nope"], { HOME: home } as NodeJS.ProcessEnv, io)).toBe(2);
+    expect(io.errs.join("\n")).toContain('unknown target "nope"');
+  });
+
+  test("agent watch exits 0 on done, 2 on timeout, 1 on unknown id, 2 on bad usage", async () => {
+    const env = serverEnv();
+    let io = makeIo();
+    expect(await main(["agent", "watch", "s1"], env, io)).toBe(0);
+    expect(io.lines).toEqual(["✅ done: served"]);
+    io = makeIo();
+    expect(await main(["agent", "watch", "quiet", "--timeout", "20ms", "--poll-ms", "1"], env, io)).toBe(2);
+    expect(io.errs.join("\n")).toMatch(/timed out/);
+    io = makeIo();
+    expect(await main(["agent", "watch", "nope"], env, io)).toBe(1);
+    io = makeIo();
+    expect(await main(["agent", "watch"], env, io)).toBe(2);
+    io = makeIo();
+    expect(await main(["agent", "watch", "s1", "--timeout", "soon"], env, io)).toBe(2);
+  });
+
+  test("doctor: healthy gateway exits 0 without ever printing the key", async () => {
+    const io = makeIo();
+    expect(await main(["doctor"], serverEnv(), io)).toBe(0);
+    const text = io.lines.join("\n");
+    expect(text).toContain("reachable");
+    expect(text).toContain("aabbccdd");
+    expect(text).not.toContain(KEY);
+    expect(text).not.toContain("q".repeat(10));
+  });
+
+  test("doctor: no target, dead gateway, and bad usage exit 1, 1, 2", async () => {
+    let io = makeIo();
+    expect(await main(["doctor"], { HOME: mkdtempSync(join(tmpdir(), "cb-doctor-")) } as NodeJS.ProcessEnv, io)).toBe(1);
+    expect(io.lines.join("\n")).toContain("no target");
+    io = makeIo();
+    const env = { HOME: mkdtempSync(join(tmpdir(), "cb-doctor-")), CLOUDBEAR_HOST: "127.0.0.1", CLOUDBEAR_PORT: "9", CLOUDBEAR_KEY: KEY } as NodeJS.ProcessEnv;
+    expect(await main(["doctor"], env, io)).toBe(1);
+    expect(io.lines.join("\n")).toContain("unreachable");
+    io = makeIo();
+    expect(await main(["doctor", "extra"], serverEnv(), io)).toBe(2);
   });
 });
