@@ -9,6 +9,7 @@ import type {
 } from "@laun/protocol";
 import { bearerToken, checkBearer, normalizeCreateSession } from "@laun/protocol";
 import type { GatewayConfig } from "./config.js";
+import { DEFAULT_MAX_CONCURRENT_RUNS, DEFAULT_MAX_SESSION_TOKENS } from "./config.js";
 import { streamExecutorRun, abortExecutorRun, executorKnowsAbort, steerExecutorRun, executorKnowsSteer } from "./executorClient.js";
 import { AgentKeyStore } from "./keys.js";
 import { SessionStore } from "./store.js";
@@ -39,6 +40,10 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
    * Cleared by a successful abort — abort cancels all intent.
    */
   const pendingQueue = new Map<string, string>();
+  const maxConcurrentRuns = cfg.maxConcurrentRuns ?? DEFAULT_MAX_CONCURRENT_RUNS;
+  const maxSessionTokens = cfg.maxSessionTokens ?? DEFAULT_MAX_SESSION_TOKENS;
+  /** Sessions with a budget-abort already in flight (reentrancy guard). */
+  const budgetAborting = new Set<string>();
 
   // A key minted before the gateway started (setup writes it into .env).
   if (cfg.bootstrapKey) {
@@ -109,6 +114,7 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
     // An error event is authoritative: never leave a failed run looking alive.
     if (e.type === "error") sessions.setStatus(sessionId, "error");
     if (e.type === "done") sessions.setStatus(sessionId, "done");
+    enforceTokenBudget(sessionId);
     for (const sub of b.subs) {
       try {
         sub(e);
@@ -116,6 +122,51 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
         // subscriber gone; cleaned up on SSE close
       }
     }
+  }
+
+  /** Counted tokens for a session from its `usage` events (bus = source of truth). */
+  function sessionTokens(sessionId: string): number {
+    let total = 0;
+    for (const e of busFor(sessionId).events) {
+      if (e.type !== "usage") continue;
+      const u = e as { inputTokens?: unknown; outputTokens?: unknown; totalTokens?: unknown };
+      if (typeof u.totalTokens === "number" && Number.isFinite(u.totalTokens) && u.totalTokens > 0) {
+        total += u.totalTokens;
+      } else {
+        for (const k of ["inputTokens", "outputTokens"] as const) {
+          const v = u[k];
+          if (typeof v === "number" && Number.isFinite(v) && v > 0) total += v;
+        }
+      }
+    }
+    return Math.floor(total);
+  }
+
+  /**
+   * Abort live runs that blew past MAX_SESSION_TOKENS. Checked on every
+   * published event (usage arrives mid-run); reentrancy-guarded so the
+   * abort's own events cannot retrigger it. No-op when disabled, idle, or
+   * already aborting.
+   */
+  function enforceTokenBudget(sessionId: string): void {
+    if (maxSessionTokens <= 0) return;
+    if (!running.has(sessionId)) return;
+    if (budgetAborting.has(sessionId)) return;
+    if (sessionTokens(sessionId) <= maxSessionTokens) return;
+    budgetAborting.add(sessionId);
+    publish(sessionId, {
+      type: "status",
+      sessionId,
+      status: "running",
+      message: `token budget exceeded (${sessionTokens(sessionId)} > ${maxSessionTokens}) — aborting`,
+    });
+    void api
+      .abort(sessionId, "token budget")
+      .catch(() => {
+        // Executor unreachable: the run is already doomed budget-wise; leave
+        // the record for the operator instead of throwing inside publish.
+      })
+      .finally(() => budgetAborting.delete(sessionId));
   }
 
   function setStatus(sessionId: string, status: SessionRecord["status"]): void {
@@ -166,7 +217,18 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
     }
   }
 
-  return {
+  /**
+   * Reject new runs past MAX_CONCURRENT_RUNS (0 = unlimited). Checked
+   * synchronously at both run entry points so the rejection surfaces
+   * instead of silently queuing behind the executor.
+   */
+  function checkConcurrency(): void {
+    if (maxConcurrentRuns > 0 && running.size >= maxConcurrentRuns) {
+      throw Object.assign(new Error(`too many concurrent runs (${maxConcurrentRuns} max)`), { status: 429 });
+    }
+  }
+
+  const api = {
     sessions,
     running,
     busFor,
@@ -187,6 +249,7 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
     },
 
     createSession(input: CreateSessionRequest): SessionRecord {
+      checkConcurrency();
       const norm = normalizeCreateSession(input);
       const rec = sessions.create({ goal: norm.goal, repo: norm.repo, model: norm.model, runtime: norm.runtime });
       busFor(rec.id);
@@ -205,6 +268,7 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
         throw Object.assign(new Error('mode must be "steer" or "queue"'), { status: 400 });
       }
       if (!running.has(sessionId)) {
+        checkConcurrency();
         void runAgent(sessionId, text, rec.model);
         return Promise.resolve({ outcome: "started" as const });
       }
@@ -357,6 +421,7 @@ gateway/executor desync (record settled here, slot wedged there) once
       return { events: b.events.slice(from), next: b.events.length };
     },
   };
+  return api;
 }
 
 export type Gateway = ReturnType<typeof createGateway>;
