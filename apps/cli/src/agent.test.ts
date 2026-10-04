@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, SessionRecord } from "@cloudbear/protocol";
+import { parseAgentKey, type AgentEvent, type SessionRecord } from "@cloudbear/protocol";
 import { follow, isTerminal, renderEvent, sessionLine } from "./agent.js";
-import { GatewayClient, GatewayError } from "./client.js";
+import { GatewayClient, GatewayError, connectionHint } from "./client.js";
 import { CONTINUE_PROMPT, main, type Io } from "./index.js";
 
 const record: SessionRecord = {
@@ -133,6 +133,25 @@ describe("GatewayClient", () => {
     } catch (e) {
       expect((e as GatewayError).status).toBe(409);
     }
+  });
+
+  test("connection errors explain a firewalled public port", () => {
+    const hint = connectionHint("http://203.0.113.9:8080", "Unable to connect.");
+    expect(hint).toContain("cannot reach http://203.0.113.9:8080");
+    expect(hint).toContain("firewalled");
+    expect(hint).toContain("ssh -N -L 18080:localhost:8080 user@203.0.113.9");
+    expect(hint).toContain("cloudbear agent auth --host 127.0.0.1 --port 18080");
+  });
+
+  test("connection errors on loopback point at the local services instead", () => {
+    const hint = connectionHint("http://127.0.0.1:8080", "refused");
+    expect(hint).toContain("refused");
+    expect(hint).toContain("dev:executor");
+    expect(hint).not.toContain("firewalled");
+  });
+
+  test("an unparseable base still yields a plain message", () => {
+    expect(connectionHint("not a url", "boom")).toBe("cannot reach not a url: boom");
   });
 
   test("an unreachable host is reported, not thrown as a raw fetch error", async () => {
@@ -486,5 +505,31 @@ describe("--json on say, approve, and deny", () => {
     const b = makeIo();
     expect(await main(["agent", "deny", "s1", "r2", "--json"], targetEnv(), b)).toBe(0);
     expect(JSON.parse(b.lines.join("\n"))).toEqual({ sessionId: "s1", requestId: "r2", decision: "deny", ok: true });
+  });
+
+  test("auth persists the key id alongside the key", async () => {
+    // The saved artifact should be able to say WHICH key it holds; otherwise
+    // `keys ls` output can never be correlated with what is on disk.
+    const home = mkdtempSync(join(tmpdir(), "cb-authid-"));
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const key = "cb_aabbccdd_" + "x".repeat(30);
+      const a = makeIo();
+      const code = await main(
+        ["agent", "auth", "--host", "127.0.0.1", "--port", String(new URL(base).port), "--key", key],
+        { HOME: home } as NodeJS.ProcessEnv,
+        a,
+      );
+      expect(code).toBe(0);
+      const file = join(home, ".cloudbear", "auth.json");
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+      const saved = JSON.parse(readFileSync(file, "utf8")) as Record<string, string>;
+      expect(saved["keyId"]).toBe("aabbccdd");
+      expect(saved["host"]).toBe("127.0.0.1");
+      expect(saved["key"]).toBe(key);
+    } finally {
+      process.env.HOME = prevHome;
+    }
   });
 });

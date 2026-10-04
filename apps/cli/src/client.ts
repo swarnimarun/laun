@@ -10,6 +10,34 @@ export class GatewayError extends Error {
   }
 }
 
+/**
+ * Turn a refused connection into advice. When the target is not loopback this
+ * is almost always a firewalled port — cloud providers block 8080 by default
+ * and the gateway listens there — so say that instead of leaving the operator
+ * to rediscover it. Loopback means the local services are simply not running.
+ */
+export function connectionHint(base: string, cause: string): string {
+  const msg = `cannot reach ${base}: ${cause}`;
+  let host: string | null = null;
+  try {
+    host = new URL(base).hostname;
+  } catch {
+    host = null;
+  }
+  if (!host) return msg;
+  const loopback = host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+  if (loopback) {
+    return `${msg}\n  Are the services running? (bun run dev:executor / dev:gateway)`;
+  }
+  return [
+    msg,
+    `  The gateway's port is likely firewalled — providers block 8080 by default.`,
+    `  Open a tunnel and point the CLI at it:`,
+    `    ssh -N -L 18080:localhost:8080 user@${host}`,
+    `    cloudbear agent auth --host 127.0.0.1 --port 18080 --key <cb_...>`,
+  ].join("\n");
+}
+
 export interface PendingApproval {
   type: "approval_request";
   sessionId: string;
@@ -41,7 +69,7 @@ export class GatewayClient {
         },
       });
     } catch (e) {
-      throw new GatewayError(`cannot reach ${this.base}: ${(e as Error).message}`, 0);
+      throw new GatewayError(connectionHint(this.base, (e as Error).message), 0);
     }
     if (!res.ok) {
       const text = await res.text().catch(() => "");

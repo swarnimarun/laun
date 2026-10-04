@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
+import { parseAgentKey } from "@cloudbear/protocol";
 import { UsageError, flagBool, flagString, parseArgs, requiredArg } from "./args.js";
 import { createTranscript, follow, formatApprovals, sessionLine } from "./agent.js";
 import { GatewayClient, GatewayError } from "./client.js";
-import { authFilePath, resolveTarget, saveTarget, targetUrl, type Target } from "./config.js";
+import { authFilePath, homeFor, resolveTarget, saveTarget, targetUrl, type Target } from "./config.js";
 import { connectionBlock, localSetup, parseSshTarget, remoteSetup } from "./setup.js";
 
 const HELP = `cloudbear — self-hosted remote agent control
@@ -137,11 +138,16 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
       port: Number(flagString(flags, "port") ?? 8080),
       scheme: flagString(flags, "scheme") === "https" ? "https" : "http",
       key,
+      // Which key this file holds — otherwise the saved artifact never carries
+      // the id its own type declares, and `keys ls` cannot be correlated to it.
+      keyId: parseAgentKey(key)?.id,
     };
     const client = clientFor(target);
     const health = await client.health();
     const { sessions } = await client.listSessions();
-    const saved = saveTarget(target);
+    // Home comes from the env this invocation was given, not a bare homedir(),
+    // so a test cannot write into the operator's real ~/.cloudbear.
+    const saved = saveTarget(target, homeFor(env));
     if (flagBool(flags, "json")) io.out(JSON.stringify({ ...target, saved, sessions: sessions.length }));
     else {
       io.out(`connected to ${targetUrl(target)} (${health.service})`);

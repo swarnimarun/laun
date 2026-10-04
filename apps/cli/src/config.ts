@@ -12,6 +12,15 @@ export interface Target {
   keyId?: string;
 }
 
+/**
+ * Which home directory this run should use. Reading it from the env passed in
+ * (not a bare homedir()) is what lets tests point the CLI at a temp directory
+ * instead of writing to the operator's real ~/.cloudbear.
+ */
+export function homeFor(env: NodeJS.ProcessEnv = process.env): string {
+  return env["HOME"] ?? homedir();
+}
+
 export function authFilePath(home: string = homedir()): string {
   return join(home, ".cloudbear", "auth.json");
 }
@@ -56,7 +65,7 @@ export function targetUrl(t: Pick<Target, "host" | "port" | "scheme">): string {
  */
 export function resolveTarget(
   env: NodeJS.ProcessEnv = process.env,
-  home: string = env["HOME"] ?? homedir(),
+  home: string = homeFor(env),
 ): Target | null {
   const key = (env["CLOUDBEAR_KEY"] ?? "").trim();
   const host = (env["CLOUDBEAR_HOST"] ?? "").trim();
