@@ -140,8 +140,8 @@ Keep these in mind on a fresh box; each one cost a debugging round:
   `/dev/null`; if you write your own runner, do the same.
 * **`docker compose up` must not be run without the resolved config dir.** It
   is persisted, but if you copy the stack elsewhere, re-run the bootstrap.
-* **The bridge crash-loops until `TELEGRAM_BOT_TOKEN` is real.** The stack is
-  otherwise healthy; `docker compose logs telegram-bridge` confirms it.
+* **Without `TELEGRAM_BOT_TOKEN` the bridge exits 0 (disabled).** Set it to
+  enable the bridge; `docker compose logs telegram-bridge` confirms it.
 
 ## Troubleshooting
 

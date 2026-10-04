@@ -9,6 +9,7 @@ const HELP = [
   "",
   "/new <goal> — start a session (e.g. /new fix failing tests in web/)",
   "/status <id> — session status + pending approvals",
+  "/log <id> [n] — last n session events (default 10)",
   "/approve <id> <requestId> — approve (or tap buttons)",
   "/deny <id> <requestId> — deny",
   "",
@@ -57,6 +58,31 @@ export function createBot(cfg: BridgeConfig, client?: GatewayClient): Bot {
     });
   }
 
+  // NOTE: command handlers must stay above the message:text handler below —
+  // grammy runs middleware in order and the text handler does not call next().
+  bot.command("log", async (ctx) => {
+    const parts = ctx.match.trim().split(/\s+/);
+    const id = parts[0] ?? "";
+    if (!id) return ctx.reply("usage: /log <sessionId> [n]");
+    let n = 10;
+    if (parts[1] !== undefined) {
+      n = Number(parts[1]);
+      if (!Number.isInteger(n) || n < 1) return ctx.reply("usage: /log <sessionId> [n]");
+    }
+    // Bound the reply: enough history to be useful, never a flood.
+    const count = Math.min(n, 50);
+    const capped = n > count;
+    try {
+      const log = await gw.getLog(id, 0);
+      const chunks = renderChunks(log.events.slice(-count));
+      if (chunks.length === 0) return ctx.reply(`no recent events for session ${id}`);
+      if (capped) await ctx.reply(`(showing last ${count} of ${n} requested)`);
+      for (const c of chunks) await ctx.reply(c);
+    } catch (e) {
+      await ctx.reply(`lookup failed: ${(e as Error).message}`);
+    }
+  });
+
   bot.on("message:text", async (ctx) => {
     const text = ctx.message.text.trim();
     if (!text) return;
@@ -70,7 +96,17 @@ export function createBot(cfg: BridgeConfig, client?: GatewayClient): Bot {
             await ctx.reply(`↗️ sent to session ${last}`);
           } catch (e) {
             const st = (e as { status?: number }).status;
-            await ctx.reply(st === 409 ? `⏳ session ${last} is busy — try again shortly` : `send failed: ${(e as Error).message}`);
+            if (st === 409) {
+              // Gateway has no steer/queue yet, so the message was NOT queued.
+              // Say what is running and where to follow it; queueing is coming.
+              await ctx.reply(
+                `⏳ session ${last} is busy (${session.status}) — still working, so that message was not sent.\n` +
+                  `Catch up with /status ${last} or /log ${last}, then resend once it settles.\n` +
+                  `Queued follow-ups are coming; for now, please try again shortly.`,
+              );
+            } else {
+              await ctx.reply(`send failed: ${(e as Error).message}`);
+            }
           }
           return;
         }

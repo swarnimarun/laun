@@ -15,6 +15,7 @@ export function decodeApproval(data: string): { sessionId: string; requestId: st
 }
 
 function oneLine(e: AgentEvent): string | null {
+  if (!e || typeof (e as { type?: unknown }).type !== "string") return null;
   switch (e.type) {
     case "text":
       return e.delta;
@@ -31,8 +32,39 @@ function oneLine(e: AgentEvent): string | null {
     case "status":
       return null; // noisy; session lifecycle shown via session messages instead
     default:
-      return null;
+      return extraLine(e); // thinking/usage/future types: render or skip, never crash
   }
+}
+
+/**
+ * Forward-tolerant rendering: known extra event kinds render, anything else
+ * is skipped — never a crash, even against a newer gateway.
+ */
+function extraLine(e: AgentEvent): string | null {
+  const t = (e as unknown as { type?: unknown }).type;
+  if (t === "thinking") {
+    const delta = (e as unknown as { delta?: unknown }).delta;
+    return `💭 ${typeof delta === "string" && delta ? delta.slice(0, 500) : "(thinking)"}`;
+  }
+  if (t === "usage") {
+    return usageLine(e as unknown as { inputTokens?: unknown; outputTokens?: unknown; totalTokens?: unknown; costUsd?: unknown });
+  }
+  return null;
+}
+
+/** One compact accounting line; every field is optional. */
+export function usageLine(u: {
+  inputTokens?: unknown;
+  outputTokens?: unknown;
+  totalTokens?: unknown;
+  costUsd?: unknown;
+}): string {
+  const parts: string[] = [];
+  if (typeof u.inputTokens === "number") parts.push(`${u.inputTokens} in`);
+  if (typeof u.outputTokens === "number") parts.push(`${u.outputTokens} out`);
+  if (typeof u.totalTokens === "number") parts.push(`${u.totalTokens} total`);
+  if (typeof u.costUsd === "number") parts.push(`$${u.costUsd}`);
+  return parts.length ? `📊 usage: ${parts.join(", ")}` : "📊 usage";
 }
 
 /** Batch renderable events into Telegram-sized plain-text chunks. */
