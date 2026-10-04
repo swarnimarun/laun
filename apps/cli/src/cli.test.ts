@@ -61,6 +61,28 @@ describe("config", () => {
 });
 
 describe("env generation", () => {
+  test("seeds every key the example defines but the file lacks", () => {
+    // Regression: `setup ssh` writes this file to the host verbatim, so a key
+    // missing locally silently reverted the remote — EXECUTOR_MODE=rpc was
+    // wiped back to json by a later setup run.
+    const dir = mkdtempSync(join(tmpdir(), "cb-envseed-"));
+    const envPath = join(dir, ".env");
+    const examplePath = join(dir, "example.env");
+    writeFileSync(examplePath, "GATEWAY_TOKEN=change-me\nCLOUDBEAR_KEY=\nEXECUTOR_MODE=rpc\nRUN_TIMEOUT_MS=1800000\n");
+    writeFileSync(envPath, "GATEWAY_TOKEN=mine-keep-me\nCLOUDBEAR_KEY=\n");
+
+    const first = ensureEnv(envPath, examplePath);
+    expect(readEnvValue(first.content, "GATEWAY_TOKEN")).toBe("mine-keep-me"); // untouched
+    expect(readEnvValue(first.content, "EXECUTOR_MODE")).toBe("rpc"); // seeded
+    expect(readEnvValue(first.content, "RUN_TIMEOUT_MS")).toBe("1800000"); // seeded
+    expect(readEnvValue(first.content, "CLOUDBEAR_KEY")).toMatch(/^cb_/); // generated
+
+    const again = ensureEnv(envPath, examplePath);
+    expect(readEnvValue(again.content, "EXECUTOR_MODE")).toBe("rpc"); // idempotent
+    expect(again.token).toBe(first.token);
+    expect(again.key).toBe(first.key);
+  });
+
   test("fills placeholders and never clobbers a live secret", () => {
     const example = "GATEWAY_TOKEN=change-me-to-a-long-random-string\nOTHER=1\n";
     const first = ensureEnv(join(mkdtempSync(join(tmpdir(), "cb-env-")), ".env"), "");

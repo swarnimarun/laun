@@ -7,7 +7,10 @@ export function renderEvent(e: AgentEvent): string[] {
     case "text":
       return [e.delta];
     case "tool_call":
-      return [`🔧 ${e.name}`];
+      // Show WHAT is running, not just that a tool ran: during a long job
+      // (research, builds) the tool calls are the only visible activity, and
+      // "🔧 bash" alone reads as a hang.
+      return [`🔧 ${e.name}${summarizeArgs(e.args)}`];
     case "tool_result":
       return e.ok ? [] : [`⚠️ ${e.name} failed${e.output ? `: ${e.output}` : ""}`];
     case "status":
@@ -20,6 +23,31 @@ export function renderEvent(e: AgentEvent): string[] {
       return [`❌ ${e.message}`];
     default:
       return [];
+  }
+}
+
+
+/** Compact one-line view of a tool's arguments: the command, path, or prompt. */
+export function summarizeArgs(args: unknown): string {
+  if (args === undefined || args === null) return "";
+  let text: string;
+  if (typeof args === "string") {
+    text = args;
+  } else {
+    const o = args as Record<string, unknown>;
+    const picked = o["command"] ?? o["cmd"] ?? o["path"] ?? o["file_path"] ?? o["prompt"];
+    text = typeof picked === "string" ? picked : safeJson(args);
+  }
+  text = text.replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length > 120 ? ` ${text.slice(0, 117)}…` : ` ${text}`;
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return "";
   }
 }
 

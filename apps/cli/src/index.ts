@@ -197,7 +197,14 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
     const asJson = flagBool(parsed.flags, "json");
     const emit = createTranscript(io, asJson);
     if (flagBool(parsed.flags, "follow")) {
-      // Follow from now unless the caller pinned an explicit cursor.
+      // Follow from now unless the caller pinned an explicit cursor. Say so:
+      // joining a quiet, tool-heavy job and seeing nothing reads as a hang.
+      if (since === undefined && !asJson) {
+        const head = await client.log(id, 0).catch(() => null);
+        if (head) {
+          io.out(`· following new events (${head.next} already recorded — run without --follow for history)`);
+        }
+      }
       await follow(client, id, {
         since: since === undefined ? 0 : Number(since),
         fromLatest: since === undefined,

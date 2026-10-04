@@ -185,6 +185,28 @@ describe("agent rendering + follow", () => {
     ]);
   });
 
+  test("tool calls show what is running, not just that a tool ran", () => {
+    // Long, tool-heavy jobs emit nothing else — "🔧 bash" alone reads as a hang.
+    expect(renderEvent({ type: "tool_call", sessionId: "s", name: "bash", args: { command: "curl -fsSL https://example.com/a" } })).toEqual([
+      "🔧 bash curl -fsSL https://example.com/a",
+    ]);
+    expect(renderEvent({ type: "tool_call", sessionId: "s", name: "read", args: { path: "/etc/hosts" } })).toEqual([
+      "🔧 read /etc/hosts",
+    ]);
+    expect(renderEvent({ type: "tool_call", sessionId: "s", name: "write", args: { file_path: "/tmp/a.md", content: "x" } })[0]).toContain("/tmp/a.md");
+    expect(renderEvent({ type: "tool_call", sessionId: "s", name: "bash" })).toEqual(["🔧 bash"]);
+    // unrecognised shapes fall back to compact JSON rather than printing nothing
+    expect(renderEvent({ type: "tool_call", sessionId: "s", name: "x", args: { a: 1 } })[0]).toContain('"a":1');
+  });
+
+  test("a long tool command is truncated to one readable line", () => {
+    const long = { command: "python3 -c " + "x".repeat(400) };
+    const line = renderEvent({ type: "tool_call", sessionId: "s", name: "bash", args: long })[0]!;
+    expect(line.length).toBeLessThanOrEqual(121 + "🔧 bash".length);
+    expect(line.endsWith("…")).toBe(true);
+    expect(line.replace(/\s+/g, " ")).not.toContain("\n");
+  });
+
   test("session line is one trimmed row", () => {
     expect(sessionLine(record)).toContain("s1");
     expect(sessionLine(record)).toContain("running");

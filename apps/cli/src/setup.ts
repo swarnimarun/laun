@@ -68,12 +68,24 @@ export interface EnvResult {
  */
 export function ensureEnv(envPath: string, examplePath: string): EnvResult {
   const created = !existsSync(envPath);
+  const example = existsSync(examplePath) ? readFileSync(examplePath, "utf8") : "";
   const base = created
-    ? existsSync(examplePath)
-      ? readFileSync(examplePath, "utf8")
-      : "GATEWAY_TOKEN=\nCLOUDBEAR_KEY=\n"
+    ? example || "GATEWAY_TOKEN=\nCLOUDBEAR_KEY=\n"
     : readFileSync(envPath, "utf8");
-  const content = upsertEnv(base, { GATEWAY_TOKEN: randomToken(), CLOUDBEAR_KEY: randomAgentKey() });
+
+  // Carry every key the example defines but this file lacks. `setup ssh` writes
+  // this file verbatim to the host, so a key missing here silently reverts the
+  // remote to its default — which is how EXECUTOR_MODE=rpc got wiped back to
+  // json by a later run.
+  const updates: Record<string, string> = {};
+  for (const line of example.split("\n")) {
+    const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+    if (m) updates[m[1]!] = m[2]!;
+  }
+  updates["GATEWAY_TOKEN"] = randomToken();
+  updates["CLOUDBEAR_KEY"] = randomAgentKey();
+
+  const content = upsertEnv(base, updates);
   if (content !== base) writeFileSync(envPath, content, { mode: 0o600 });
   const token = readEnvValue(content, "GATEWAY_TOKEN");
   const key = readEnvValue(content, "CLOUDBEAR_KEY");
