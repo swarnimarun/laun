@@ -8,3 +8,6 @@ events-*.jsonl
 *.log
 .DS_Store
 .pi-subagents/
+
+# Vendored SDK ships its own compiled dist (the package has no other form).
+!vendor/openshell-sdk/dist/
