@@ -111,8 +111,11 @@ export class GatewayClient {
     return this.request(`/sessions/${id}/log?since=${since}`);
   }
 
-  sendMessage(id: string, text: string): Promise<{ accepted: boolean; sessionId: string }> {
-    return this.request(`/sessions/${id}/messages`, { method: "POST", body: JSON.stringify({ text }) });
+  sendMessage(id: string, text: string, mode?: "steer" | "queue"): Promise<{ accepted: boolean; sessionId: string; outcome?: string }> {
+    return this.request(`/sessions/${id}/messages`, {
+      method: "POST",
+      body: JSON.stringify(mode ? { text, mode } : { text }),
+    });
   }
 
   decideApproval(id: string, requestId: string, decision: "approve" | "deny", note?: string): Promise<{ ok: boolean }> {

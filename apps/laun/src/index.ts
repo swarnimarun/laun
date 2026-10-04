@@ -2,9 +2,11 @@
 import { parseAgentKey } from "@laun/protocol";
 import { UsageError, flagBool, flagString, parseArgs, requiredArg } from "./args.js";
 import {
+  collectUsageTotals,
   createTranscript,
   follow,
   formatApprovals,
+  formatUsageLine,
   parseDurationMs,
   runDoctor,
   sessionLine,
@@ -48,8 +50,11 @@ const HELP = `laun — self-hosted remote agent control
     laun agent new "<goal>" [--model <m>] [--json]
     laun agent ls [--json]
     laun agent status <id> [--json]
+        Status appends a usage total line when the log holds usage events.
     laun agent log <id> [--follow] [--since <n>] [--json]
-    laun agent say <id> <text> [--json]
+    laun agent say <id> <text> [--steer|--queue] [--json]
+        --steer interrupts a busy run with new direction, --queue appends
+        after it (replaces any older queued message).
     laun agent stop <id> [--json]
     laun agent continue <id> [--json]   (alias: retry)
     laun agent approve <id> <requestId> [--note <t>] [--json]
@@ -274,10 +279,27 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
     const parsed = parseArgs(rest, { boolean: ["json"] });
     const id = requiredArg(parsed.positionals, 0, "session id", "laun agent status <id>");
     const { session, pendingApprovals } = await client.getSession(id);
-    if (flagBool(parsed.flags, "json")) io.out(JSON.stringify({ session, pendingApprovals }));
-    else {
+    // Usage totals come from the log; a log hiccup or malformed event must
+    // never break status, so failures and bad shapes degrade to no line.
+    let logEvents: Parameters<typeof formatUsageLine>[0] = [];
+    try {
+      logEvents = (await client.log(id, 0)).events ?? [];
+    } catch {
+      logEvents = [];
+    }
+    if (flagBool(parsed.flags, "json")) {
+      const totals = collectUsageTotals(logEvents);
+      io.out(JSON.stringify(totals ? { session, pendingApprovals, usage: totals } : { session, pendingApprovals }));
+    } else {
       io.out(sessionLine(session));
       for (const line of formatApprovals(pendingApprovals)) io.out(line);
+      let usageLine: string | null = null;
+      try {
+        usageLine = formatUsageLine(logEvents);
+      } catch {
+        usageLine = null;
+      }
+      if (usageLine) io.out(usageLine);
     }
     return 0;
   }
@@ -310,18 +332,27 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
   }
 
   if (sub === "say") {
-    const parsed = parseArgs(rest, { boolean: ["json"] });
-    const id = requiredArg(parsed.positionals, 0, "session id", 'laun agent say <id> "<text>"');
-    const text = requiredArg(parsed.positionals, 1, "text", 'laun agent say <id> "<text>"');
+    const parsed = parseArgs(rest, { boolean: ["json", "steer", "queue"] });
+    const id = requiredArg(parsed.positionals, 0, "session id", 'laun agent say <id> "<text>" [--steer|--queue]');
+    const text = requiredArg(parsed.positionals, 1, "text", 'laun agent say <id> "<text>" [--steer|--queue]');
+    const wantSteer = flagBool(parsed.flags, "steer");
+    const wantQueue = flagBool(parsed.flags, "queue");
+    if (wantSteer && wantQueue) throw new UsageError("--steer and --queue are mutually exclusive (use one)");
+    const mode = wantSteer ? "steer" : wantQueue ? "queue" : undefined;
     const asJson = flagBool(parsed.flags, "json");
     try {
-      const res = await client.sendMessage(id, text);
+      const res = await client.sendMessage(id, text, mode);
       if (asJson) io.out(JSON.stringify(res));
-      else io.out(`↗️ sent to ${id}`);
+      else {
+        const outcome = res.outcome ?? mode;
+        if (outcome === "steered") io.out(`↗️ steered ${id}`);
+        else if (outcome === "queued") io.out(`↗️ queued for ${id} (replaces older)`);
+        else io.out(`↗️ sent to ${id}`);
+      }
     } catch (e) {
       if (e instanceof GatewayError && e.status === 409) {
         if (asJson) io.out(JSON.stringify({ sessionId: id, busy: true }));
-        else io.out(`⏳ session ${id} is busy — try again shortly`);
+        else io.out(`⏳ session ${id} is busy — try again shortly (retry with --steer to interrupt or --queue to append)`);
         return 0;
       }
       throw e;

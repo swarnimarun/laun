@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAgentKey, type AgentEvent, type SessionRecord } from "@laun/protocol";
 import { UsageError } from "./args.js";
-import { createTranscript, follow, isTerminal, parseDurationMs, renderDoctor, renderEvent, runDoctor, sessionLine, watchSession, type DoctorProbe } from "./agent.js";
+import { collectUsageTotals, createTranscript, follow, formatUsageLine, isTerminal, parseDurationMs, renderDoctor, renderEvent, runDoctor, sessionLine, watchSession, type DoctorProbe } from "./agent.js";
 import { GatewayClient, GatewayError, connectionHint } from "./client.js";
 import { CONTINUE_PROMPT, main, type Io } from "./index.js";
 
@@ -773,5 +773,255 @@ describe("doctor report", () => {
     expect(await runDoctor(io, async () => healthy)).toBe(0);
     expect(await runDoctor(io, async () => ({ ...healthy, gateway: { ok: false, error: "down" } }))).toBe(1);
     expect(await runDoctor(io, async () => ({ ...healthy, target: null, keyPresent: false, gateway: null }))).toBe(1);
+  });
+});
+
+describe("drive flags (say --steer/--queue)", () => {
+  function makeIo(): Io & { lines: string[]; errs: string[]; written: string[] } {
+    const lines: string[] = [];
+    const errs: string[] = [];
+    const written: string[] = [];
+    return { lines, errs, written, out: (l) => void lines.push(l), err: (l) => void errs.push(l), write: (t) => void written.push(t) };
+  }
+
+  function driveServer(opts: { busyWithoutMode: boolean }) {
+    const seenBodies: unknown[] = [];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/health") return Response.json({ ok: true, service: "gateway", executor: "http://x" });
+        if (url.pathname === "/sessions" && req.method === "GET") return Response.json({ sessions: [] });
+        const m = url.pathname.match(/^\/sessions\/([^/]+)\/messages$/);
+        if (m && req.method === "POST") {
+          const body = (await req.json().catch(() => ({}))) as { text?: string; mode?: string };
+          seenBodies.push(body);
+          if (body.mode === "steer") return Response.json({ accepted: true, sessionId: m[1], outcome: "steered" });
+          if (body.mode === "queue") return Response.json({ accepted: true, sessionId: m[1], outcome: "queued" });
+          if (opts.busyWithoutMode) return Response.json({ error: "session already running" }, { status: 409 });
+          return Response.json({ accepted: true, sessionId: m[1] });
+        }
+        return Response.json({ error: "not found" }, { status: 404 });
+      },
+    });
+    const u = new URL(`http://localhost:${server.port}`);
+    const env = { LAUN_HOST: u.hostname, LAUN_PORT: u.port, LAUN_KEY: "laun_aabbccdd_" + "x".repeat(30) } as NodeJS.ProcessEnv;
+    return { server, seenBodies, env };
+  }
+
+  test("client sends mode in the body and passes the outcome through", async () => {
+    const seen: unknown[] = [];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const body = (await req.json().catch(() => ({}))) as unknown;
+        seen.push(body);
+        const mode = (body as { mode?: string }).mode;
+        return Response.json({ accepted: true, sessionId: "s1", ...(mode === "steer" ? { outcome: "steered" } : mode === "queue" ? { outcome: "queued" } : {}) });
+      },
+    });
+    try {
+      const c = new GatewayClient(`http://localhost:${server.port}`, "k");
+      const steered = await c.sendMessage("s1", "go left", "steer");
+      const queued = await c.sendMessage("s1", "then this", "queue");
+      const plain = await c.sendMessage("s1", "hello");
+      expect(seen).toEqual([{ text: "go left", mode: "steer" }, { text: "then this", mode: "queue" }, { text: "hello" }]);
+      expect(steered.outcome).toBe("steered");
+      expect(queued.outcome).toBe("queued");
+      expect(plain.outcome).toBeUndefined();
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("--steer prints steered, --queue prints queued (replaces older)", async () => {
+    const d = driveServer({ busyWithoutMode: false });
+    try {
+      let io = makeIo();
+      expect(await main(["agent", "say", "s1", "go left", "--steer"], d.env, io)).toBe(0);
+      expect(io.lines.join("\n")).toContain("steered");
+      expect(d.seenBodies.at(-1)).toEqual({ text: "go left", mode: "steer" });
+      io = makeIo();
+      expect(await main(["agent", "say", "s1", "then this", "--queue"], d.env, io)).toBe(0);
+      expect(io.lines.join("\n")).toContain("queued");
+      expect(io.lines.join("\n")).toContain("(replaces older)");
+      expect(d.seenBodies.at(-1)).toEqual({ text: "then this", mode: "queue" });
+    } finally {
+      d.server.stop(true);
+    }
+  });
+
+  test("--steer/--queue --json passes the gateway receipt through untouched", async () => {
+    const d = driveServer({ busyWithoutMode: false });
+    try {
+      const io = makeIo();
+      expect(await main(["agent", "say", "s1", "go left", "--steer", "--json"], d.env, io)).toBe(0);
+      expect(JSON.parse(io.lines.join("\n"))).toEqual({ accepted: true, sessionId: "s1", outcome: "steered" });
+    } finally {
+      d.server.stop(true);
+    }
+  });
+
+  test("--steer and --queue together are a usage error", async () => {
+    const d = driveServer({ busyWithoutMode: false });
+    try {
+      const io = makeIo();
+      expect(await main(["agent", "say", "s1", "hi", "--steer", "--queue"], d.env, io)).toBe(2);
+      expect(io.errs.join("\n")).toMatch(/mutually exclusive/);
+      expect(d.seenBodies).toEqual([]);
+    } finally {
+      d.server.stop(true);
+    }
+  });
+
+  test("409 without flags still reports busy with exit 0 and no mode in the body", async () => {
+    const d = driveServer({ busyWithoutMode: true });
+    try {
+      const io = makeIo();
+      expect(await main(["agent", "say", "s1", "hi"], d.env, io)).toBe(0);
+      expect(io.lines.join("\n")).toMatch(/busy/);
+      expect(d.seenBodies).toEqual([{ text: "hi" }]);
+    } finally {
+      d.server.stop(true);
+    }
+  });
+});
+
+describe("status usage totals", () => {
+  function makeIo(): Io & { lines: string[]; errs: string[]; written: string[] } {
+    const lines: string[] = [];
+    const errs: string[] = [];
+    const written: string[] = [];
+    return { lines, errs, written, out: (l) => void lines.push(l), err: (l) => void errs.push(l), write: (t) => void written.push(t) };
+  }
+
+  test("full usage event formats with a 4-decimal cost", () => {
+    const events = [{ type: "usage", sessionId: "s", inputTokens: 100, outputTokens: 200, totalTokens: 300, costUsd: 0.0123 }] as AgentEvent[];
+    expect(formatUsageLine(events)).toBe("📊 usage: in 100, out 200, total 300, $0.0123");
+    expect(collectUsageTotals(events)).toEqual({ inputTokens: 100, outputTokens: 200, totalTokens: 300, costUsd: 0.0123 });
+  });
+
+  test("cost pads to 4 decimals", () => {
+    const events = [{ type: "usage", sessionId: "s", inputTokens: 1, outputTokens: 2, totalTokens: 3, costUsd: 0.01 }] as AgentEvent[];
+    expect(formatUsageLine(events)).toBe("📊 usage: in 1, out 2, total 3, $0.0100");
+  });
+
+  test("partial events sum what exists and omit the dollar part without cost", () => {
+    const events = [
+      { type: "usage", sessionId: "s", inputTokens: 50 },
+      { type: "usage", sessionId: "s", outputTokens: 7 },
+    ] as unknown as AgentEvent[];
+    expect(formatUsageLine(events)).toBe("📊 usage: in 50, out 7, total 0");
+  });
+
+  test("multi-event summation adds every field", () => {
+    const events = [
+      { type: "usage", sessionId: "s", inputTokens: 10, outputTokens: 20, totalTokens: 30, costUsd: 0.001 },
+      { type: "usage", sessionId: "s", inputTokens: 5, outputTokens: 6, totalTokens: 11, costUsd: 0.002 },
+      { type: "text", sessionId: "s", delta: "not usage" },
+    ] as unknown as AgentEvent[];
+    expect(formatUsageLine(events)).toBe("📊 usage: in 15, out 26, total 41, $0.0030");
+  });
+
+  test("garbage and empty inputs stay silent instead of crashing", () => {
+    expect(formatUsageLine([])).toBeNull();
+    expect(formatUsageLine([{ type: "text", sessionId: "s", delta: "hi" }] as AgentEvent[])).toBeNull();
+    const garbage = [
+      { type: "usage", sessionId: "s", inputTokens: "lots", outputTokens: NaN, totalTokens: Infinity, costUsd: null },
+      { type: "usage", sessionId: "s" },
+    ] as unknown as AgentEvent[];
+    expect(formatUsageLine(garbage)).toBeNull();
+    expect(() => formatUsageLine([null, undefined, 42, "x", {}] as unknown as AgentEvent[])).not.toThrow();
+    expect(formatUsageLine([null, undefined, 42, "x", {}] as unknown as AgentEvent[])).toBeNull();
+    expect(() => collectUsageTotals("nope" as unknown as AgentEvent[])).not.toThrow();
+    expect(collectUsageTotals("nope" as unknown as AgentEvent[])).toBeNull();
+  });
+
+  test("status appends the usage line after the session line", async () => {
+    const rec = { id: "s1", goal: "g", model: "m", runtime: "pi", status: "running", createdAt: "t", updatedAt: "t" };
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/sessions/s1") return Response.json({ session: rec, pendingApprovals: [] });
+        if (url.pathname === "/sessions/s1/log")
+          return Response.json({
+            sessionId: "s1",
+            events: [{ type: "usage", sessionId: "s1", inputTokens: 100, outputTokens: 200, totalTokens: 300, costUsd: 0.0123 }],
+            next: 1,
+          });
+        return Response.json({ error: "not found" }, { status: 404 });
+      },
+    });
+    try {
+      const u = new URL(`http://localhost:${server.port}`);
+      const env = { LAUN_HOST: u.hostname, LAUN_PORT: u.port, LAUN_KEY: "laun_aabbccdd_" + "x".repeat(30) } as NodeJS.ProcessEnv;
+      const io = makeIo();
+      expect(await main(["agent", "status", "s1"], env, io)).toBe(0);
+      expect(io.lines.length).toBe(2);
+      expect(io.lines[0]).toContain("s1");
+      expect(io.lines[1]).toBe("📊 usage: in 100, out 200, total 300, $0.0123");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("status with no usable usage stays to the session line", async () => {
+    const rec = { id: "s1", goal: "g", model: "m", runtime: "pi", status: "running", createdAt: "t", updatedAt: "t" };
+    for (const events of [[], [{ type: "text", sessionId: "s1", delta: "hi" }], [{ type: "usage", sessionId: "s1", inputTokens: "lots" }]]) {
+      const server = Bun.serve({
+        port: 0,
+        fetch(req) {
+          const url = new URL(req.url);
+          if (url.pathname === "/sessions/s1") return Response.json({ session: rec, pendingApprovals: [] });
+          if (url.pathname === "/sessions/s1/log") return Response.json({ sessionId: "s1", events, next: 1 });
+          return Response.json({ error: "not found" }, { status: 404 });
+        },
+      });
+      try {
+        const u = new URL(`http://localhost:${server.port}`);
+        const env = { LAUN_HOST: u.hostname, LAUN_PORT: u.port, LAUN_KEY: "laun_aabbccdd_" + "x".repeat(30) } as NodeJS.ProcessEnv;
+        const io = makeIo();
+        expect(await main(["agent", "status", "s1"], env, io)).toBe(0);
+        expect(io.lines.length).toBe(1);
+        expect(io.lines[0]).toContain("s1");
+      } finally {
+        server.stop(true);
+      }
+    }
+  });
+
+  test("status --json includes summed usage untouched", async () => {
+    const rec = { id: "s1", goal: "g", model: "m", runtime: "pi", status: "running", createdAt: "t", updatedAt: "t" };
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/sessions/s1") return Response.json({ session: rec, pendingApprovals: [] });
+        if (url.pathname === "/sessions/s1/log")
+          return Response.json({
+            sessionId: "s1",
+            events: [
+              { type: "usage", sessionId: "s1", inputTokens: 10, outputTokens: 20, totalTokens: 30, costUsd: 0.001 },
+              { type: "usage", sessionId: "s1", inputTokens: 5, outputTokens: 6, totalTokens: 11, costUsd: 0.002 },
+            ],
+            next: 2,
+          });
+        return Response.json({ error: "not found" }, { status: 404 });
+      },
+    });
+    try {
+      const u = new URL(`http://localhost:${server.port}`);
+      const env = { LAUN_HOST: u.hostname, LAUN_PORT: u.port, LAUN_KEY: "laun_aabbccdd_" + "x".repeat(30) } as NodeJS.ProcessEnv;
+      const io = makeIo();
+      expect(await main(["agent", "status", "s1", "--json"], env, io)).toBe(0);
+      expect(JSON.parse(io.lines.join("\n"))).toEqual({
+        session: rec,
+        pendingApprovals: [],
+        usage: { inputTokens: 15, outputTokens: 26, totalTokens: 41, costUsd: 0.003 },
+      });
+    } finally {
+      server.stop(true);
+    }
   });
 });

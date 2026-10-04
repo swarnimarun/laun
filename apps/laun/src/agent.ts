@@ -59,6 +59,71 @@ export function sessionLine(s: SessionRecord): string {
   return `${s.id}  ${s.status.padEnd(16)} ${s.model}  ${s.goal.replace(/\s+/g, " ").slice(0, 60)}`;
 }
 
+/** Summed token/cost totals across `usage` events in a session log. */
+export interface UsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUsd?: number;
+}
+
+function numField(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/**
+ * Sum `usage` events into totals. Unknown/malformed shapes are skipped, so
+ * a half-filled or garbage event can never crash `agent status`. Returns
+ * null when no usable numeric field was found (caller prints no line).
+ */
+export function collectUsageTotals(events: AgentEvent[]): UsageTotals | null {
+  if (!Array.isArray(events)) return null;
+  let input = 0;
+  let output = 0;
+  let total = 0;
+  let cost = 0;
+  let hasCost = false;
+  let hasAny = false;
+  for (const e of events) {
+    if (!e || typeof e !== "object" || (e as AgentEvent).type !== "usage") continue;
+    const u = e as unknown as Record<string, unknown>;
+    const i = numField(u["inputTokens"]);
+    const o = numField(u["outputTokens"]);
+    const t = numField(u["totalTokens"]);
+    const c = numField(u["costUsd"]);
+    if (i !== null) {
+      input += i;
+      hasAny = true;
+    }
+    if (o !== null) {
+      output += o;
+      hasAny = true;
+    }
+    if (t !== null) {
+      total += t;
+      hasAny = true;
+    }
+    if (c !== null) {
+      cost += c;
+      hasCost = true;
+      hasAny = true;
+    }
+  }
+  if (!hasAny) return null;
+  return hasCost ? { inputTokens: input, outputTokens: output, totalTokens: total, costUsd: cost } : { inputTokens: input, outputTokens: output, totalTokens: total };
+}
+
+/**
+ * One human line for `agent status` after the session line, or null when
+ * the log holds no usable `usage` events (then status prints no line).
+ */
+export function formatUsageLine(events: AgentEvent[]): string | null {
+  const totals = collectUsageTotals(events);
+  if (!totals) return null;
+  const base = `📊 usage: in ${totals.inputTokens}, out ${totals.outputTokens}, total ${totals.totalTokens}`;
+  return totals.costUsd !== undefined ? `${base}, $${totals.costUsd.toFixed(4)}` : base;
+}
+
 export function isTerminal(e: AgentEvent): boolean {
   return e.type === "done" || e.type === "error";
 }

@@ -494,3 +494,73 @@ describe("target + watch + doctor commands", () => {
     expect(await main(["doctor", "extra"], serverEnv(), io)).toBe(2);
   });
 });
+
+describe("lane-cli-drive help + status usage", () => {
+  function makeIo(): Io & { lines: string[]; errs: string[]; written: string[] } {
+    const lines: string[] = [];
+    const errs: string[] = [];
+    const written: string[] = [];
+    return { lines, errs, written, out: (l) => void lines.push(l), err: (l) => void errs.push(l), write: (t) => void written.push(t) };
+  }
+
+  test("help documents --steer/--queue and the status usage line", async () => {
+    const io = makeIo();
+    expect(await main(["--help"], {} as NodeJS.ProcessEnv, io)).toBe(0);
+    const text = io.lines.join("\n");
+    expect(text).toContain("--steer");
+    expect(text).toContain("--queue");
+    expect(text).toContain("usage");
+  });
+
+  test("say --steer sends mode and status sums usage (stub gateway)", async () => {
+    const seenBodies: unknown[] = [];
+    const rec = {
+      id: "s9",
+      goal: "drive me",
+      model: "m",
+      runtime: "pi",
+      status: "running",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/sessions/s9") return Response.json({ session: rec, pendingApprovals: [] });
+        if (url.pathname === "/sessions/s9/log")
+          return Response.json({
+            sessionId: "s9",
+            events: [
+              { type: "usage", sessionId: "s9", inputTokens: 3, outputTokens: 4, totalTokens: 7 },
+              { type: "usage", sessionId: "s9", inputTokens: 2, outputTokens: 1, totalTokens: 3 },
+            ],
+            next: 2,
+          });
+        const m = url.pathname.match(/^\/sessions\/([^/]+)\/messages$/);
+        if (m && req.method === "POST") {
+          const body = (await req.json().catch(() => ({}))) as unknown;
+          seenBodies.push(body);
+          const mode = (body as { mode?: string }).mode;
+          if (mode === "steer") return Response.json({ accepted: true, sessionId: m[1], outcome: "steered" });
+          if (mode === "queue") return Response.json({ accepted: true, sessionId: m[1], outcome: "queued" });
+          return Response.json({ accepted: true, sessionId: m[1] });
+        }
+        return Response.json({ error: "not found" }, { status: 404 });
+      },
+    });
+    try {
+      const u = new URL(`http://localhost:${server.port}`);
+      const env = { LAUN_HOST: u.hostname, LAUN_PORT: u.port, LAUN_KEY: "laun_aabbccdd_" + "x".repeat(30) } as NodeJS.ProcessEnv;
+      let io = makeIo();
+      expect(await main(["agent", "say", "s9", "left", "--queue"], env, io)).toBe(0);
+      expect(seenBodies.at(-1)).toEqual({ text: "left", mode: "queue" });
+      expect(io.lines.join("\n")).toContain("(replaces older)");
+      io = makeIo();
+      expect(await main(["agent", "status", "s9"], env, io)).toBe(0);
+      expect(io.lines[io.lines.length - 1]).toBe("📊 usage: in 5, out 5, total 10");
+    } finally {
+      server.stop(true);
+    }
+  });
+});
