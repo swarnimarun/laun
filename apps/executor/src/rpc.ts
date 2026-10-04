@@ -1,6 +1,13 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { AgentEvent } from "@laun/protocol";
+import {
+  buildNotifySteerMessage,
+  DEFAULT_NOTIFY_GRANT_POLL_MS,
+  DEFAULT_NOTIFY_GRANT_WINDOW_MS,
+  fetchGrantHistorySync,
+  isDenialOutput,
+} from "./notify.js";
 import { handlePiLine, ThinkingCoalescer, parsePiJsonLine } from "./pi.js";
 import { SANDBOX_WORKDIR, sandboxNameForSession, type SandboxReaper, type SandboxRunner } from "./sandbox.js";
 
@@ -183,6 +190,23 @@ export interface RpcManagerOptions {
    */
   approvalTimeoutMs?: number;
   /**
+   * Watch window after a denial-shaped tool failure (notify-on-grant).
+   * Defaults to 90_000 (90s). Tests inject short values.
+   */
+  notifyWindowMs?: number;
+  /**
+   * Poll interval for `openshell rule history` inside the watch window.
+   * Defaults to 10_000 (10s). Tests inject short values.
+   */
+  notifyPollMs?: number;
+  /** openshell CLI binary for grant-history polls. Defaults to "openshell". */
+  openshellBin?: string;
+  /**
+   * Injected history fetcher (tests stub the CLI here: no live contact).
+   * Production defaults to `fetchGrantHistorySync` on `openshellBin`.
+   */
+  notifyFetch?: (sandboxName: string) => string[] | Promise<string[]>;
+  /**
    * When set, pi spawns inside a per-session sandbox (created on first run,
    * STOPPED (workspace preserved) when the child dies or is reaped, STARTED
    * on the next run, DELETED only by the age reaper). Unset spawns directly.
@@ -195,6 +219,14 @@ export interface RpcManagerOptions {
   reaper?: SandboxReaper;
 }
 
+/** One notify-on-grant watch: baseline + bounded poll for new grants. */
+interface NotifyWatch {
+  sandboxName: string;
+  seen: Set<string>;
+  deadline: number;
+  timer: ReturnType<typeof setInterval>;
+}
+
 /**
  * One long-lived `pi --mode rpc` child per session, reused across messages.
  * Framing is strict JSONL over stdin/stdout split only on LF (never readline,
@@ -204,6 +236,11 @@ export interface RpcManagerOptions {
  */
 export class RpcManager {
   private sessions = new Map<string, SessionState>();
+  /**
+   * Notify-on-grant watches keyed by session. Started on a denial-shaped
+   * tool failure, stopped on fire/expiry/settle/teardown. One per session.
+   */
+  private notifyWatches = new Map<string, NotifyWatch>();
   constructor(private opts: RpcManagerOptions) {}
 
   get size(): number {
@@ -372,6 +409,146 @@ export class RpcManager {
     return [...(this.sessions.get(sessionId)?.pendingApprovals.keys() ?? [])];
   }
 
+  /** True while a notify-on-grant watch is armed (tests/diagnostics). */
+  hasNotifyWatch(sessionId: string): boolean {
+    return this.notifyWatches.has(sessionId);
+  }
+
+  private notifyWindowMs(): number {
+    return this.opts.notifyWindowMs ?? DEFAULT_NOTIFY_GRANT_WINDOW_MS;
+  }
+
+  private notifyPollMs(): number {
+    return this.opts.notifyPollMs ?? DEFAULT_NOTIFY_GRANT_POLL_MS;
+  }
+
+  private async fetchNotifyHistory(sandboxName: string): Promise<string[]> {
+    try {
+      if (this.opts.notifyFetch) return (await this.opts.notifyFetch(sandboxName)) ?? [];
+      return fetchGrantHistorySync(this.opts.openshellBin ?? "openshell", sandboxName);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Start a bounded grant watch after a denial-shaped tool failure.
+   * No sandbox (direct spawn) means no grants to see: skip silently.
+   * Json one-shot runs never reach here (rpc-only watcher). Never throws.
+   */
+  private maybeStartNotifyWatch(session: SessionState, output?: string): void {
+    try {
+      if (!this.opts.sandboxRunner) return;
+      const sandboxName = session.sandboxName;
+      if (!sandboxName) return;
+      if (this.notifyWatches.has(session.sessionId)) return;
+      if (!session.currentRun || !session.streaming) return;
+      if (!isDenialOutput(output)) return;
+      const windowMs = this.notifyWindowMs();
+      const pollMs = this.notifyPollMs();
+      // Baseline synchronously when the fetcher is sync so the first poll
+      // cannot fire on pre-existing grants; async fetchers establish it
+      // on their first tick instead (see pollNotifyWatch).
+      let baseline: string[] = [];
+      let baselineReady = false;
+      try {
+        const maybe = this.opts.notifyFetch
+          ? this.opts.notifyFetch(sandboxName)
+          : fetchGrantHistorySync(this.opts.openshellBin ?? "openshell", sandboxName);
+        if (Array.isArray(maybe)) {
+          baseline = maybe;
+          baselineReady = true;
+        }
+      } catch {
+        baseline = [];
+        baselineReady = false;
+      }
+      const watch: NotifyWatch = {
+        sandboxName,
+        seen: new Set(baselineReady ? baseline : []),
+        deadline: Date.now() + windowMs,
+        timer: undefined as unknown as ReturnType<typeof setInterval>,
+      };
+      // Async baseline: resolve before the first poll can fire.
+      if (!baselineReady && this.opts.notifyFetch) {
+        void this.fetchNotifyHistory(sandboxName)
+          .then((names) => {
+            const w = this.notifyWatches.get(session.sessionId);
+            if (w) for (const n of names) w.seen.add(n);
+          })
+          .catch(() => {
+            // keep the empty baseline; the next poll retries
+          });
+      }
+      watch.timer = setInterval(() => {
+        void this.pollNotifyWatch(session.sessionId).catch(() => {
+          // poll must never throw into the timer
+        });
+      }, pollMs);
+      (watch.timer as unknown as { unref?: () => void }).unref?.();
+      this.notifyWatches.set(session.sessionId, watch);
+    } catch {
+      // watcher setup must never break a run
+    }
+  }
+
+  /**
+   * One poll tick: expire silently at the deadline, else steer the live
+   * run on the first NEW approved rule. Steer declined (no live run) stops
+   * the watch with no note. Fires once, then stops. Never throws.
+   */
+  private async pollNotifyWatch(sessionId: string): Promise<void> {
+    const watch = this.notifyWatches.get(sessionId);
+    if (!watch) return;
+    try {
+      if (Date.now() >= watch.deadline) {
+        this.stopNotifyWatch(sessionId);
+        return;
+      }
+      let names: string[] = [];
+      try {
+        names = await this.fetchNotifyHistory(watch.sandboxName);
+      } catch {
+        return; // failed poll keeps the watch until expiry
+      }
+      const fresh = names.filter((n) => n && !watch.seen.has(n));
+      for (const n of names) watch.seen.add(n);
+      if (fresh.length === 0) return;
+      const rule = fresh[0]!;
+      const message = buildNotifySteerMessage(rule);
+      if (!this.steer(sessionId, message)) {
+        this.stopNotifyWatch(sessionId);
+        return;
+      }
+      try {
+        this.sessions
+          .get(sessionId)
+          ?.currentRun?.onEvent({ type: "status", sessionId, status: "running", message });
+      } catch {
+        // consumer gone; pi still got the steer
+      }
+      this.stopNotifyWatch(sessionId);
+    } catch {
+      // poll must never break the run; expiry stops it eventually
+    }
+  }
+
+  /** Stop and forget a grant watch (fire/expiry/settle/teardown). */
+  private stopNotifyWatch(sessionId: string): void {
+    try {
+      const w = this.notifyWatches.get(sessionId);
+      if (!w) return;
+      try {
+        clearInterval(w.timer);
+      } catch {
+        // ignore teardown races
+      }
+      this.notifyWatches.delete(sessionId);
+    } catch {
+      // teardown paths must never throw
+    }
+  }
+
   /**
    * Release every parked approval as denied (gateway disconnect path).
    * The run itself continues: pi receives the denials and proceeds.
@@ -509,6 +686,7 @@ export class RpcManager {
     // Test/teardown path: force-kill everything, even live runs. The 'close'
     // handlers clean the map asynchronously; clear timers now so TTL/abort
     // cannot double-kill after a respawn reuses the session id.
+    for (const id of [...this.notifyWatches.keys()]) this.stopNotifyWatch(id);
     for (const session of [...this.sessions.values()]) {
       if (session.idleTimer) {
         clearTimeout(session.idleTimer);
@@ -957,6 +1135,16 @@ export class RpcManager {
     if (e.type === "status" && typeof e.message === "string" && e.message.startsWith("retrying")) {
       run.sawError = false;
     }
+    // Notify-on-grant: a denial-shaped tool failure arms the bounded grant
+    // watch (sandbox sessions only; skipped silently otherwise). Never
+    // throws: watcher setup must not break the run.
+    if (e.type === "tool_result" && !e.ok) {
+      try {
+        this.maybeStartNotifyWatch(session, e.output);
+      } catch {
+        // watcher setup must never break a run
+      }
+    }
     try {
       run.onEvent(e);
     } catch {
@@ -977,6 +1165,9 @@ export class RpcManager {
   private finishRun(session: SessionState, opts: { aborted: boolean; timedOut: boolean }): void {
     const run = session.currentRun;
     if (!run) return;
+    // The run settled: the grant watch has no live run to steer, so it
+    // expires here (a later denial in the next generation re-arms it).
+    this.stopNotifyWatch(session.sessionId);
     // Backstop: abort/timeout flushed explicitly before their status/error
     // events, so this is normally a no-op; it covers child-crash paths.
     this.flushThinking(run);

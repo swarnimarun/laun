@@ -24,6 +24,7 @@ import {
   retryingMessage,
   runWithRecovery,
 } from "./recovery.js";
+import { DEFAULT_NOTIFY_GRANT_POLL_MS, DEFAULT_NOTIFY_GRANT_WINDOW_MS } from "./notify.js";
 import { RpcManager } from "./rpc.js";
 
 interface JsonActive {
@@ -185,6 +186,9 @@ export function createHandler(cfg: ExecutorConfig, deps: HandlerDeps = {}) {
     openshellPrefix: cfg.openshellPrefix,
     idleTtlMs: rpcIdleTtlMs,
     approvalTimeoutMs: (cfg as Partial<ExecutorConfig>).approvalTimeoutMs ?? 300_000,
+    notifyWindowMs: (cfg as Partial<ExecutorConfig>).notifyGrantWindowMs ?? DEFAULT_NOTIFY_GRANT_WINDOW_MS,
+    notifyPollMs: (cfg as Partial<ExecutorConfig>).notifyGrantPollMs ?? DEFAULT_NOTIFY_GRANT_POLL_MS,
+    openshellBin: cfg.openshellBin ?? "openshell",
     sandboxRunner: rpcRunner,
     reaper,
   });
