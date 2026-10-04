@@ -1,4 +1,12 @@
 import { DEFAULT_RECOVERY_ATTEMPTS, DEFAULT_RECOVERY_BACKOFF_MS, MAX_RECOVERY_ATTEMPTS, MAX_RECOVERY_BACKOFF_MS } from "./recovery.js";
+import {
+  DEFAULT_NOTIFY_GRANT_POLL_MS,
+  DEFAULT_NOTIFY_GRANT_WINDOW_MS,
+  MAX_NOTIFY_GRANT_POLL_MS,
+  MAX_NOTIFY_GRANT_WINDOW_MS,
+  MIN_NOTIFY_GRANT_POLL_MS,
+  MIN_NOTIFY_GRANT_WINDOW_MS,
+} from "./notify.js";
 import { DEFAULT_SANDBOX_MAX_IDLE_MS } from "./sandbox.js";
 
 export type ExecutorMode = "json" | "rpc";
@@ -73,6 +81,17 @@ export interface ExecutorConfig {
   recoveryAttempts?: number;
   /** Backoff between recovery attempts. Defaults to 2000. */
   recoveryBackoffMs?: number;
+  /**
+   * Watch window after a denial-shaped tool failure during which a NEW
+   * approved rule steers the live run to retry. Defaults to 90_000 (90s).
+   * Bounded: out-of-range values fail loudly at startup.
+   */
+  notifyGrantWindowMs?: number;
+  /**
+   * Poll interval for `openshell rule history` inside the watch window.
+   * Defaults to 10_000 (10s). Bounded like the window.
+   */
+  notifyGrantPollMs?: number;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -179,6 +198,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ExecutorConfig
     }
   }
   const gooseSecret = (env["GOOSE_SECRET"] ?? "").trim();
+  const notifyWindowRaw = (env["NOTIFY_GRANT_WINDOW_MS"] ?? "").trim();
+  const notifyGrantWindowMs = notifyWindowRaw === "" ? DEFAULT_NOTIFY_GRANT_WINDOW_MS : Number(notifyWindowRaw);
+  if (!Number.isInteger(notifyGrantWindowMs) || notifyGrantWindowMs < MIN_NOTIFY_GRANT_WINDOW_MS || notifyGrantWindowMs > MAX_NOTIFY_GRANT_WINDOW_MS) {
+    throw new Error(`NOTIFY_GRANT_WINDOW_MS must be an integer ${MIN_NOTIFY_GRANT_WINDOW_MS}-${MAX_NOTIFY_GRANT_WINDOW_MS}`);
+  }
+  const notifyPollRaw = (env["NOTIFY_GRANT_POLL_MS"] ?? "").trim();
+  const notifyGrantPollMs = notifyPollRaw === "" ? DEFAULT_NOTIFY_GRANT_POLL_MS : Number(notifyPollRaw);
+  if (!Number.isInteger(notifyGrantPollMs) || notifyGrantPollMs < MIN_NOTIFY_GRANT_POLL_MS || notifyGrantPollMs > MAX_NOTIFY_GRANT_POLL_MS) {
+    throw new Error(`NOTIFY_GRANT_POLL_MS must be an integer ${MIN_NOTIFY_GRANT_POLL_MS}-${MAX_NOTIFY_GRANT_POLL_MS}`);
+  }
   return {
     port,
     gatewayToken,
@@ -207,5 +236,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ExecutorConfig
     approvalTimeoutMs,
     gooseUrl,
     gooseSecret,
+    notifyGrantWindowMs,
+    notifyGrantPollMs,
   };
 }
