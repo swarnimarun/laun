@@ -13,6 +13,19 @@ export interface ExecutorConfig {
   openshellEnabled: boolean;
   /** argv prefix prepended before the pi command, e.g. ["openshell","exec","--sandbox","agent"]. */
   openshellPrefix: string[];
+  /** openshell CLI binary. Defaults to "openshell". */
+  openshellBin?: string;
+  /**
+   * Sandbox image for `sandbox create --from` (e.g. "pi-agent:local").
+   * Required when sandbox mode is enabled (fail closed); empty disables nothing.
+   */
+  sandboxImage?: string;
+  /** Policy YAML path for `sandbox create --policy`. Empty omits the flag. */
+  sandboxPolicyFile?: string;
+  /** Providers, each passed as a repeatable `sandbox create --provider` flag. */
+  sandboxProviders?: string[];
+  /** Approval mode for `sandbox create --approval-mode`. Empty omits the flag. */
+  sandboxApprovalMode?: string;
   defaultTimeoutMs: number;
   /** json = one-shot `pi -p --mode json` per run (fallback). rpc = one long-lived `pi --mode rpc` child per session. Defaults to json. */
   executorMode?: ExecutorMode;
@@ -42,6 +55,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ExecutorConfig
     throw new Error(
       "OPENSHELL_ENABLED=true but OPENSHELL_PREFIX is empty — set it to your openshell exec prefix (fail closed).",
     );
+  }
+  // Per-session sandbox wiring (lane-sandbox): enabled requires an image,
+  // never silently unsandboxed. OPENSHELL_PREFIX stays required for compat.
+  const sandboxImage = (env["OPENSHELL_SANDBOX_IMAGE"] ?? "").trim();
+  if (openshellEnabled && !sandboxImage) {
+    throw new Error("OPENSHELL_ENABLED=true but OPENSHELL_SANDBOX_IMAGE is empty — set it to the sandbox image (fail closed).");
+  }
+  const sandboxPolicyFile = (env["OPENSHELL_POLICY"] ?? "").trim();
+  const sandboxProviders = (env["OPENSHELL_PROVIDER"] ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const sandboxApprovalMode = (env["OPENSHELL_APPROVAL_MODE"] ?? "").trim();
+  if (sandboxApprovalMode !== "" && sandboxApprovalMode !== "manual" && sandboxApprovalMode !== "auto") {
+    throw new Error('OPENSHELL_APPROVAL_MODE must be "manual" or "auto"');
   }
   const port = Number(env["EXECUTOR_PORT"] ?? 8081);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("EXECUTOR_PORT must be 1-65535");
@@ -75,6 +103,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ExecutorConfig
     defaultModel: env["MODEL"] ?? "opencode-go/muse-spark-1.3-contributor",
     openshellEnabled,
     openshellPrefix,
+    openshellBin: env["OPENSHELL_BIN"] ?? "openshell",
+    sandboxImage,
+    sandboxPolicyFile,
+    sandboxProviders,
+    sandboxApprovalMode,
     defaultTimeoutMs,
     executorMode: modeRaw as ExecutorMode,
     rpcIdleTtlMs,
