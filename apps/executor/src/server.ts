@@ -41,9 +41,29 @@ export function createHandler(cfg: ExecutorConfig) {
       busy.add(body.sessionId);
       const timeoutMs = clampTimeout(body.timeoutMs, cfg.defaultTimeoutMs);
       const model = body.model?.trim() || cfg.defaultModel;
+      // The consumer (gateway) may disconnect mid-run. Writing to a closed
+      // controller throws, and an uncaught throw here used to take down the
+      // whole executor process — taking every in-flight run with it.
+      let closed = false;
       const stream = new ReadableStream({
         async start(controller) {
-          const send = (e: AgentEvent) => controller.enqueue(JSON.stringify(e) + "\n");
+          const send = (e: AgentEvent) => {
+            if (closed) return;
+            try {
+              controller.enqueue(JSON.stringify(e) + "\n");
+            } catch {
+              closed = true; // consumer gone: keep the run alive, stop writing
+            }
+          };
+          const finish = () => {
+            if (closed) return;
+            closed = true;
+            try {
+              controller.close();
+            } catch {
+              // already closed by the consumer
+            }
+          };
           send({ type: "status", sessionId: body.sessionId, status: "running", message: `model ${model}` });
           try {
             const result = await runPiStreaming({
@@ -73,8 +93,11 @@ export function createHandler(cfg: ExecutorConfig) {
             send({ type: "error", sessionId: body.sessionId, message: (e as Error).message });
           } finally {
             busy.delete(body.sessionId);
-            controller.close();
+            finish();
           }
+        },
+        cancel() {
+          closed = true;
         },
       });
       return new Response(stream, {

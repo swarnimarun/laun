@@ -288,6 +288,44 @@ describe("POST /run terminal status (stub binaries)", () => {
     expect(events.some((e) => e.type === "status" && e.status === "error")).toBe(false);
   });
 
+  test("a consumer that disconnects mid-run does not crash the run", async () => {
+    // Regression: enqueue() after the consumer cancelled threw "Invalid state:
+    // Controller is already closed" from pi's stdout handler, which took down
+    // the whole executor process — every in-flight run with it.
+    const dir = mkdtempSync(join(tmpdir(), "cb-cancel-"));
+    const stub = join(dir, "slow.sh");
+    writeFileSync(
+      stub,
+      "#!/bin/sh\n" +
+        "echo '{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"first\"}}'\n" +
+        "sleep 1\n" +
+        "echo '{\"type\":\"agent_settled\"}'\n",
+    );
+    chmodSync(stub, 0o755);
+    const handler = createHandler({
+      port: 0,
+      gatewayToken: "t",
+      sessionDir: dir,
+      piBin: stub,
+      defaultModel: "m",
+      openshellEnabled: false,
+      openshellPrefix: [],
+      defaultTimeoutMs: 30_000,
+    });
+    const res = await handler.handleRun(
+      new Request("http://x/run", {
+        method: "POST",
+        headers: { authorization: "Bearer t", "content-type": "application/json" },
+        body: JSON.stringify({ sessionId: "scancel", prompt: "hi" }),
+      }),
+    );
+    const reader = res.body!.getReader();
+    await reader.read(); // first event arrives
+    await reader.cancel(); // consumer goes away while the agent keeps emitting
+    await new Promise((r) => setTimeout(r, 2500));
+    expect(handler.busy.size).toBe(0); // run completed instead of crashing
+  });
+
   test("rejects a bad bearer token before spawning", async () => {
     const handler = testHandler("true");
     const res = await handler.handleRun(
