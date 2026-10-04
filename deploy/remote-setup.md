@@ -154,8 +154,9 @@ old start times; that is how you can tell). Always rsync first:
 E=".e""nv"   # split so shell-permission filters never see a literal
 rsync -az --delete --exclude node_modules --exclude dist \
   --exclude .git --exclude .jj --exclude .pi-subagents --exclude "$E" \
-  --exclude '*.log' ./ ubuntu@<vps>:/opt/laun/
+  --exclude '*.log' --exclude '*.tsbuildinfo' ./ ubuntu@<vps>:/opt/laun/
 # never exclude or delete the remote `.env`; never touch the `/data` volume
+# (`*.tsbuildinfo` carries absolute local paths — syncing it poisons the on-box tsc)
 bun run laun -- setup ssh -i ~/.ssh/id_ed25519 ubuntu@<vps>
 ```
 
