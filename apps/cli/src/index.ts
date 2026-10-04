@@ -3,7 +3,7 @@ import { UsageError, flagBool, flagString, parseArgs, requiredArg } from "./args
 import { renderEvent, follow, formatApprovals, sessionLine } from "./agent.js";
 import { GatewayClient, GatewayError } from "./client.js";
 import { authFilePath, resolveTarget, saveTarget, targetUrl, type Target } from "./config.js";
-import { connectionBlock, localSetup, remoteSetup } from "./setup.js";
+import { connectionBlock, localSetup, parseSshTarget, remoteSetup } from "./setup.js";
 
 const HELP = `cloudbear — self-hosted remote agent control
 
@@ -60,22 +60,23 @@ async function setupCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
       boolean: ["no-start", "json"],
       value: ["i", "identity", "user", "port", "remote-dir", "repo-url", "env-file"],
     });
-    const host = requiredArg(parseArgs(rest, { boolean: ["no-start"], value: ["i", "identity", "user", "port", "remote-dir", "repo-url", "env-file"] }).positionals, 0, "host", "cloudbear setup ssh -i <identity> <host>");
+    const rawHost = requiredArg(parseArgs(rest, { boolean: ["no-start"], value: ["i", "identity", "user", "port", "remote-dir", "repo-url", "env-file"] }).positionals, 0, "host", "cloudbear setup ssh -i <identity> [user@]host");
     const identity = flagString(flags, "i") ?? flagString(flags, "identity");
     if (!identity) throw new UsageError("setup ssh needs a private key: -i <identity>");
     const portRaw = flagString(flags, "port");
+    const target = parseSshTarget(rawHost, flagString(flags, "user"));
     const result = await remoteSetup({
       identity,
-      host,
-      user: flagString(flags, "user") ?? "root",
+      host: target.host,
+      user: target.user,
       port: portRaw ? Number(portRaw) : undefined,
       remoteDir: flagString(flags, "remote-dir") ?? "/opt/cloudbear",
       repoUrl: flagString(flags, "repo-url"),
       noStart: flagBool(flags, "no-start"),
       envFile: flagString(flags, "env-file") ?? ".env",
     });
-    if (flagBool(flags, "json")) io.out(JSON.stringify({ url: result.url, key: result.key, host, remoteDir: result.remoteDir }));
-    else io.out(connectionBlock(result.url, result.key, host));
+    if (flagBool(flags, "json")) io.out(JSON.stringify({ url: result.url, key: result.key, host: target.host, remoteDir: result.remoteDir }));
+    else io.out(connectionBlock(result.url, result.key, target.host));
     return 0;
   }
 

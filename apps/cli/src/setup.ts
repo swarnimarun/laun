@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { formatAgentKey } from "@cloudbear/protocol";
+import { UsageError } from "./args.js";
 import { bunRunner, runRemoteSetup, type CommandRunner } from "./ssh.js";
 
 export function randomToken(): string {
@@ -132,6 +133,33 @@ export async function localSetup(opts: LocalSetupOptions): Promise<{ url: string
   // The printed URL must match what the operator actually configured.
   const port = readEnvValue(env.content, "GATEWAY_PORT") ?? "8080";
   return { url: `http://${opts.host}:${port}`, key: env.key, envPath };
+}
+
+export interface SshUserAndHost {
+  user: string;
+  host: string;
+}
+
+/**
+ * Split `ubuntu@1.2.3.4` into parts. The explicit `--user` flag wins over the
+ * user embedded in the host, and the fallback default applies only when
+ * neither carries one — otherwise `setup ssh ubuntu@host` would turn into
+ * `root@ubuntu@host` and fail to authenticate.
+ */
+export function parseSshTarget(rawHost: string, userFlag?: string, defaultUser = "root"): SshUserAndHost {
+  const trimmed = rawHost.trim();
+  if (!trimmed) throw new UsageError(`missing host\n\nusage: cloudbear setup ssh -i <identity> [user@]host`);
+  let host = trimmed;
+  let user = userFlag?.trim() || undefined;
+  const at = trimmed.lastIndexOf("@");
+  if (at >= 0) {
+    const embedded = trimmed.slice(0, at);
+    const rest = trimmed.slice(at + 1);
+    if (!rest) throw new UsageError(`missing host after "@" in "${trimmed}"`);
+    if (!user && embedded) user = embedded;
+    host = rest;
+  }
+  return { user: user || defaultUser, host };
 }
 
 export interface RemoteSetupOptions {

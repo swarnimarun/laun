@@ -85,8 +85,20 @@ export async function runRemoteSetup(opts: RemoteSetupOptions): Promise<RemoteSe
   const run = opts.runner ?? bunRunner;
   const dir = shQuote(opts.remoteDir);
 
-  const mkdir = await run(sshArgv(opts, `mkdir -p ${dir} && chmod 700 ${dir}`));
-  if (mkdir.code !== 0) throw new Error(`ssh mkdir failed (${mkdir.code}): ${mkdir.stderr.trim()}`);
+  // Creating a path like /opt/cloudbear needs root on a stock Ubuntu box, but
+  // /home/<user>/cloudbear does not — try plainly first, then passwordless sudo,
+  // and always hand the dir back to the calling user so the env write works.
+  const mkdirCmd =
+    `{ mkdir -p ${dir} && chmod 700 ${dir}; } 2>/dev/null || ` +
+    `{ sudo -n mkdir -p ${dir} && sudo -n chown "$(id -u):$(id -g)" ${dir} && sudo -n chmod 700 ${dir}; }`;
+  const mkdir = await run(sshArgv(opts, mkdirCmd));
+  if (mkdir.code !== 0) {
+    const why = mkdir.stderr.trim();
+    throw new Error(
+      `ssh mkdir failed (${mkdir.code}): ${why ||
+        "cannot create the remote directory — it needs write access or passwordless sudo; use a writable --remote-dir such as ~/cloudbear"}`,
+    );
+  }
 
   const writeEnv = await run(sshArgv(opts, `cat > ${dir}/.env && chmod 600 ${dir}/.env`), {
     stdin: opts.envContent,
