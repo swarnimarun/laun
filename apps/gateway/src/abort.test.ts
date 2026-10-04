@@ -10,7 +10,7 @@ afterEach(() => {
   while (servers.length > 0) servers.pop()!.stop(true);
 });
 
-function stubExecutor(status: number): { url: string; calls: string[] } {
+function stubExecutor(status: number, body = '{"ok":true}'): { url: string; calls: string[] } {
   const calls: string[] = [];
   const server = Bun.serve({
     port: 0,
@@ -18,7 +18,7 @@ function stubExecutor(status: number): { url: string; calls: string[] } {
       const url = new URL(req.url);
       if (url.pathname === "/abort" && req.method === "POST") {
         calls.push(await req.text());
-        return new Response(JSON.stringify({ ok: true }), { status });
+        return new Response(body, { status });
       }
       return new Response("not found", { status: 404 });
     },
@@ -75,6 +75,28 @@ describe("gateway abort", () => {
     // the session must still be marked running: we did not stop it
     expect(gw.running.has(id)).toBe(true);
     expect(gw.sessions.get(id)?.status).toBe("running");
+  });
+
+  test("an executor build without an abort route must not be reported as stopped", async () => {
+    // Regression: a not-yet-rebuilt executor answers 404 {"error":"not found"}
+    // for the missing route, which the gateway used to treat as "run is gone".
+    // `stop` then claimed a kill that never happened.
+    const stub = stubExecutor(404, JSON.stringify({ error: "not found" }));
+    const { gw, id } = gwAt(stub.url);
+    gw.sessions.setStatus(id, "running");
+    gw.running.add(id);
+    await expect(gw.abort(id)).rejects.toMatchObject({ status: 502 });
+    expect(gw.running.has(id)).toBe(true);
+    expect(gw.sessions.get(id)?.status).toBe("running");
+  });
+
+  test("404 from an executor that HAS the route still means the run is gone", async () => {
+    const stub = stubExecutor(404, JSON.stringify({ error: "unknown session" }));
+    const { gw, id } = gwAt(stub.url);
+    gw.sessions.setStatus(id, "running");
+    gw.running.add(id);
+    expect(await gw.abort(id)).toBe("ok");
+    expect(gw.running.has(id)).toBe(false);
   });
 
   test("an executor that already has no such run still counts as stopped", async () => {

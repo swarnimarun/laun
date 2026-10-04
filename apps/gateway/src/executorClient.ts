@@ -57,24 +57,35 @@ function parseEventLine(line: string): AgentEvent | null {
 }
 
 /**
- * Ask the executor to kill an active run. Returns the executor's HTTP status,
- * or 0 when it could not be reached — callers decide what that means for the
- * session, because the gateway must not report success for a run it never
- * stopped.
+ * Ask the executor to kill an active run.
+ *
+ * A 404 is ambiguous: an executor without the abort route (not yet rebuilt or
+ * redeployed) answers 404 with `{"error":"not found"}`, while one that has the
+ * route but no such run answers `{"error":"unknown session"}`. Treating both as
+ * success would let `stop` report a kill that never happened, so the body is
+ * what decides.
  */
 export async function abortExecutorRun(
   executorUrl: string,
   token: string,
   sessionId: string,
-): Promise<number> {
+): Promise<{ status: number; body: string }> {
   try {
     const res = await fetch(`${executorUrl}/abort`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
       body: JSON.stringify({ sessionId }),
     });
-    return res.status;
+    const body = await res.text().catch(() => "");
+    return { status: res.status, body };
   } catch {
-    return 0;
+    return { status: 0, body: "" };
   }
+}
+
+/** True only when the executor demonstrably has an abort endpoint. */
+export function executorKnowsAbort(result: { status: number; body: string }): boolean {
+  if (result.status === 200 || result.status === 409) return true;
+  if (result.status !== 404) return false;
+  return /unknown session/i.test(result.body);
 }

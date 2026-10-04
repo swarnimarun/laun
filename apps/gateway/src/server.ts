@@ -9,7 +9,7 @@ import type {
 } from "@cloudbear/protocol";
 import { bearerToken, checkBearer, normalizeCreateSession } from "@cloudbear/protocol";
 import type { GatewayConfig } from "./config.js";
-import { streamExecutorRun, abortExecutorRun } from "./executorClient.js";
+import { streamExecutorRun, abortExecutorRun, executorKnowsAbort } from "./executorClient.js";
 import { AgentKeyStore } from "./keys.js";
 import { SessionStore } from "./store.js";
 
@@ -225,11 +225,19 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
       if (!rec) throw Object.assign(new Error("session not found"), { status: 404 });
       if (!running.has(sessionId)) throw Object.assign(new Error("session not running"), { status: 409 });
 
-      const status = await abortExecutorRun(cfg.executorUrl, cfg.gatewayToken, sessionId);
-      if (status !== 200 && status !== 404 && status !== 409) {
-        // 0 = unreachable, 5xx = refused: the run may still be alive.
+      const result = await abortExecutorRun(cfg.executorUrl, cfg.gatewayToken, sessionId);
+      if (!executorKnowsAbort(result)) {
+        // 0 = unreachable, 5xx = refused, 404 with a route-shaped body = this
+        // executor build has no abort endpoint at all. None of them stopped the
+        // run, so none of them may be reported as success.
         throw Object.assign(
-          new Error(status === 0 ? "executor unreachable" : `executor refused abort (${status})`),
+          new Error(
+            result.status === 0
+              ? "executor unreachable"
+              : result.status === 404
+                ? "this executor build has no abort endpoint — rebuild and redeploy it"
+                : `executor refused abort (${result.status})`,
+          ),
           { status: 502 },
         );
       }
