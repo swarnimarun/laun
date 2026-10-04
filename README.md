@@ -76,10 +76,13 @@ Roadmap and verified harness findings: see `PLAN.md`.
 
 ## Local dev (Bun-only)
 
+Full walkthrough — tests, running the three services, the CLI, real agent runs,
+lanes, and every gotcha found so far: **[DEVELOPMENT.md](DEVELOPMENT.md)**.
+
 ```bash
 bun install
 bun run build
-bun run test
+bun run test        # 211 tests / 14 files. Never bare `bun test` (it doubles)
 ```
 
 Run each service locally (needs `pi` on PATH + `.env`):
