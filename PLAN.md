@@ -132,11 +132,77 @@ Real pi wire-event mapping; failure vs success decided by events; agent keys;
 CLI (`setup`, `setup ssh`, `agent`, `keys`); browser UI; remote bootstrap.
 Why now: without it the service is not actually usable or trustworthy.
 
-**M2 — RPC executor.**
-One long-lived `pi --mode rpc` per session. Completion on `agent_settled`,
-`abort` from any client, `steer` for mid-run corrections, `get_entries` as the
-durability cursor. Keep the JSON-mode path behind a config flag as a fallback.
+**M2 — long-running and recoverable runs** *(split into lanes; M2.1–M2.2 in flight)*
+
+The observed failure modes on a real VPS were: a provider socket drop killed a
+near-complete run (no retry exists in one-shot JSON mode — `set_auto_retry` is
+RPC-only), and there was no way to stop a runaway session.
+
+| # | Task | Seam | Owner |
+| --- | --- | --- | --- |
+| M2.1 | RPC executor: one long-lived `pi --mode rpc` child per session, `set_auto_retry`, completion on `agent_settled`, idle TTL, `POST /abort`; `json` mode kept as a flag-guarded fallback | `apps/executor/**` | Lane A (worker + validator) |
+| M2.2 | CLI: `cloudbear list` aliases, `agent stop`, `agent continue`, `--json` everywhere | `apps/cli/**` | Lane B (worker + validator) |
+| M2.3 | Gateway: `POST /sessions/:id/abort` routed to the executor; `steer` so a message can land mid-run | `apps/gateway/**` | integrator |
+| M2.4 | Run lease + heartbeat so a dead executor cannot leave a session `running` forever (today boot recovery only marks it `error`) | `apps/gateway/**` | integrator |
+| M2.5 | Surface pi's `usage` (tokens/cost) as events — the field is already on `message_update` and we currently drop it | `packages/protocol` + executor | later wave |
+| M2.6 | Durability cursor: adopt pi's `get_entries {since}` entry id instead of the gateway's array index | `apps/gateway/**` | later wave |
+
 Why now: it is the difference between "runs a turn" and "controls an agent".
+
+## Handing work to a cloud agent: lanes, workers, validators
+
+The loop that produced M2.1/M2.2 is designed to run unattended on a remote
+box. It follows `gameboy/docs/parallel-work.md`.
+
+**A lane is a jj workspace, never a git worktree.** `worktree: true` creates a
+checkout with no `.jj`, so `jj log`/`jj status` fail inside it — that is a copy,
+not a lane. Create it yourself and pass the child an explicit `cwd`:
+
+```sh
+jj workspace add ../cloudbear-lane-<name>   # sibling, outside the repo tree
+```
+
+**One writer per seam.** The worker owns exactly one directory subtree. The
+integrator owns the serialization points: `packages/protocol`,
+`apps/gateway`, root `package.json`/`tsconfig.json`, and all docs. A worker
+that needs a cross-seam change records an *integration request* in its handoff
+instead of making it — otherwise two lanes land on the same lines.
+
+**Each lane runs a worker/validator pair:**
+
+1. **Worker** (`muse-spark-1.3-contributor`, `:xhigh`) executes a spec written
+to a file before it is spawned, so the brief cannot drift.
+2. **Validator** (`reviewer`, same model/thinking) runs *after* it, read-only in
+   the same lane cwd. Its job is adversarial: run the gates itself, look for
+   tests that assert nothing, seam violations, silent behaviour changes, and
+   any place the implementation dodges the spec. Verdict is `approve` or
+   `changes requested` with file:line reasons.
+3. On `changes requested`, the **worker is resumed with the verdict** — same
+   run, not a fresh one, so it keeps its own context. Cap at 3 rounds; a lane
+   that still fails review escalates to the integrator rather than looping.
+4. **Integration is one lane at a time, in order**, re-running the gates after
+   each landing, so a broken gate points at one change.
+
+**Handoff is what makes it durable.** Every lane writes a note under
+`.pi-subagents/handoffs/<lane>.md` in the *parent* repo (gitignored, shared on
+disk) with change id, commit id, gate output and open decisions, so a cold
+reader — or the next cloud agent — can pick it up without this conversation.
+
+**Forbidden in a lane:** `jj abandon`, `jj op restore`, `jj gc`, `jj bookmark
+set`, pushing, or removing any workspace but its own.
+
+## Gaps that still block hands-off long runs
+
+Observed against a live deployment, beyond M2:
+
+| Gap | Consequence | Where |
+| --- | --- | --- |
+| No completion notification | you must poll `agent log --follow`; the only push channel is Telegram | new: `agent watch <id>` that exits when a run settles, so a cloud agent can wait on it |
+| Follow-ups are rejected while running (409) | you cannot queue work onto a busy session; `steer`/`follow_up` in RPC mode is the fix | M2.3 |
+| A reboot marks runs `error` rather than resuming | safe, but work in flight is abandoned | post-M2: replay from the pi session file |
+| No budget limits | nothing caps runtime or tokens beyond `RUN_TIMEOUT_MS` (30 min hard) | post-M2 |
+| `usage` (tokens/cost) is discarded | no visibility into what a long run costs | M2.5 |
+| No global concurrency cap | sessions run in parallel with no ceiling on the box | post-M2 |
 
 **M3 — real approvals.**
 Bridge pi's `extension_ui_request(confirm|select)` into gateway
