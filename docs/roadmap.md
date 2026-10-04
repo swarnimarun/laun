@@ -57,7 +57,11 @@ doing the real job · *unverified* = built but never proven in the real world ·
   (reasoning blocks, compact tool rows, usage footer), zero emojis.
 - Notify-on-grant: denial-shaped tool failures arm a bounded watcher on
   `rule history`; new grants steer the live run to retry (works for human
-  approvals too).
+  approvals too). Live caveat (2026-10-04): agents paraphrase failures
+  (`FETCH_FAILED: fetch failed` hides the raw `EACCES`), so the watcher
+  never armed on a real run — grants still auto-approved, manual retry
+  proved the loop end. Next: broaden denial shapes to the network-error
+  family (cheap silent expiry bounds the cost).
 - Model via OpenShell provider, LIVE on the box: `opencode-go` custom profile
   (Bearer, endpoint-locked to opencode.ai/zen/go) + `laun-model` provider
   backed by pi's own key (same model, no new account). Proven: full
