@@ -1,10 +1,20 @@
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentEvent, ExecutorRunRequest } from "@laun/protocol";
 import { checkBearer } from "@laun/protocol";
 import type { ExecutorConfig, ExecutorMode } from "./config.js";
 import { clampTimeout, ensureWorkdir, resolveSessionDir, resolveWorkdir, assertValidPrompt, assertValidSessionId } from "./paths.js";
 import { runPiStreaming } from "./pi.js";
-import { CliSandboxRunner, type SandboxRunner } from "./sandbox.js";
+import {
+  CliSandboxRunner,
+  connectSandboxSurface,
+  DEFAULT_SANDBOX_MAX_IDLE_MS,
+  SANDBOX_WORKDIR,
+  SandboxReaper,
+  sandboxSessionDirForSession,
+  SdkSandboxRunner,
+  type SandboxRunner,
+} from "./sandbox.js";
 import {
   DEFAULT_RECOVERY_ATTEMPTS,
   DEFAULT_RECOVERY_BACKOFF_MS,
@@ -38,7 +48,10 @@ export function createHandler(cfg: ExecutorConfig) {
   const rpcIdleTtlMs = (cfg as Partial<ExecutorConfig>).rpcIdleTtlMs ?? 300_000;
   // Sandbox mode: one sandbox per session, pi spawned inside it. Disabled
   // passes undefined and every spawn stays a direct host child (unchanged).
-  const sandboxRunner: SandboxRunner | undefined = cfg.openshellEnabled
+  // The CLI runner stays for one-shot json (and for rpc when the SDK is not
+  // configured); the SDK runner keeps the CLI lifecycle but streams rpc
+  // through `execInteractive` when an SDK gateway endpoint is configured.
+  const cliRunner: SandboxRunner | undefined = cfg.openshellEnabled
     ? new CliSandboxRunner({
         bin: cfg.openshellBin ?? "openshell",
         image: cfg.sandboxImage ?? "",
@@ -47,7 +60,46 @@ export function createHandler(cfg: ExecutorConfig) {
         approvalMode: cfg.sandboxApprovalMode ?? "",
       })
     : undefined;
-  const rpc = new RpcManager({ piBin: cfg.piBin, openshellPrefix: cfg.openshellPrefix, idleTtlMs: rpcIdleTtlMs, sandboxRunner });
+  const sdkRunner: SandboxRunner | undefined =
+    cfg.openshellEnabled && (cfg.sdkGateway ?? "").trim()
+      ? new SdkSandboxRunner({
+          bin: cfg.openshellBin ?? "openshell",
+          image: cfg.sandboxImage ?? "",
+          policyFile: cfg.sandboxPolicyFile ?? "",
+          providers: cfg.sandboxProviders ?? [],
+          approvalMode: cfg.sandboxApprovalMode ?? "",
+          connect: () =>
+            connectSandboxSurface({
+              gateway: (cfg.sdkGateway ?? "").trim(),
+              token: cfg.sdkToken ?? "",
+              clientCertFile: cfg.sdkClientCertFile ?? "",
+              clientKeyFile: cfg.sdkClientKeyFile ?? "",
+              caFile: cfg.sdkCaFile ?? "",
+              insecure: cfg.sdkInsecure ?? false,
+            }),
+        })
+      : undefined;
+  // Selection: SDK for rpc when configured, CLI otherwise. One-shot json
+  // always stays on the CLI path. Either way a failure rejects loudly —
+  // never a silent fallback to unsandboxed.
+  const rpcRunner = sdkRunner ?? cliRunner;
+  // Age reaper: time-based delete of long-idle sandboxes (there is no
+  // gateway session-delete API). Activity persists host-side in the session
+  // dir so restarts neither leak nor prematurely delete.
+  const reaper: SandboxReaper | undefined = cliRunner
+    ? new SandboxReaper({
+        runner: cliRunner,
+        maxIdleMs: cfg.sandboxMaxIdleMs ?? DEFAULT_SANDBOX_MAX_IDLE_MS,
+        metaFile: join(cfg.sessionDir, ".sandbox-meta.json"),
+      })
+    : undefined;
+  const rpc = new RpcManager({
+    piBin: cfg.piBin,
+    openshellPrefix: cfg.openshellPrefix,
+    idleTtlMs: rpcIdleTtlMs,
+    sandboxRunner: rpcRunner,
+    reaper,
+  });
   const jsonActive = new Map<string, JsonActive>();
   const rpcActive = new Map<string, RpcActive>();
   // Additive recovery config: absent fields (older callers/tests) fall back
@@ -85,13 +137,13 @@ export function createHandler(cfg: ExecutorConfig) {
       return json({ error: "invalid model" }, 400);
     }
     if (busy.has(body.sessionId)) return json({ error: "session already running" }, 409);
-    let workdir: string;
+    let hostWorkdir: string;
     try {
-      workdir = resolveWorkdir(cfg.sessionDir, body.sessionId);
+      hostWorkdir = resolveWorkdir(cfg.sessionDir, body.sessionId);
     } catch (e) {
       return json({ error: (e as Error).message }, 400);
     }
-    ensureWorkdir(workdir);
+    ensureWorkdir(hostWorkdir);
 
     busy.add(body.sessionId);
     const gen: object = {};
@@ -101,10 +153,18 @@ export function createHandler(cfg: ExecutorConfig) {
     try {
       const timeoutMs = clampTimeout(body.timeoutMs, cfg.defaultTimeoutMs);
       const model = body.model?.trim() || cfg.defaultModel;
+      // Sandbox mode: pi's session files and cwd live INSIDE the sandbox
+      // (host /data is invisible there). The host workdir remains only as
+      // the CLI spawn cwd and the context-upload source.
+      const sandboxMode = cliRunner !== undefined;
+      const piSessionDir = sandboxMode
+        ? sandboxSessionDirForSession(body.sessionId)
+        : resolveSessionDir(cfg.sessionDir, body.sessionId);
+      const uploadFrom = sandboxMode ? hostWorkdir : undefined;
       if (mode === "rpc") {
-        return runRpcStream(body.sessionId, body.prompt, workdir, model, timeoutMs, gen);
+        return runRpcStream(body.sessionId, body.prompt, hostWorkdir, piSessionDir, uploadFrom, model, timeoutMs, gen);
       }
-      return runJsonStream(body.sessionId, body.prompt, workdir, model, timeoutMs, gen);
+      return runJsonStream(body.sessionId, body.prompt, hostWorkdir, piSessionDir, uploadFrom, model, timeoutMs, gen);
     } catch (e) {
       if (busyGen.get(body.sessionId) === gen) busyGen.delete(body.sessionId);
       busy.delete(body.sessionId);
@@ -112,7 +172,16 @@ export function createHandler(cfg: ExecutorConfig) {
     }
   }
 
-  function runJsonStream(sessionId: string, prompt: string, workdir: string, model: string, timeoutMs: number, gen: object): Response {
+  function runJsonStream(
+    sessionId: string,
+    prompt: string,
+    hostWorkdir: string,
+    piSessionDir: string,
+    uploadFrom: string | undefined,
+    model: string,
+    timeoutMs: number,
+    gen: object,
+  ): Response {
     // The consumer (gateway) may disconnect mid-run. Writing to a closed
     // controller throws, and an uncaught throw here used to take down the
     // whole executor process — taking every in-flight run with it.
@@ -167,14 +236,17 @@ export function createHandler(cfg: ExecutorConfig) {
               let firstError: string | null = null;
               const result = await runPiStreaming({
                 sessionId,
-                piSessionDir: resolveSessionDir(cfg.sessionDir, sessionId),
-                workdir,
+                piSessionDir,
+                workdir: hostWorkdir,
+                sandboxWorkdir: cliRunner ? SANDBOX_WORKDIR : undefined,
+                uploadFrom,
                 model,
                 prompt: attemptPrompt,
                 piBin: cfg.piBin,
                 openshellPrefix: cfg.openshellPrefix,
                 timeoutMs: budget,
-                sandboxRunner,
+                sandboxRunner: cliRunner,
+                reaper,
                 onEvent: (e) => {
                   if (e.type === "error" && firstError === null) firstError = e.message;
                   send(e);
@@ -235,7 +307,16 @@ export function createHandler(cfg: ExecutorConfig) {
     });
   }
 
-  function runRpcStream(sessionId: string, prompt: string, workdir: string, model: string, timeoutMs: number, gen: object): Response {
+  function runRpcStream(
+    sessionId: string,
+    prompt: string,
+    hostWorkdir: string,
+    piSessionDir: string,
+    uploadFrom: string | undefined,
+    model: string,
+    timeoutMs: number,
+    gen: object,
+  ): Response {
     let closed = false;
     const stream = new ReadableStream({
       async start(controller) {
@@ -282,8 +363,10 @@ export function createHandler(cfg: ExecutorConfig) {
               let firstError: string | null = null;
               const r = await rpc.run({
                 sessionId,
-                piSessionDir: resolveSessionDir(cfg.sessionDir, sessionId),
-                workdir,
+                piSessionDir,
+                workdir: hostWorkdir,
+                sandboxWorkdir: rpcRunner ? SANDBOX_WORKDIR : undefined,
+                uploadFrom,
                 model,
                 prompt: attemptPrompt,
                 timeoutMs: budget,
@@ -441,6 +524,11 @@ export function createHandler(cfg: ExecutorConfig) {
   function close(): void {
     try {
       rpc.close();
+    } catch {
+      // ignore during test teardown
+    }
+    try {
+      reaper?.close();
     } catch {
       // ignore during test teardown
     }

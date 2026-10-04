@@ -16,6 +16,7 @@
       "dependencies": {
         "@laun/policy": "workspace:*",
         "@laun/protocol": "workspace:*",
+        "@nvidia/openshell-sdk": "0.1.2",
       },
     },
     "apps/gateway": {
@@ -63,6 +64,12 @@
     },
   },
   "packages": {
+    "@bufbuild/protobuf": ["@bufbuild/protobuf@2.16.0", "", {}, "sha512-FWa0sPlqYGJgpTs6OxBRcL/AW4JT0OIO+W1ajerluoTVh8CV0B7XM1qsNCRgnkSCkRCgOICKHRQlY17jrsm0+Q=="],
+
+    "@connectrpc/connect": ["@connectrpc/connect@2.2.0", "", { "peerDependencies": { "@bufbuild/protobuf": "^2.7.0" } }, "sha512-M63OQ1ZFcPUm85CuewJ9G9CMV8LjzGR9935xOnXNQGSazAbwMb3x2W7vXBYM1zqrP7XFD8uxp/dUAhirclgwnQ=="],
+
+    "@connectrpc/connect-node": ["@connectrpc/connect-node@2.2.0", "", { "peerDependencies": { "@bufbuild/protobuf": "^2.7.0", "@connectrpc/connect": "2.2.0" } }, "sha512-E6uUO6e11WdynAuBjuN+0WpHjqxEM9BNDdfDIJHcn49Esg/WxSIbn2y1KFt9XL96IJi01qdBbvubcdpBz1X3Zw=="],
+
     "@grammyjs/types": ["@grammyjs/types@5.0.0", "", {}, "sha512-iq1Qrq1iPKkB8yAa0qSuIURMZOCuqTY5pWy5gHpCeL1oQ+GPadGhw/cDTVE8waJwuCzacUzuIjRv1sESvk7u7A=="],
 
     "@laun/acp": ["@laun/acp@workspace:packages/acp"],
@@ -70,6 +77,8 @@
     "@laun/policy": ["@laun/policy@workspace:packages/policy"],
 
     "@laun/protocol": ["@laun/protocol@workspace:packages/protocol"],
+
+    "@nvidia/openshell-sdk": ["@nvidia/openshell-sdk@0.1.2", "https://npm.pkg.github.com/download/@nvidia/openshell-sdk/0.1.2/2bef2b98c751484b2a8ad434915138f85d23cfba", { "dependencies": { "@bufbuild/protobuf": "^2.2.3", "@connectrpc/connect": "^2.0.0", "@connectrpc/connect-node": "^2.0.0" } }, "sha512-GtNh/xzuIydm8pnBJSB+Pvo9wQrGcvAdVMgQOjmx2asjXIAMQcdX5/17sd0GjFF0K0KHCTW2gqgwYvf6BCqWMQ=="],
 
     "@types/node": ["@types/node@22.20.5", "", { "dependencies": { "undici-types": "~6.21.0" } }, "sha512-U2+DNr+wSjpsTS/wZGYHq7GcwfuSmKiKvoPvK22zwTlRhU91yOniN4qRR5KhIjvif7ysw/dz/hKmfDH0Ris4aA=="],
 

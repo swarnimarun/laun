@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { AgentEvent } from "@laun/protocol";
-import { sandboxNameForSession, type SandboxRunner } from "./sandbox.js";
+import { sandboxNameForSession, type SandboxReaper, type SandboxRunner } from "./sandbox.js";
 
 /** Cap on forwarded tool output — protects gateway memory and Telegram limits. */
 export const MAX_TOOL_OUTPUT = 4000;
@@ -11,10 +11,20 @@ function truncate(s: string, max: number): string {
 
 export interface PiRunOptions {
   sessionId: string;
-  /** Absolute session dir for pi's own session files. */
+  /**
+   * Session dir for pi's own session files. In sandbox mode this points
+   * INSIDE the sandbox (host /data is invisible there); otherwise host-side.
+   */
   piSessionDir: string;
-  /** Absolute cwd the agent works in. */
+  /** Host cwd for the spawn (the CLI process cwd; SDK transport ignores it). */
   workdir: string;
+  /** In-sandbox cwd for the exec. Unset runs in the sandbox default. */
+  sandboxWorkdir?: string;
+  /**
+   * Host dir uploaded into the sandbox on create (repo/goal context).
+   * Skipped when unset or empty.
+   */
+  uploadFrom?: string;
   model: string;
   prompt: string;
   piBin: string;
@@ -24,10 +34,13 @@ export interface PiRunOptions {
   /** When aborted, the child is killed (used by POST /abort in json mode). */
   signal?: AbortSignal;
   /**
-   * When set, pi runs inside a per-session sandbox (created before spawn,
-   * removed when the child closes). Unset spawns directly.
+   * When set, pi runs inside a per-session sandbox (STARTED or created
+   * before spawn with context uploaded, STOPPED when the child closes so
+   * session files persist). Unset spawns directly.
    */
   sandboxRunner?: SandboxRunner;
+  /** Age reaper deleting long-idle sandboxes. Tracked on every acquire. */
+  reaper?: SandboxReaper;
 }
 
 export function buildPiArgs(o: { sessionId: string; piSessionDir: string; model: string; prompt: string }): string[] {
@@ -388,8 +401,20 @@ export interface PiRunResult {
 
 export async function runPiStreaming(opts: PiRunOptions): Promise<PiRunResult> {
   const sandboxName = opts.sandboxRunner ? sandboxNameForSession(opts.sessionId) : null;
-  // Best-effort sandbox delete: never throws (close/abort paths must not wedge).
-  const removeSandbox = (): void => {
+  // Best-effort sandbox stop (workspace preserved): never throws
+  // (close/abort paths must not wedge). Only the age reaper deletes.
+  const stopSandbox = (): void => {
+    if (!sandboxName || !opts.sandboxRunner) return;
+    try {
+      void opts.sandboxRunner.stop(sandboxName).catch(() => {
+        // stop() is best-effort by contract; this guards fakes too.
+      });
+    } catch {
+      // synchronous throws from a runner must never break the run.
+    }
+  };
+  // Best-effort sandbox delete: only for create-failure cleanup.
+  const deleteSandbox = (): void => {
     if (!sandboxName || !opts.sandboxRunner) return;
     try {
       void opts.sandboxRunner.remove(sandboxName).catch(() => {
@@ -400,13 +425,25 @@ export async function runPiStreaming(opts: PiRunOptions): Promise<PiRunResult> {
     }
   };
   if (sandboxName) {
-    // Fail loudly, never silently unsandboxed: a failed create is an error
-    // result with no child ever spawned.
+    // Sandbox-per-session lifecycle: START an existing sandbox (session
+    // files persisted across the idle stop), CREATE a missing one (with
+    // repo/goal context uploaded). Fail loudly, never silently
+    // unsandboxed: a failed acquire is an error result with no child
+    // ever spawned.
     try {
-      await opts.sandboxRunner!.create({ name: sandboxName });
+      if (await opts.sandboxRunner!.exists(sandboxName)) {
+        await opts.sandboxRunner!.start(sandboxName);
+      } else {
+        await opts.sandboxRunner!.create({ name: sandboxName, uploadFrom: opts.uploadFrom });
+      }
+      try {
+        opts.reaper?.track(sandboxName);
+      } catch {
+        // Tracking must never break a run.
+      }
     } catch (e) {
-      removeSandbox();
-      const message = `failed to create sandbox ${sandboxName}: ${(e as Error).message}`;
+      deleteSandbox();
+      const message = `failed to acquire sandbox ${sandboxName}: ${(e as Error).message}`;
       opts.onEvent({ type: "error", sessionId: opts.sessionId, message });
       return { exitCode: null, sawError: true, sawDone: false };
     }
@@ -447,17 +484,18 @@ export async function runPiStreaming(opts: PiRunOptions): Promise<PiRunResult> {
     // modulo stdin), so the cast above only recovers what the union widened.
     // Spawn through the sandbox. stdin is "ignore" (EOF immediately): the
     // one-shot child must never wait for EOF the way the rpc child does.
-    // A sync throw rejects the run (loud); the just-created sandbox is
-    // removed first so it cannot leak.
+    // A sync throw rejects the run (loud); the sandbox is stopped first
+    // (workspace preserved) so it cannot leak a running child.
     function spawnSandboxChild() {
       try {
         return opts.sandboxRunner!.spawnInteractive(sandboxName!, [opts.piBin, ...buildPiArgs(opts)], {
           cwd: opts.workdir,
           env: process.env,
           stdin: "ignore",
+          sandboxWorkdir: opts.sandboxWorkdir,
         });
       } catch (e) {
-        removeSandbox();
+        stopSandbox();
         throw e;
       }
     }
@@ -519,8 +557,9 @@ export async function runPiStreaming(opts: PiRunOptions): Promise<PiRunResult> {
           message: `agent exited with code ${code}${detail ? `: ${detail}` : ""}`,
         });
       }
-      // One-shot child is gone: its sandbox (if any) goes with it.
-      removeSandbox();
+      // One-shot child is gone: STOP its sandbox (workspace preserved for
+      // the next run's start). Only the age reaper deletes.
+      stopSandbox();
       finish({ exitCode: code });
     });
   });

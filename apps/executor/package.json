@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@laun/policy": "workspace:*",
-    "@laun/protocol": "workspace:*"
+    "@laun/protocol": "workspace:*",
+    "@nvidia/openshell-sdk": "0.1.2"
   }
 }

@@ -1,4 +1,5 @@
 import { DEFAULT_RECOVERY_ATTEMPTS, DEFAULT_RECOVERY_BACKOFF_MS, MAX_RECOVERY_ATTEMPTS, MAX_RECOVERY_BACKOFF_MS } from "./recovery.js";
+import { DEFAULT_SANDBOX_MAX_IDLE_MS } from "./sandbox.js";
 
 export type ExecutorMode = "json" | "rpc";
 
@@ -26,6 +27,26 @@ export interface ExecutorConfig {
   sandboxProviders?: string[];
   /** Approval mode for `sandbox create --approval-mode`. Empty omits the flag. */
   sandboxApprovalMode?: string;
+  /**
+   * OpenShell gateway URL for SDK transport (streaming rpc). Empty disables
+   * the SDK: rpc falls back to the CLI runner. Requires OPENSHELL_ENABLED.
+   */
+  sdkGateway?: string;
+  /** OIDC bearer for SDK auth. Empty omits it. Never log. */
+  sdkToken?: string;
+  /** PEM file paths for SDK mTLS to the gateway (must pair up). */
+  sdkClientCertFile?: string;
+  sdkClientKeyFile?: string;
+  /** PEM file path for a custom SDK CA. Empty uses system roots. */
+  sdkCaFile?: string;
+  /** Skip TLS verification for the SDK. Dev/debug only. */
+  sdkInsecure?: boolean;
+  /**
+   * Idle age after which a stopped sandbox is deleted by the age reaper.
+   * Defaults to 7d. There is no gateway session-delete API: time-based
+   * delete is the only delete (besides create-failure cleanup).
+   */
+  sandboxMaxIdleMs?: number;
   defaultTimeoutMs: number;
   /** json = one-shot `pi -p --mode json` per run (fallback). rpc = one long-lived `pi --mode rpc` child per session. Defaults to json. */
   executorMode?: ExecutorMode;
@@ -95,6 +116,36 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ExecutorConfig
   if (!Number.isFinite(recoveryBackoffMs) || recoveryBackoffMs < 0 || recoveryBackoffMs > MAX_RECOVERY_BACKOFF_MS) {
     throw new Error(`RUN_RECOVERY_BACKOFF_MS must be 0-${MAX_RECOVERY_BACKOFF_MS}`);
   }
+  // SDK transport selection: rpc uses the SDK only when a gateway endpoint
+  // is configured (fail closed on bad URLs and on SDK-without-sandbox-mode).
+  const sdkGateway = (env["OPENSHELL_SDK_GATEWAY"] ?? "").trim();
+  if (sdkGateway) {
+    let protocol: string;
+    try {
+      protocol = new URL(sdkGateway).protocol;
+    } catch {
+      throw new Error("OPENSHELL_SDK_GATEWAY must be a valid URL");
+    }
+    if (protocol !== "http:" && protocol !== "https:") {
+      throw new Error("OPENSHELL_SDK_GATEWAY must be an http(s) URL");
+    }
+    if (!openshellEnabled) {
+      throw new Error("OPENSHELL_SDK_GATEWAY is set but OPENSHELL_ENABLED is not true (fail closed).");
+    }
+  }
+  const sdkToken = (env["OPENSHELL_SDK_TOKEN"] ?? "").trim();
+  const sdkClientCertFile = (env["OPENSHELL_SDK_CLIENT_CERT_FILE"] ?? "").trim();
+  const sdkClientKeyFile = (env["OPENSHELL_SDK_CLIENT_KEY_FILE"] ?? "").trim();
+  if (!!sdkClientCertFile !== !!sdkClientKeyFile) {
+    throw new Error("OPENSHELL_SDK_CLIENT_CERT_FILE and OPENSHELL_SDK_CLIENT_KEY_FILE must be set together");
+  }
+  const sdkCaFile = (env["OPENSHELL_SDK_CA_FILE"] ?? "").trim();
+  const sdkInsecure = (env["OPENSHELL_SDK_INSECURE"] ?? "false").toLowerCase() === "true";
+  const sandboxMaxIdleMsRaw = (env["OPENSHELL_SANDBOX_MAX_IDLE_MS"] ?? "").trim();
+  const sandboxMaxIdleMs = sandboxMaxIdleMsRaw === "" ? DEFAULT_SANDBOX_MAX_IDLE_MS : Number(sandboxMaxIdleMsRaw);
+  if (!Number.isFinite(sandboxMaxIdleMs) || sandboxMaxIdleMs < 1000) {
+    throw new Error("OPENSHELL_SANDBOX_MAX_IDLE_MS must be >= 1000");
+  }
   return {
     port,
     gatewayToken,
@@ -113,5 +164,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ExecutorConfig
     rpcIdleTtlMs,
     recoveryAttempts,
     recoveryBackoffMs: Math.floor(recoveryBackoffMs),
+    sdkGateway,
+    sdkToken,
+    sdkClientCertFile,
+    sdkClientKeyFile,
+    sdkCaFile,
+    sdkInsecure,
+    sandboxMaxIdleMs,
   };
 }

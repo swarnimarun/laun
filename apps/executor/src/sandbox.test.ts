@@ -40,9 +40,11 @@ async function pollFor(cond: () => boolean, what: string, timeoutMs = 5000): Pro
 
 /**
  * Stub of the openshell CLI surface this lane uses. `sandbox exec` parses
- * exactly our shaping (`-n <name> -- <argv...>`, nothing else) and execs the
- * target so stdio pipes flow through, holding them open like the real CLI.
- * `sandbox create` logs and exits ${LAUN_SANDBOX_CREATE_EXIT:-0}; `delete` logs.
+ * exactly our shaping (`-n <name> [--workdir <dir>] -- <argv...>`) and execs
+ * the target so stdio pipes flow through, holding them open like the real
+ * CLI. `sandbox create` logs and exits ${LAUN_SANDBOX_CREATE_EXIT:-0};
+ * `delete`/`stop`/`start`/`upload` log and exit 0; `get` exits 0 iff the name
+ * is listed in ${LAUN_SANDBOX_EXISTING} (space-separated exists probe).
  */
 function writeOpenshellStub(dir: string): string {
   const p = join(dir, "openshell-stub.sh");
@@ -57,10 +59,30 @@ function writeOpenshellStub(dir: string): string {
       '  echo "$*" >> "${LAUN_SANDBOX_DELETE_LOG:-/dev/null}"\n' +
       "  exit 0\n" +
       "fi\n" +
+      'if [ "$1" = "sandbox" ] && [ "$2" = "stop" ]; then\n' +
+      '  echo "$*" >> "${LAUN_SANDBOX_STOP_LOG:-/dev/null}"\n' +
+      "  exit 0\n" +
+      "fi\n" +
+      'if [ "$1" = "sandbox" ] && [ "$2" = "start" ]; then\n' +
+      '  echo "$*" >> "${LAUN_SANDBOX_START_LOG:-/dev/null}"\n' +
+      "  exit 0\n" +
+      "fi\n" +
+      'if [ "$1" = "sandbox" ] && [ "$2" = "get" ]; then\n' +
+      '  echo "$*" >> "${LAUN_SANDBOX_GET_LOG:-/dev/null}"\n' +
+      '  case " ${LAUN_SANDBOX_EXISTING:-} " in\n' +
+      '    *" $3 "*) exit 0;;\n' +
+      "  esac\n" +
+      "  exit 1\n" +
+      "fi\n" +
+      'if [ "$1" = "sandbox" ] && [ "$2" = "upload" ]; then\n' +
+      '  echo "$*" >> "${LAUN_SANDBOX_UPLOAD_LOG:-/dev/null}"\n' +
+      "  exit 0\n" +
+      "fi\n" +
       'if [ "$1" = "sandbox" ] && [ "$2" = "exec" ]; then\n' +
       '  echo "$*" >> "${LAUN_SANDBOX_EXEC_LOG:-/dev/null}"\n' +
       "  shift 2\n" +
       '  if [ "$1" = "-n" ] || [ "$1" = "--name" ]; then shift 2; fi\n' +
+      '  while [ "$1" = "--workdir" ]; do shift 2; done\n' +
       '  if [ "$1" = "--" ]; then shift; fi\n' +
       '  case "$1" in -*) echo "stub-openshell: unexpected flag $1" >&2; exit 99;; esac\n' +
       '  exec "$@"\n' +
@@ -77,6 +99,10 @@ class FakeRunner implements SandboxRunner {
   creates: string[] = [];
   spawns: Array<{ name: string; argv: string[]; stdin: string }> = [];
   removes: string[] = [];
+  stops: string[] = [];
+  starts: string[] = [];
+  /** Sandboxes that exist without a recorded create (pre-stopped). */
+  preexisting = new Set<string>();
   failCreate: Error | null = null;
 
   async create(opts: { name: string }): Promise<void> {
@@ -93,6 +119,19 @@ class FakeRunner implements SandboxRunner {
 
   async remove(sandboxName: string): Promise<void> {
     this.removes.push(sandboxName);
+  }
+
+  async stop(sandboxName: string): Promise<void> {
+    this.stops.push(sandboxName);
+  }
+
+  async start(sandboxName: string): Promise<void> {
+    this.starts.push(sandboxName);
+  }
+
+  async exists(sandboxName: string): Promise<boolean> {
+    if (this.removes.includes(sandboxName)) return false;
+    return this.preexisting.has(sandboxName) || this.creates.includes(sandboxName);
   }
 }
 
@@ -403,7 +442,7 @@ describe("rpc through the runner (fake)", () => {
     }
   });
 
-  test("sandbox is removed on idle reap", async () => {
+  test("sandbox is stopped (not deleted) on idle reap", async () => {
     const dir = mkdtempSync(join(tmpdir(), "laun-sbx-reap-"));
     const fake = new FakeRunner();
     const mgr = new RpcManager({ piBin: basicRpcStub(dir), openshellPrefix: [], idleTtlMs: 150, sandboxRunner: fake });
@@ -418,8 +457,10 @@ describe("rpc through the runner (fake)", () => {
         onEvent: () => {},
       });
       expect(r.sawDone).toBe(true);
-      await pollFor(() => fake.removes.includes("laun-s1"), "sandbox removal on idle reap");
+      await pollFor(() => fake.stops.includes("laun-s1"), "sandbox stop on idle reap");
       expect(mgr.has("s1")).toBe(false);
+      // Workspace-preserving stop: never a delete on the reap path.
+      expect(fake.removes).toEqual([]);
     } finally {
       mgr.close();
     }
@@ -455,8 +496,9 @@ describe("rpc through the runner (fake)", () => {
       });
       expect(r.timedOut).toBe(true);
       expect(fake.creates).toEqual(["laun-s1"]);
-      await pollFor(() => fake.removes.includes("laun-s1"), "sandbox removal on timeout kill", 20_000);
+      await pollFor(() => fake.stops.includes("laun-s1"), "sandbox stop on timeout kill", 20_000);
       expect(mgr.has("s1")).toBe(false);
+      expect(fake.removes).toEqual([]);
     } finally {
       mgr.close();
     }
@@ -489,7 +531,7 @@ describe("json through the runner (fake)", () => {
     timeoutMs: 10_000,
   };
 
-  test("enabled runs one-shot inside the sandbox and removes it after", async () => {
+  test("enabled runs one-shot inside the sandbox and stops it after", async () => {
     const dir = mkdtempSync(join(tmpdir(), "laun-sbx-json-"));
     const stub = oneShotJsonStub(dir);
     const fake = new FakeRunner();
@@ -502,7 +544,8 @@ describe("json through the runner (fake)", () => {
     expect(fake.spawns[0]!.name).toBe("laun-s1");
     expect(fake.spawns[0]!.argv).toEqual([stub, ...buildPiArgs({ sessionId: "s1", piSessionDir: dir, model: "m", prompt: "hi" })]);
     expect(fake.spawns[0]!.stdin).toBe("ignore");
-    await pollFor(() => fake.removes.includes("laun-s1"), "sandbox removal after one-shot");
+    await pollFor(() => fake.stops.includes("laun-s1"), "sandbox stop after one-shot");
+    expect(fake.removes).toEqual([]);
   });
 
   test("create failure emits a loud error and never spawns unsandboxed", async () => {
@@ -521,17 +564,19 @@ describe("json through the runner (fake)", () => {
     expect(r.sawError).toBe(true);
     expect(r.sawDone).toBe(false);
     expect(r.exitCode).toBeNull();
-    expect(events.some((e) => e.type === "error" && (e as { message: string }).message.includes("failed to create sandbox"))).toBe(true);
+    // Acquire (exists/start/create) fails loudly and never spawns unsandboxed.
+    expect(events.some((e) => e.type === "error" && (e as { message: string }).message.includes("failed to acquire sandbox laun-s1"))).toBe(true);
     expect(fake.spawns).toHaveLength(0);
   });
 });
 
 describe("server wiring: enabled runs the agent inside a sandbox", () => {
-  test("POST /run creates, execs through, and deletes the sandbox", async () => {
+  test("POST /run creates, execs through, and stops the sandbox", async () => {
     const dir = mkdtempSync(join(tmpdir(), "laun-sbx-server-"));
-    for (const f of ["create.log", "exec.log", "delete.log"]) writeFileSync(join(dir, f), "");
+    for (const f of ["create.log", "exec.log", "stop.log", "delete.log"]) writeFileSync(join(dir, f), "");
     process.env["LAUN_SANDBOX_CREATE_LOG"] = join(dir, "create.log");
     process.env["LAUN_SANDBOX_EXEC_LOG"] = join(dir, "exec.log");
+    process.env["LAUN_SANDBOX_STOP_LOG"] = join(dir, "stop.log");
     process.env["LAUN_SANDBOX_DELETE_LOG"] = join(dir, "delete.log");
     const openshellStub = writeOpenshellStub(dir);
     const piStub = oneShotJsonStub(dir);
@@ -569,12 +614,19 @@ describe("server wiring: enabled runs the agent inside a sandbox", () => {
       const execed = readFileSync(join(dir, "exec.log"), "utf8");
       expect(execed).toContain("-n laun-ssbx");
       expect(execed).toContain(piStub);
-      // One-shot child closed: its sandbox was deleted.
-      await pollFor(() => readFileSync(join(dir, "delete.log"), "utf8").includes("laun-ssbx"), "sandbox deletion after run");
+      // In-sandbox paths: the agent works in /workspace with session files
+      // under it (host /data is invisible inside the sandbox).
+      expect(execed).toContain("--workdir /workspace");
+      expect(execed).toContain("--session-dir /workspace/.laun-sessions/ssbx");
+      // One-shot child closed: its sandbox was STOPPED (workspace preserved),
+      // never deleted (only the age reaper deletes).
+      await pollFor(() => readFileSync(join(dir, "stop.log"), "utf8").includes("laun-ssbx"), "sandbox stop after run");
+      expect(readFileSync(join(dir, "delete.log"), "utf8")).not.toContain("laun-ssbx");
       expect(handler.busy.size).toBe(0);
     } finally {
       delete process.env["LAUN_SANDBOX_CREATE_LOG"];
       delete process.env["LAUN_SANDBOX_EXEC_LOG"];
+      delete process.env["LAUN_SANDBOX_STOP_LOG"];
       delete process.env["LAUN_SANDBOX_DELETE_LOG"];
       handler.close();
     }

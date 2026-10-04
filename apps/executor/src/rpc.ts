@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { AgentEvent } from "@laun/protocol";
 import { handlePiLine, ThinkingCoalescer, parsePiJsonLine } from "./pi.js";
-import { sandboxNameForSession, type SandboxRunner } from "./sandbox.js";
+import { SANDBOX_WORKDIR, sandboxNameForSession, type SandboxReaper, type SandboxRunner } from "./sandbox.js";
 
 export function buildRpcArgs(o: { sessionId: string; piSessionDir: string; model: string }): string[] {
   return ["--mode", "rpc", "--session-id", o.sessionId, "--session-dir", o.piSessionDir, "--model", o.model];
@@ -10,10 +10,20 @@ export function buildRpcArgs(o: { sessionId: string; piSessionDir: string; model
 
 export interface RpcRunOptions {
   sessionId: string;
-  /** Absolute session dir for pi's own session files. */
+  /**
+   * Session dir for pi's own session files. In sandbox mode this points
+   * INSIDE the sandbox (host /data is invisible there); otherwise host-side.
+   */
   piSessionDir: string;
-  /** Absolute cwd the agent works in. */
+  /** Host cwd for the spawn (the CLI process cwd; SDK transport ignores it). */
   workdir: string;
+  /** In-sandbox cwd for the exec. Unset runs in the sandbox default. */
+  sandboxWorkdir?: string;
+  /**
+   * Host dir uploaded into the sandbox on create (repo/goal context).
+   * Skipped when unset or empty.
+   */
+  uploadFrom?: string;
   model: string;
   prompt: string;
   timeoutMs: number;
@@ -90,9 +100,15 @@ export interface RpcManagerOptions {
   idleTtlMs: number;
   /**
    * When set, pi spawns inside a per-session sandbox (created on first run,
-   * removed when the child dies or is reaped). Unset spawns directly.
+   * STOPPED (workspace preserved) when the child dies or is reaped, STARTED
+   * on the next run, DELETED only by the age reaper). Unset spawns directly.
    */
   sandboxRunner?: SandboxRunner;
+  /**
+   * Age reaper deleting long-idle sandboxes. Tracked on every run; sweep
+   * via `reaper.sweep()` (background interval when constructed with one).
+   */
+  reaper?: SandboxReaper;
 }
 
 /**
@@ -128,7 +144,15 @@ export class RpcManager {
   }
 
   async run(o: RpcRunOptions): Promise<RpcRunResult> {
-    let session = await this.ensureSession(o.sessionId, o.piSessionDir, o.workdir, o.model);
+    if (this.opts.sandboxRunner) {
+      // Activity for the age reaper: every run keeps the sandbox alive.
+      try {
+        this.opts.reaper?.track(sandboxNameForSession(o.sessionId));
+      } catch {
+        // Tracking must never break a run.
+      }
+    }
+    let session = await this.ensureSession(o.sessionId, o.piSessionDir, o.workdir, o.model, o.sandboxWorkdir, o.uploadFrom);
     if (session.currentRun) {
       throw new Error("session already running");
     }
@@ -140,7 +164,7 @@ export class RpcManager {
       await this.waitForSettled(session, SETTLE_WAIT_MS);
       const fresh = this.sessions.get(o.sessionId);
       if (!fresh || fresh.exited || fresh.child.exitCode !== null) {
-        session = await this.ensureSession(o.sessionId, o.piSessionDir, o.workdir, o.model);
+        session = await this.ensureSession(o.sessionId, o.piSessionDir, o.workdir, o.model, o.sandboxWorkdir, o.uploadFrom);
       } else {
         session = fresh;
       }
@@ -349,8 +373,10 @@ export class RpcManager {
         clearTimeout(session.idleTimer);
         session.idleTimer = null;
       }
-      // Sandbox lifetime == child lifetime: teardown removes it too.
-      this.removeSandbox(session.sandboxName);
+      // Teardown stops the sandbox (workspace preserved for the next run);
+      // only the age reaper deletes. The kill below triggers the 'close'
+      // handler, which stops again idempotently.
+      this.stopSandbox(session.sandboxName);
       for (const [, resolve] of session.pendingState) resolve(null);
       session.pendingState.clear();
       this.clearSettling(session);
@@ -364,7 +390,14 @@ export class RpcManager {
     }
   }
 
-  private async ensureSession(sessionId: string, piSessionDir: string, workdir: string, model: string): Promise<SessionState> {
+  private async ensureSession(
+    sessionId: string,
+    piSessionDir: string,
+    workdir: string,
+    model: string,
+    sandboxWorkdir?: string,
+    uploadFrom?: string,
+  ): Promise<SessionState> {
     const existing = this.sessions.get(sessionId);
     if (existing && !existing.exited) {
       if (existing.child.exitCode !== null) {
@@ -383,11 +416,23 @@ export class RpcManager {
     } else if (existing) {
       this.sessions.delete(sessionId);
     }
-    return this.spawnSession(sessionId, piSessionDir, workdir, model);
+    return this.spawnSession(sessionId, piSessionDir, workdir, model, sandboxWorkdir, uploadFrom);
   }
 
-  /** Best-effort sandbox delete: never throws, safe on reap/teardown paths. */
-  private removeSandbox(sandboxName: string | null): void {
+  /** Best-effort sandbox stop (workspace preserved): never throws, safe on reap/teardown paths. */
+  private stopSandbox(sandboxName: string | null): void {
+    if (!sandboxName || !this.opts.sandboxRunner) return;
+    try {
+      void this.opts.sandboxRunner.stop(sandboxName).catch(() => {
+        // stop() is best-effort by contract; this guards fakes too.
+      });
+    } catch {
+      // synchronous throws from a runner must never wedge run slots.
+    }
+  }
+
+  /** Best-effort sandbox delete: only for create-failure cleanup (half-made sandboxes). */
+  private deleteSandbox(sandboxName: string | null): void {
     if (!sandboxName || !this.opts.sandboxRunner) return;
     try {
       void this.opts.sandboxRunner.remove(sandboxName).catch(() => {
@@ -398,23 +443,40 @@ export class RpcManager {
     }
   }
 
-  private async spawnSession(sessionId: string, piSessionDir: string, workdir: string, model: string): Promise<SessionState> {
+  private async spawnSession(
+    sessionId: string,
+    piSessionDir: string,
+    workdir: string,
+    model: string,
+    sandboxWorkdir?: string,
+    uploadFrom?: string,
+  ): Promise<SessionState> {
     const sandboxName = this.opts.sandboxRunner ? sandboxNameForSession(sessionId) : null;
     if (sandboxName) {
-      // Fail loudly, never silently unsandboxed: a failed create rejects
-      // the run before any child exists. Best-effort cleanup first so a
-      // half-made sandbox does not leak.
+      // Sandbox-per-session lifecycle: an existing sandbox is STARTED
+      // (workspace persisted across the idle stop); only a missing one is
+      // created (with repo/goal context uploaded). Fail loudly, never
+      // silently unsandboxed: create errors reject the run before any child
+      // exists. Best-effort delete first so a half-made sandbox does not leak.
       try {
-        await this.opts.sandboxRunner!.create({ name: sandboxName });
+        if (await this.opts.sandboxRunner!.exists(sandboxName)) {
+          await this.opts.sandboxRunner!.start(sandboxName);
+        } else {
+          await this.opts.sandboxRunner!.create({ name: sandboxName, uploadFrom });
+        }
       } catch (e) {
-        this.removeSandbox(sandboxName);
+        this.deleteSandbox(sandboxName);
         throw e;
       }
     }
     const piArgv = [this.opts.piBin, ...buildRpcArgs({ sessionId, piSessionDir, model })];
     let child: ChildProcess;
     if (sandboxName) {
-      child = this.opts.sandboxRunner!.spawnInteractive(sandboxName, piArgv, { cwd: workdir, env: process.env });
+      child = this.opts.sandboxRunner!.spawnInteractive(sandboxName, piArgv, {
+        cwd: workdir,
+        env: process.env,
+        sandboxWorkdir: sandboxWorkdir ?? SANDBOX_WORKDIR,
+      });
     } else {
       const argv = [...this.opts.openshellPrefix, ...piArgv];
       const [cmd, ...args] = argv;
@@ -461,8 +523,9 @@ export class RpcManager {
       for (const [, resolve] of session.pendingState) resolve(null);
       session.pendingState.clear();
       this.sessions.delete(sessionId);
-      // The child never started: its sandbox (if any) must not leak.
-      this.removeSandbox(session.sandboxName);
+      // The child never started: stop its sandbox (workspace preserved);
+      // a half-made sandbox from a failed create is deleted by the caller.
+      this.stopSandbox(session.sandboxName);
     });
     child.on("close", (code) => {
       if (session.exited && !session.currentRun && !this.sessions.has(sessionId)) return;
@@ -495,9 +558,11 @@ export class RpcManager {
         this.finishRun(session, { aborted: false, timedOut: false });
       }
       this.sessions.delete(sessionId);
-      // Sandbox lifetime == child lifetime: the child is gone, remove it.
+      // Sandbox lifetime == child lifetime, but STOP (not delete): the
+      // workspace (session files) persists for the next run's start.
       // Covers crashes, idle reap kills, and settle-grace kills alike.
-      this.removeSandbox(session.sandboxName);
+      // Deletion is the age reaper's job only.
+      this.stopSandbox(session.sandboxName);
     });
     // Enable self-healing retries; fire-and-forget (no id, no response).
     this.writeJson(session, { type: "set_auto_retry", enabled: true });
@@ -673,7 +738,8 @@ export class RpcManager {
     if (session.streaming || session.currentRun) return; // never reap a live run
     if (session.child.exitCode !== null) {
       this.sessions.delete(sessionId);
-      this.removeSandbox(session.sandboxName);
+      // Already-exited child: stop (workspace preserved), never delete here.
+      this.stopSandbox(session.sandboxName);
       return;
     }
     // Guard against double-kill: mark first, signal once.
