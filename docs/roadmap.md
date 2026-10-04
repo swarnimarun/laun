@@ -45,6 +45,17 @@ doing the real job · *unverified* = built but never proven in the real world ·
   chunk coalescing, cancel, tolerant permission mapping — verified live
   against goose 1.53.0, stub-tested otherwise. Executor wiring is the next
   lane, not this one.
+- Model via OpenShell provider, LIVE on the box: `opencode-go` custom profile
+  (Bearer, endpoint-locked to opencode.ai/zen/go) + `laun-model` provider
+  backed by pi's own key (same model, no new account). Proven: full
+  inference inside a sandbox answered OK, env holds a placeholder (sha256
+  differs from the raw key), policy denials still enforced, no pending
+  rules. Key never printed, never committed, never crossed the network.
+- SDK transport + sandbox-per-session lifecycle in the executor (stop/start,
+  max-age reaper, workdir mapping): unit-proven, NOT yet enabled on the box.
+  Enablement needs: provider live (done above) + SDK→gateway reachability
+  from inside the executor container (open: host loopback is unreachable
+  there) + one full executor-driven sandboxed session.
 
 ---
 
