@@ -1,5 +1,6 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import type { AgentEvent } from "@cloudbear/protocol";
+import { sandboxNameForSession, type SandboxRunner } from "./sandbox.js";
 
 /** Cap on forwarded tool output — protects gateway memory and Telegram limits. */
 export const MAX_TOOL_OUTPUT = 4000;
@@ -22,6 +23,11 @@ export interface PiRunOptions {
   onEvent: (e: AgentEvent) => void;
   /** When aborted, the child is killed (used by POST /abort in json mode). */
   signal?: AbortSignal;
+  /**
+   * When set, pi runs inside a per-session sandbox (created before spawn,
+   * removed when the child closes). Unset spawns directly.
+   */
+  sandboxRunner?: SandboxRunner;
 }
 
 export function buildPiArgs(o: { sessionId: string; piSessionDir: string; model: string; prompt: string }): string[] {
@@ -381,6 +387,30 @@ export interface PiRunResult {
 }
 
 export async function runPiStreaming(opts: PiRunOptions): Promise<PiRunResult> {
+  const sandboxName = opts.sandboxRunner ? sandboxNameForSession(opts.sessionId) : null;
+  // Best-effort sandbox delete: never throws (close/abort paths must not wedge).
+  const removeSandbox = (): void => {
+    if (!sandboxName || !opts.sandboxRunner) return;
+    try {
+      void opts.sandboxRunner.remove(sandboxName).catch(() => {
+        // remove() is best-effort by contract; this guards fakes too.
+      });
+    } catch {
+      // synchronous throws from a runner must never break the run.
+    }
+  };
+  if (sandboxName) {
+    // Fail loudly, never silently unsandboxed: a failed create is an error
+    // result with no child ever spawned.
+    try {
+      await opts.sandboxRunner!.create({ name: sandboxName });
+    } catch (e) {
+      removeSandbox();
+      const message = `failed to create sandbox ${sandboxName}: ${(e as Error).message}`;
+      opts.onEvent({ type: "error", sessionId: opts.sessionId, message });
+      return { exitCode: null, sawError: true, sawDone: false };
+    }
+  }
   const argv = [...opts.openshellPrefix, opts.piBin, ...buildPiArgs(opts)];
   const [cmd, ...args] = argv;
   return new Promise((resolve) => {
@@ -403,14 +433,34 @@ export async function runPiStreaming(opts: PiRunOptions): Promise<PiRunResult> {
       }
       resolve({ ...r, sawError, sawDone });
     };
-    const child = spawn(cmd!, args, {
-      cwd: opts.workdir,
-      env: process.env,
-      // stdin MUST be /dev/null: spawn defaults it to an open pipe nobody ever
-      // closes, and pi waits for EOF on a piped stdin — so every run hung forever
-      // with no output. Confirmed against pi 1.0.2 in the executor image.
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = (sandboxName
+      ? spawnSandboxChild()
+      : spawn(cmd!, args, {
+          cwd: opts.workdir,
+          env: process.env,
+          // stdin MUST be /dev/null: spawn defaults it to an open pipe nobody ever
+          // closes, and pi waits for EOF on a piped stdin — so every run hung forever
+          // with no output. Confirmed against pi 1.0.2 in the executor image.
+          stdio: ["ignore", "pipe", "pipe"],
+        })) as ChildProcess & { stdout: NonNullable<ChildProcess["stdout"]>; stderr: NonNullable<ChildProcess["stderr"]> };
+    // Both branches guarantee piped stdout/stderr (the runner uses pipe x 3
+    // modulo stdin), so the cast above only recovers what the union widened.
+    // Spawn through the sandbox. stdin is "ignore" (EOF immediately): the
+    // one-shot child must never wait for EOF the way the rpc child does.
+    // A sync throw rejects the run (loud); the just-created sandbox is
+    // removed first so it cannot leak.
+    function spawnSandboxChild() {
+      try {
+        return opts.sandboxRunner!.spawnInteractive(sandboxName!, [opts.piBin, ...buildPiArgs(opts)], {
+          cwd: opts.workdir,
+          env: process.env,
+          stdin: "ignore",
+        });
+      } catch (e) {
+        removeSandbox();
+        throw e;
+      }
+    }
     const thinking = new ThinkingCoalescer(opts.sessionId);
     const flushThinking = () => {
       const rest = thinking.flush();
@@ -469,6 +519,8 @@ export async function runPiStreaming(opts: PiRunOptions): Promise<PiRunResult> {
           message: `agent exited with code ${code}${detail ? `: ${detail}` : ""}`,
         });
       }
+      // One-shot child is gone: its sandbox (if any) goes with it.
+      removeSandbox();
       finish({ exitCode: code });
     });
   });
