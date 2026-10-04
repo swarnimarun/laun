@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent } from "@cloudbear/protocol";
@@ -2239,6 +2239,234 @@ describe("thinking end to end (lane-exec-think, stub binaries)", () => {
       expect(idxThink).toBeLessThan(idxAbort);
     } finally {
       mgr.close();
+    }
+  });
+});
+
+describe("lane-exec-wedge: wedged-slot release (reproduce-first)", () => {
+  function isDead(pid: number | undefined): boolean {
+    if (pid === undefined) return true;
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
+  test("wedged rpc child that ignores abort is SIGKILLed and next run uses a fresh child", async () => {
+    // Reproduce-first probe: stub answers get_state but ignores prompt/abort
+    // and never emits agent_settled. First generation (spawn 1) wedges;
+    // a respawned child (spawn >= 2) succeeds. Without the fix the first
+    // child stays alive, settling stays true, and the second run reuses the
+    // wedged pid and times out again.
+    const dir = mkdtempSync(join(tmpdir(), "cb-wedge-kill-"));
+    const log = join(dir, "spawns.log");
+    writeFileSync(log, "");
+    const stub = writeRpcStub(
+      dir,
+      "wedged.sh",
+      "#!/bin/sh\n" +
+        'LOG="${RPC_SPAWN_LOG:-/dev/null}"\n' +
+        'echo spawn >> "$LOG"\n' +
+        'COUNT=$(wc -l < "$LOG" | tr -d " ")\n' +
+        'while IFS= read -r line; do\n' +
+        '  case "$line" in\n' +
+        "    *set_auto_retry*) ;;\n" +
+        '    *get_state*) echo \'{"type":"state","isStreaming":false}\' ;;\n' +
+        '    *prompt*)\n' +
+        '      if [ "$COUNT" -ge 2 ]; then\n' +
+        '        echo \'{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"fresh-ok"}}\'\n' +
+        '        echo \'{"type":"agent_settled"}\'\n' +
+        "      fi\n" +
+        "      ;;\n" +
+        '    *abort*) ;;\n' +
+        "  esac\n" +
+        "done\n",
+    );
+    const mgr = new RpcManager({ piBin: stub, openshellPrefix: [], idleTtlMs: 300_000 });
+    process.env["RPC_SPAWN_LOG"] = log;
+    try {
+      const r1 = await mgr.run({
+        sessionId: "wedge1",
+        piSessionDir: dir,
+        workdir: dir,
+        model: "m",
+        prompt: "first",
+        timeoutMs: 800,
+        onEvent: () => {},
+      });
+      expect(r1.timedOut).toBe(true);
+      const pid1 = mgr.pidOf("wedge1");
+      expect(pid1).toBeDefined();
+      // Bounded grace (reuses the settle-wait shape, 5s): the wedged child
+      // must die without any second run arriving. Poll, never sleep fixed.
+      await pollFor(() => isDead(pid1), "wedged child SIGKILLed after grace");
+      expect(isDead(pid1)).toBe(true);
+      // Next run starts cleanly on a fresh child and sees its own output.
+      const events: AgentEvent[] = [];
+      const r2 = await mgr.run({
+        sessionId: "wedge1",
+        piSessionDir: dir,
+        workdir: dir,
+        model: "m",
+        prompt: "second",
+        timeoutMs: 10_000,
+        onEvent: (e) => events.push(e),
+      });
+      expect(r2.sawDone).toBe(true);
+      expect(r2.sawError).toBe(false);
+      expect(events.some((e) => e.type === "text" && (e as { delta: string }).delta === "fresh-ok")).toBe(true);
+      const pid2 = mgr.pidOf("wedge1");
+      expect(pid2).toBeDefined();
+      expect(pid2).not.toBe(pid1);
+    } finally {
+      delete process.env["RPC_SPAWN_LOG"];
+      mgr.close();
+    }
+  }, 30_000);
+
+  test("an aborted json run never clobbers the next run's slot (generation guard)", async () => {
+    // Slow stub: the SIGKILLed shell leaves its `sleep` orphan holding the
+    // stdout pipe, so the aborted run's close (and its finally) is delayed
+    // ~2s while the next run is already in flight. Without a generation
+    // guard the old finally deletes the new run's busy entry, so a third
+    // concurrent run wrongly succeeds (200) instead of 409.
+    const dir = mkdtempSync(join(tmpdir(), "cb-wedge-clobber-"));
+    const started = join(dir, "started");
+    const stub = join(dir, "slow.sh");
+    writeFileSync(
+      stub,
+      "#!/bin/sh\n" +
+        `touch "${started}"\n` +
+        "echo '{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"working\"}}'\n" +
+        "sleep 2\n" +
+        "echo '{\"type\":\"agent_settled\"}'\n",
+    );
+    chmodSync(stub, 0o755);
+    const handler = createHandler({
+      port: 0,
+      gatewayToken: "t",
+      sessionDir: dir,
+      piBin: stub,
+      defaultModel: "m",
+      openshellEnabled: false,
+      openshellPrefix: [],
+      defaultTimeoutMs: 30_000,
+      recoveryAttempts: 0,
+      recoveryBackoffMs: 50,
+    } as Parameters<typeof createHandler>[0]);
+    try {
+      const res = await handler.handleRun(
+        new Request("http://x/run", {
+          method: "POST",
+          headers: { authorization: "Bearer t", "content-type": "application/json" },
+          body: JSON.stringify({ sessionId: "sclob", prompt: "first" }),
+        }),
+      );
+      expect(res.status).toBe(200);
+      const textP = res.text();
+      await pollFor(() => existsSync(started), "slow stub startup");
+      const abortRes = await handler.handleAbort(
+        new Request("http://x/abort", {
+          method: "POST",
+          headers: { authorization: "Bearer t", "content-type": "application/json" },
+          body: JSON.stringify({ sessionId: "sclob" }),
+        }),
+      );
+      expect(abortRes.status).toBe(200);
+      // Immediate second run starts while the aborted run's close is still
+      // delayed by the orphaned sleep holding the pipe.
+      try {
+        unlinkSync(started);
+      } catch {
+        // already gone
+      }
+      const res2 = await handler.handleRun(
+        new Request("http://x/run", {
+          method: "POST",
+          headers: { authorization: "Bearer t", "content-type": "application/json" },
+          body: JSON.stringify({ sessionId: "sclob", prompt: "SECOND" }),
+        }),
+      );
+      expect(res2.status).toBe(200);
+      const text2P = res2.text();
+      // Wait for the aborted first stream to finish closing (its finally
+      // races here, after the second run already owns the slot).
+      await textP;
+      // While the second run is still in flight, a third run must 409.
+      const res3 = await handler.handleRun(
+        new Request("http://x/run", {
+          method: "POST",
+          headers: { authorization: "Bearer t", "content-type": "application/json" },
+          body: JSON.stringify({ sessionId: "sclob", prompt: "third" }),
+        }),
+      );
+      expect(res3.status).toBe(409);
+      const events2 = (await text2P).trim().split("\n").map((l) => JSON.parse(l) as AgentEvent);
+      expect(events2.some((e) => e.type === "status" && e.status === "done")).toBe(true);
+      expect(handler.busy.size).toBe(0);
+    } finally {
+      handler.close();
+    }
+  }, 30_000);
+
+  test("handleAbort on a busy-but-settled desync frees busy", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-wedge-desync-"));
+    const stub = writeRpcStub(dir, "rpc.sh", basicRpcStub());
+    const handler = rpcHandler(dir, stub);
+    try {
+      (handler.busy as Set<string>).add("ghost");
+      expect(handler.busy.has("ghost")).toBe(true);
+      const r = await handler.handleAbort(
+        new Request("http://x/abort", {
+          method: "POST",
+          headers: { authorization: "Bearer t", "content-type": "application/json" },
+          body: JSON.stringify({ sessionId: "ghost" }),
+        }),
+      );
+      expect(r.status).toBe(409);
+      expect(handler.busy.has("ghost")).toBe(false);
+    } finally {
+      handler.close();
+    }
+  });
+
+  test("a synchronous exception between busy.add and the stream try still frees busy", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cb-wedge-exc-"));
+    const stub = writeRpcStub(dir, "rpc.sh", basicRpcStub());
+    const handler = rpcHandler(dir, stub);
+    const OrigStream = globalThis.ReadableStream;
+    let calls = 0;
+    (globalThis as unknown as { ReadableStream: unknown }).ReadableStream = class {
+      constructor() {
+        calls += 1;
+        throw new Error("injected stream failure");
+      }
+    };
+    try {
+      let res: Response | null = null;
+      let threw: unknown = null;
+      try {
+        res = await handler.handleRun(
+          new Request("http://x/run", {
+            method: "POST",
+            headers: { authorization: "Bearer t", "content-type": "application/json" },
+            body: JSON.stringify({ sessionId: "sexc", prompt: "hi" }),
+          }),
+        );
+      } catch (e) {
+        threw = e;
+      }
+      expect(calls).toBe(1);
+      // Fixed code converts the sync throw into a 500 and frees the slot;
+      // current code lets it propagate with busy still held.
+      if (res) expect(res.status).toBe(500);
+      else expect(threw).toBeNull();
+      expect(handler.busy.has("sexc")).toBe(false);
+    } finally {
+      (globalThis as unknown as { ReadableStream: unknown }).ReadableStream = OrigStream;
+      handler.close();
     }
   });
 });
