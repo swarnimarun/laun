@@ -164,7 +164,11 @@ export class RpcManager {
         this.writeJson(session, { type: "abort" });
         // pi still owes a trailing settled for the timed-out run; mark it
         // so the next run gates until it is consumed (see settling).
+        // A wedged child that ignores abort never settles: arm a bounded
+        // SIGKILL grace (same SETTLE_WAIT_MS shape, no new timer family) so
+        // its slot frees even when no second run ever gates.
         session.settling = true;
+        this.armSettleKill(session);
         this.finishRun(session, { aborted: false, timedOut: true });
       }, o.timeoutMs);
       // Keep the timeout from holding the test process open on its own.
@@ -222,9 +226,10 @@ export class RpcManager {
   /**
    * Abort the active run for a session: send `{"type":"abort"}` and wait for
    * idle is handled by pi; here we emit the user-visible event and resolve
-   * the run so the HTTP stream closes and the busy slot releases. The child
-   * itself stays alive for reuse (idle TTL reaps it later). Returns true when
-   * a run was actually aborted.
+   * the run so the HTTP stream closes and the busy slot releases. A healthy
+   * child stays alive for reuse (idle TTL reaps it later); a wedged child
+   * that never settles is SIGKILLed after the bounded settle grace.
+   * Returns true when a run was actually aborted.
    */
   abort(sessionId: string): boolean {
     const session = this.sessions.get(sessionId);
@@ -249,8 +254,30 @@ export class RpcManager {
     // before resolving so the next run() gates until it is consumed and a
     // stale settled can never complete the next generation early.
     session.settling = true;
+    this.armSettleKill(session);
     this.finishRun(session, { aborted: true, timedOut: false });
     return true;
+  }
+
+  /**
+   * Bounded grace for a wedged child: if the session is still settling with
+   * no live run after SETTLE_WAIT_MS, SIGKILL it so the slot frees. Reuses
+   * the existing settle-wait duration, not a second timer family. Never
+   * touches a live run (streaming/currentRun) or a newer generation: the
+   * session-identity check makes a stale timer return early after respawn.
+   */
+  private armSettleKill(session: SessionState): void {
+    const id = session.sessionId;
+    const child = session.child;
+    const timer = setTimeout(() => {
+      const cur = this.sessions.get(id);
+      if (!cur || cur !== session) return;
+      if (!cur.settling || cur.currentRun || cur.streaming) return;
+      if (cur.exited || cur.killed) return;
+      if (child.exitCode !== null) return;
+      this.killSession(id);
+    }, SETTLE_WAIT_MS);
+    (timer as unknown as { unref?: () => void }).unref?.();
   }
 
   /** Resolve when `settling` clears (stale settled consumed or child gone). */
@@ -258,10 +285,28 @@ export class RpcManager {
     if (!session.settling) return Promise.resolve();
     return new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
-        // Wedged child that never settles: stop gating and proceed. Any
-        // impossibly-late settled afterwards is still ignored while idle.
+        // Wedged child that never settles: SIGKILL after the bounded grace
+        // so the next run spawns fresh instead of reusing the wedged child.
+        // Any impossibly-late settled afterwards is still ignored while idle.
         const idx = session.settleWaiters.indexOf(wake);
         if (idx >= 0) session.settleWaiters.splice(idx, 1);
+        try {
+          const cur = this.sessions.get(session.sessionId);
+          if (
+            cur &&
+            cur === session &&
+            session.settling &&
+            !session.currentRun &&
+            !session.streaming &&
+            !session.exited &&
+            !session.killed &&
+            session.child.exitCode === null
+          ) {
+            this.killSession(session.sessionId);
+          }
+        } catch {
+          // kill is best-effort; gating must proceed regardless
+        }
         this.clearSettling(session);
         resolve();
       }, timeoutMs);

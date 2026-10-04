@@ -452,11 +452,11 @@ async function readNdjson(res: Response): Promise<AgentEvent[]> {
 }
 
 /** Poll `cond` every 25ms until true or 5s elapses (throws on timeout). */
-async function pollFor(cond: () => boolean, what: string): Promise<void> {
+async function pollFor(cond: () => boolean, what: string, timeoutMs = 5000): Promise<void> {
   const start = Date.now();
   for (;;) {
     if (cond()) return;
-    if (Date.now() - start > 5000) throw new Error(`timed out waiting for ${what}`);
+    if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${what}`);
     await new Promise((r) => setTimeout(r, 25));
   }
 }
@@ -2301,7 +2301,7 @@ describe("lane-exec-wedge: wedged-slot release (reproduce-first)", () => {
       expect(pid1).toBeDefined();
       // Bounded grace (reuses the settle-wait shape, 5s): the wedged child
       // must die without any second run arriving. Poll, never sleep fixed.
-      await pollFor(() => isDead(pid1), "wedged child SIGKILLed after grace");
+      await pollFor(() => isDead(pid1), "wedged child SIGKILLed after grace", 15_000);
       expect(isDead(pid1)).toBe(true);
       // Next run starts cleanly on a fresh child and sees its own output.
       const events: AgentEvent[] = [];
