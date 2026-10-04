@@ -93,5 +93,26 @@ services:
     # `unless-stopped` would restart-loop a deliberately-disabled bridge.
     restart: on-failure
 
+  # TLS front door (optional upgrade path; tunnel stays the default).
+  # Uncomment to let Caddy terminate HTTPS and proxy ONLY the gateway.
+  # Requires DOMAIN + ACME_EMAIL in .env; see deploy/tls.md. The executor
+  # (:8081) has no route here and stays loopback-only.
+  # caddy:
+  #   image: caddy:2
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   environment:
+  #     DOMAIN: ${DOMAIN:?set DOMAIN in .env to enable TLS}
+  #     ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env to enable TLS}
+  #   volumes:
+  #     - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - caddy-data:/data
+  #     - caddy-config:/config
+  #   depends_on:
+  #     gateway:
+  #       condition: service_started
+  #   restart: unless-stopped
+
 volumes:
   laun-data:

@@ -1,0 +1,30 @@
+# TLS front door for laun: Caddy terminates HTTPS and proxies only the gateway.
+# The executor (:8081) stays loopback-only — no route for it is defined here.
+# Tunnel remains the default; enable this block only as the TLS upgrade path.
+{
+	# Why: ACME contact for certificate expiry/issue notices (Let's Encrypt).
+	email {$ACME_EMAIL}
+}
+
+# Why: public site. Caddy obtains a cert for {$DOMAIN} via ACME and
+# redirects HTTP→HTTPS automatically (default for site blocks with a domain).
+{$DOMAIN} {
+	# Why: structured access log to stdout for `docker compose logs caddy`.
+	log {
+		output stdout
+		format console
+	}
+
+	# Why: only the gateway is reachable; the executor has no route here.
+	reverse_proxy gateway:8080
+
+	# Why: baseline hardening headers on proxied responses.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		# Why: hide upstream Server banner.
+		-Server
+	}
+}

@@ -202,6 +202,14 @@ text usually means the runner left pi's stdin open (see above) or pi has no
 credentials — check `docker logs deploy-executor-1` and
 `<home>/.pi/agent/auth.json`.
 
+## TLS upgrade path (optional)
+
+The SSH tunnel above stays the default. To reach the gateway at
+`https://<your-domain>` instead, see [`tls.md`](./tls.md): Caddy terminates
+TLS and proxies only the gateway (`:8080`); the executor (`:8081`) is never
+exposed. Prereqs are a domain A record pointing at the VPS plus TCP 80+443
+reachable (provider firewall + `ufw`).
+
 ## Security note
 
 The setup output contains the agent key. A CI log, a shared terminal, or a
