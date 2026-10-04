@@ -121,7 +121,15 @@ the M2.4 row — this item is the scheduling, not a rewrite.
 
 These are the gaps that would let something go wrong without anyone noticing.
 
-### 1. OpenShell is off; nothing is sandboxed *(stub)*
+### 1. OpenShell is off; nothing is sandboxed *(done 2026-10-04 — enabled live)*
+
+`OPENSHELL_ENABLED=true` is now the live default on the box: the executor
+creates a per-session sandbox (`laun-<id>`, policy attached, provider-backed
+model key) and runs the agent inside it — proven by a full session completing
+(`watch` → `✅ done`) with its sandbox present, model answering through the
+provider, and the raw key absent (placeholder sha differs). Remaining:
+scoped `--approval-mode auto` live-trial (manual today), idle-reap
+observation, SDK-transport soak.
 
 `OPENSHELL_ENABLED` is `false` on the live deployment, and the executor only
 supports `OPENSHELL_PREFIX` — a string prepended to `pi`. There is no per-session
