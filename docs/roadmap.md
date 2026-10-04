@@ -36,6 +36,11 @@ doing the real job · *unverified* = built but never proven in the real world ·
   without `dist` (fixed a total deploy crash-loop).
 - Rename cloudbear → laun; secrets hunt clean across tree + full history
   (one doc example scrubbed); fresh `/opt/laun` stack live; `v1` pushed.
+- Gateway honors steer/queue on busy sessions (single pending slot, abort
+  clears it, desync falls back to a fresh run); CLI drives it with
+  `--steer`/`--queue` and reports usage totals in `agent status`.
+- TLS upgrade path documented (Caddy recipe, validated config, executor
+  stays loopback-only).
 
 ---
 
