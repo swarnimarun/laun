@@ -17,6 +17,7 @@
     "test": "bun test src/"
   },
   "dependencies": {
+    "@laun/protocol": "workspace:*",
     "yaml": "^2.9.1"
   }
 }
