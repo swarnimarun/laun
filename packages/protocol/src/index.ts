@@ -3,10 +3,14 @@
 // No pi/goose/dots-specific wire details outside the executor.
 
 export { isAgentEvent, isTerminalAgentEvent } from "./events.js";
+export type { CheckpointFile, ThreadCheckpoint, CheckpointReference } from "./checkpoint.js";
+export type { InferenceJsonValue, RuntimeInferenceEnvelope, RuntimeInferenceRequest, RuntimeInferenceUsage, RuntimeInferenceClient, RuntimeInferenceService, WorkerInferenceStreamItem } from "./inference.js";
 export type { BrokerConnection, BrokerContext, BrokerTool, BrokerToolResult, McpProtocolVersion, PermissionProposal } from "./broker.js";
+export type { TelegramIdentity, TelegramInboundUpdate, TelegramDelivery, TelegramIngestResult, TelegramLinkCode } from "./connector.js";
+export type { AdviceResult } from "./advice.js";
 export type { ControlContext, RuntimeRunInput, RuntimePermissionRequest, RuntimeCallbacks, RuntimeResult, RuntimeModel, AgentRuntime,
   ControlPrincipal, StoredProfile, MowerRecord, ThreadRecord, ControlRunStatus, ControlRun, ThreadEvent,
-  ControlApproval, WorkerRecord, TaskRecord, ControlState, WorkerJob } from "./control.js";
+  ControlApproval, WorkerCapabilities, WorkerRecord, TaskRecord, ControlState, WorkerJob } from "./control.js";
 
 export type { CapabilityRule, PermissionAction, PermissionEffect, PermissionGrant, PermissionMode,
   PermissionOperation, PermissionProfile, PermissionVerdict } from "./permissions.js";
@@ -152,6 +156,10 @@ export function checkBearer(authHeader: string | null | undefined, expectedToken
 // by the CLI and web UI. Distinct from GATEWAY_TOKEN, which stays service-only.
 // Wire form: laun_<id>_<secret>. Only the sha256 of <secret> is ever stored.
 // ---------------------------------------------------------------------------
+
+export type { PublicAgentKeyRecord, GatewayMe } from "./identity.js";
+export type { ControlBackupManifest, ControlRestoreResult } from "./backup.js";
+export type { ThreadProfileRebase, ThreadWorkerMove, ThreadLifecycleResult } from "./lifecycle.js";
 
 export const AGENT_KEY_PREFIX = "laun";
 const AGENT_KEY_RE = /^laun_([0-9a-f]{8,32})_([A-Za-z0-9_-]{20,128})$/;

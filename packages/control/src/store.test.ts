@@ -4,12 +4,20 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { MowerRecord, ThreadRecord, WorkerRecord } from "@laun/protocol";
 import { ControlStore } from "./store.js";
+import { Database } from "bun:sqlite";
 const alice={id:"alice",admin:false},bob={id:"bob",admin:false},admin={id:"service",admin:true};
 const stores:ControlStore[]=[],dirs:string[]=[];
 afterEach(()=>{for(const s of stores.splice(0))s.close();for(const d of dirs.splice(0))rmSync(d,{recursive:true,force:true});});
 function setup(){const dir=mkdtempSync(join(tmpdir(),"laun-control-"));dirs.push(dir);const path=join(dir,"control.sqlite");const store=new ControlStore(path);stores.push(store);return {store,path};}
 function fixture(store:ControlStore){const mower=store.createMower(alice,{name:"Fern"});const thread=store.createThread(alice,{mowerId:mower.id,title:"My task"});return {mower,thread};}
 const local:WorkerRecord={id:"local",ownerId:"service",name:"Local",capacity:2,labels:[],status:"online",createdAt:new Date().toISOString(),local:true};
+
+test("older control binary rejects future storage before changing its schema or journal mode",()=>{
+ const dir=mkdtempSync(join(tmpdir(),"laun-future-schema-"));dirs.push(dir);const path=join(dir,"control.sqlite");
+ let future=new Database(path);future.exec("CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT INTO metadata VALUES('schema','999'); CREATE TABLE future_data(id TEXT PRIMARY KEY); INSERT INTO future_data VALUES('preserved')");future.close();
+ expect(()=>new ControlStore(path)).toThrow("unsupported control database schema");future=new Database(path,{readonly:true});
+ try{expect(future.query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all()).toEqual([{name:"future_data"},{name:"metadata"}]);expect(future.query("PRAGMA journal_mode").get()).toEqual({journal_mode:"delete"});expect(future.query("SELECT * FROM future_data").get()).toEqual({id:"preserved"});}finally{future.close();}
+});
 
 describe("transactional control registry",()=>{
   test("names, profiles and FIFO submissions survive reopen with ownership enforced",()=>{
@@ -53,4 +61,13 @@ describe("transactional control registry",()=>{
     const mower=store.createMower(alice,{name:"Broad mower",profileId:broad.id,profileVersion:broad.version});
     expect(()=>store.createThread(alice,{mowerId:mower.id,title:"child",parentThreadId:thread.id})).toThrow("exceeds");
   });
+});
+
+test("permission adviser has one bounded reserved slot beside a parked capacity-one run",()=>{
+ const {store}=setup();const {thread}=fixture(store);const normal={...local,capacity:1};
+ store.submit(alice,thread.id,{text:"ordinary",requestId:"ordinary"});const first=store.claim(normal)!;store.setRunStatus(first.run.id,"waiting_permission");
+ const profile=store.createProfile(alice,{name:"Adviser",mode:"isolated",rules:[]});const adviser=store.createMower(alice,{name:"Gatekeeper",role:"adviser",profileId:profile.id,profileVersion:1});
+ const a=store.createThread(alice,{mowerId:adviser.id,title:"Advice"}),b=store.createThread(alice,{mowerId:adviser.id,title:"Other advice"});
+ store.submit(alice,a.id,{text:"Help with permission",requestId:"advice"});store.submit(alice,b.id,{text:"Other",requestId:"other"});
+ expect(store.claim(normal)?.thread.id).toBe(a.id);expect(store.claim(normal)).toBeNull();
 });

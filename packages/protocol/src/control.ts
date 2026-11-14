@@ -1,26 +1,32 @@
 import type { AgentEvent } from "./index.js";
 import type { PermissionAction, PermissionOperation, PermissionProfile } from "./permissions.js";
 import type { BrokerConnection } from "./broker.js";
+import type { CheckpointReference } from "./checkpoint.js";
+import type { RuntimeInferenceClient, RuntimeInferenceService } from "./inference.js";
 
 export interface ControlContext {
   principalId: string; workspaceId: string; mowerId: string; threadId: string; runId: string;
 }
 export interface RuntimeRunInput {
   threadId: string; runId: string; prompt: string; model: string; workspaceRoot: string; sessionDir: string;
+  placementId?: string;
 }
 export interface RuntimePermissionRequest { operation: PermissionOperation; resource: string; arguments: unknown; signal?: AbortSignal }
 export interface RuntimeCallbacks {
   emit(event: AgentEvent): void | Promise<void>;
   authorize(request: RuntimePermissionRequest): Promise<void>;
   invokeTool?(name: string, args: unknown, signal?: AbortSignal): Promise<unknown>;
+  inference?: RuntimeInferenceClient;
 }
-export interface RuntimeResult { status: "done" | "cancelled" | "error"; summary?: string }
+export interface RuntimeResult { status: "done" | "cancelled" | "error" | "interrupted"; summary?: string }
 export interface RuntimeModel { id: string; name: string; provider: string; configured: boolean }
 export interface AgentRuntime {
+  checkpointVersion?: string;
   run(input: RuntimeRunInput, callbacks: RuntimeCallbacks): Promise<RuntimeResult>;
   cancel(threadId: string): void | Promise<void>;
   close(): void | Promise<void>;
   listModels?(): Promise<RuntimeModel[]>;
+  inference?: RuntimeInferenceService;
 }
 
 export interface ControlPrincipal { id: string; admin: boolean }
@@ -34,12 +40,18 @@ export interface MowerRecord {
 export interface ThreadRecord {
   id: string; ownerId: string; workspaceId: string; mowerId: string; title: string; parentThreadId?: string;
   profileId: string; profileVersion: number; createdAt: string; updatedAt: string; archivedAt?: string;
+  stoppedAt?: string;
+  /** Explicit placement overrides historical and mower defaults. */
+  workerId?: string;
+  /** Changes on a deliberate move so stale host/guest state cannot win. */
+  placementId?: string;
 }
 export type ControlRunStatus = "queued" | "running" | "waiting_permission" | "done" | "error" | "cancelled" | "interrupted";
 export interface ControlRun {
   id: string; ownerId: string; threadId: string; requestId: string; prompt: string; status: ControlRunStatus;
   workerId?: string; generation: number; leaseUntil?: string; createdAt: string; updatedAt: string;
   cancelRequested: boolean; summary?: string;
+  model?: string;
 }
 export interface ThreadEvent {
   sequence: number; threadId: string; runId?: string; createdAt: string;
@@ -51,19 +63,29 @@ export interface ControlApproval {
   status: "pending" | "approved" | "denied" | "expired" | "consumed";
   createdAt: string; expiresAt: string; decidedAt?: string; decidedBy?: string;
   detail?: string;
+  feedback?: string;
+  continuation?:"replan"|"stop";
+}
+export interface WorkerCapabilities {
+  protocolVersion: number;
+  checkpointVersion: string;
+  inferenceModes: Array<"controller" | "local">;
 }
 export interface WorkerRecord {
+  inferenceMode?: "controller" | "local";
   id: string; ownerId: string; name: string; labels: string[]; capacity: number; status: "online" | "offline" | "revoked";
   lastSeenAt?: string; createdAt: string; local: boolean;
+  checkpointVersion?: string;
 }
 export interface TaskRecord {
   id: string; ownerId: string; parentThreadId: string; threadId: string; mowerId: string; title: string;
   status: "queued" | "running" | "done" | "error" | "cancelled"; createdAt: string; updatedAt: string;
   handoffCount: number; result?: string;
+  goal?: string;
 }
 export interface ControlState {
   mowers: MowerRecord[]; threads: ThreadRecord[]; runs: ControlRun[]; profiles: StoredProfile[];
   workers: WorkerRecord[]; tasks: TaskRecord[]; approvals: ControlApproval[]; connections: BrokerConnection[];
-  readiness: { runtime: boolean; mode: "isolated" | "trusted-local" | "unconfigured"; message: string; defaultModel?: string };
+  readiness: { runtime: boolean; mode: "isolated" | "trusted-local" | "unconfigured"; message: string; defaultModel?: string; inferenceRelay?: boolean };
 }
-export interface WorkerJob { run: ControlRun; thread: ThreadRecord; mower: MowerRecord; checkpoint?: string }
+export interface WorkerJob { run: ControlRun; thread: ThreadRecord; mower: MowerRecord; checkpoint?: CheckpointReference }
