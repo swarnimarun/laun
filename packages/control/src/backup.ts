@@ -5,6 +5,9 @@ import { dirname, join, resolve } from "node:path";
 import { isPermissionProfile } from "@laun/policy";
 import { validateCheckpoint } from "@laun/storage";
 import type { ControlBackupManifest, ControlRestoreResult, PublicAgentKeyRecord } from "@laun/protocol";
+import { validateStoredDurabilityRecord, type StoredDurabilityRecord } from "./durability.js";
+import { validateStoredLegacyImport, type StoredLegacyImport } from "./legacy.js";
+import { validateHostCleanupPlan } from "./cleanup.js";
 
 export interface ControlBackupOptions { dataDir: string; destination: string; confirmOffline: true }
 export interface ControlRestoreOptions { backupDir: string; targetDir: string; confirmOffline: true }
@@ -28,14 +31,29 @@ const ADVISER: Record<string, string[]> = {
   permission_advice: ["run_id", "owner_id", "thread_id", "approval_id", "base_profile", "action_fingerprint", "feedback", "body"],
 };
 const INFERENCE: Record<string, string[]> = { inference_calls: ["run_id", "generation", "request_id", "fingerprint", "status", "created_at", "updated_at"] };
+const DURABILITY: Record<string, string[]> = { durable_commits: ["thread_id", "sequence", "request_id", "fingerprint", "adapter", "version", "body", "created_at"] };
+const LEGACY: Record<string, string[]> = { legacy_imports: ["id", "owner_id", "source_hash", "thread_id", "mower_id", "created_at", "body", "raw_archive"] };
+const ONBOARDING: Record<string, string[]> = { owner_onboarding: ["owner_id", "body"] };
+const RETENTION: Record<string, string[]> = {
+  thread_purges: ["id", "owner_id", "thread_id", "request_hash", "body"],
+  purged_resources: ["kind", "id", "owner_id", "purge_id"],
+  purged_receipts: ["owner_id", "key_hash", "fingerprint", "purge_id"],
+  purged_legacy_sources: ["owner_id", "source_hash", "purge_id"],
+  family_usage_debits: ["root_thread_id", "purged_thread_id", "owner_id", "tokens", "cost"],
+  host_cleanup_plans: ["id", "purge_id", "owner_id", "worker_id", "thread_id", "body"],
+};
 const PRIMARY: Record<string, string[]> = {
   metadata: ["key"], objects: ["kind", "id"], worker_auth: ["id"], runs: ["id"], events: ["sequence"], approvals: ["id"], receipts: ["owner_id", "key"],
   worker_sequences: ["run_id", "generation"], routing: ["key"], checkpoints: ["thread_id"], outbox: ["id"], telegram_link_codes: ["hash"], telegram_links: ["bot_id", "user_id"],
   telegram_routes: ["route_key"], telegram_subscriptions: ["route_key", "thread_id"], telegram_inbox: ["bot_id", "update_id"], telegram_handles: ["handle"], telegram_deliveries: ["id"],
   permission_advisers: ["owner_id"], permission_advice: ["run_id"],
   inference_calls: ["run_id", "generation", "request_id"],
+  durable_commits: ["thread_id", "sequence"], legacy_imports: ["id"],
+  owner_onboarding: ["owner_id"],
+  thread_purges: ["id"], purged_resources: ["kind", "id"], purged_receipts: ["owner_id", "key_hash"], purged_legacy_sources: ["owner_id", "source_hash"],
+  family_usage_debits: ["purged_thread_id"], host_cleanup_plans: ["id"],
 };
-const EXTRA_UNIQUE: Record<string, string[]> = { runs: ["thread_id", "request_id"], approvals: ["run_id", "fingerprint"], telegram_handles: ["route_key", "approval_id"] };
+const EXTRA_UNIQUE: Record<string, string[]> = { runs: ["thread_id", "request_id"], approvals: ["run_id", "fingerprint"], telegram_handles: ["route_key", "approval_id"], durable_commits: ["thread_id", "request_id"], legacy_imports: ["owner_id", "source_hash"], thread_purges: ["owner_id", "request_hash"] };
 function fail(message: string): never { throw new Error(`control backup: ${message}`); }
 const object = (value: unknown): Row => value && typeof value === "object" && !Array.isArray(value) ? value as Row : fail("invalid record");
 const parse = (value: unknown): Row => { if (typeof value !== "string") return fail("invalid stored JSON"); try { return object(JSON.parse(value)); } catch { return fail("invalid stored JSON"); } };
@@ -84,7 +102,7 @@ function has(db: Database, table: string): boolean { return !!db.query("SELECT 1
 function schema(db: Database): void {
   const integrity = db.query("PRAGMA integrity_check").all() as Array<Record<string, unknown>>;
   if (integrity.length !== 1 || Object.values(integrity[0]!)[0] !== "ok" || db.query("PRAGMA foreign_key_check").all().length) fail("SQLite integrity check failed");
-  const expected = { ...CORE, ...TELEGRAM, ...ADVISER, ...INFERENCE };
+  const expected = { ...CORE, ...TELEGRAM, ...ADVISER, ...INFERENCE, ...DURABILITY, ...LEGACY, ...ONBOARDING, ...RETENTION };
   for (const entry of db.query("SELECT type,name,sql FROM sqlite_master").iterate() as Iterable<{ type: string; name: string; sql: string | null }>) {
     if (entry.type === "index") { if (!(entry.name.startsWith("sqlite_autoindex_") && entry.sql === null) && !["run_queue", "thread_events"].includes(entry.name)) fail("unsupported database index"); continue; }
     if (entry.type === "table" && entry.name === "sqlite_sequence" && entry.sql === "CREATE TABLE sqlite_sequence(name,seq)") continue;
@@ -93,7 +111,7 @@ function schema(db: Database): void {
     const names=columns.map(c=>c.name).join("|");
     const compatibleLegacyRuns=entry.name==="runs"&&names===CORE.runs!.slice(0,-1).join("|");
     if (names !== expected[entry.name]!.join("|")&&!compatibleLegacyRuns) fail(`unsupported ${entry.name} schema`);
-    const integers = new Set(["sequence", "generation", "cancel_requested", "next_sequence", "update_id", "cursor", "can_approve", "attempts", "profile_version"]);
+    const integers = new Set(["sequence", "generation", "cancel_requested", "next_sequence", "update_id", "cursor", "can_approve", "attempts", "profile_version", "version", "tokens"]);
     if (columns.some(column => column.type.toUpperCase() !== (integers.has(column.name) ? "INTEGER" : "TEXT"))) fail(`unsupported ${entry.name} column types`);
     if (columns.filter(column => column.pk).sort((a, b) => a.pk - b.pk).map(column => column.name).join("|") !== PRIMARY[entry.name]!.join("|")) fail(`unsupported ${entry.name} primary identity`);
     const unique = EXTRA_UNIQUE[entry.name]; if (unique) {
@@ -107,6 +125,10 @@ function schema(db: Database): void {
   if (version?.value !== "1") fail("unsupported control database schema version");
 }
 function validateReferences(db: Database): void {
+  if(Object.keys(RETENTION).some(table=>has(db,table))&&!Object.keys(RETENTION).every(table=>has(db,table)))fail("incomplete removal schema");
+  // A resumable purge deliberately has temporary dangling references. Never
+  // publish or accept that partial maintenance state as a restorable archive.
+  if(has(db,"thread_purges")&&db.query("SELECT 1 FROM thread_purges WHERE json_extract(body,'$.job.status')!='done' OR json_extract(body,'$.job.status') IS NULL LIMIT 1").get())fail("finish all controller removal batches before taking a backup");
   const get = (kind: string, id: unknown, ownerId?: unknown): Row => {
     if (typeof id !== "string") return fail("invalid object reference");
     const row = db.query("SELECT owner_id,body FROM objects WHERE kind=? AND id=?").get(kind, id) as { owner_id: string; body: string } | null;
@@ -154,6 +176,23 @@ function validateReferences(db: Database): void {
     if (!Number.isSafeInteger(row.generation) || Number(row.generation) < 0 || Number(row.generation) > Number(parent.generation) || typeof row.request_id !== "string" || !row.request_id ||
       typeof row.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(row.fingerprint) || !["admitted", "done", "interrupted"].includes(String(row.status)) || !date(row.created_at) || !date(row.updated_at)) fail("invalid inference admission");
   }
+  if (has(db, "durable_commits")) {
+    let threadId = "", sequence = 0, adapter = "", version = 0, bytes = 0;
+    for (const row of db.query("SELECT * FROM durable_commits ORDER BY thread_id,sequence").iterate() as Iterable<StoredDurabilityRecord>) {
+      get("thread", row.thread_id); const entry = validateStoredDurabilityRecord(row);
+      if (row.thread_id !== threadId) { threadId = row.thread_id; sequence = 0; adapter = row.adapter; version = row.version; bytes = 0; }
+      bytes += Buffer.byteLength(row.body);
+      if (entry.sequence !== ++sequence || row.adapter !== adapter || row.version !== version || bytes > 128 * 1024 * 1024) fail("invalid durable ledger sequence, adapter or thread quota");
+    }
+  }
+  if (has(db, "legacy_imports")) for (const row of db.query("SELECT * FROM legacy_imports").iterate() as Iterable<StoredLegacyImport>) {
+    const { report } = validateStoredLegacyImport(row); get("thread", row.thread_id, row.owner_id); get("mower", row.mower_id, row.owner_id); get("profile", `${report.profileId}:${report.profileVersion}`, row.owner_id);
+  }
+  if (has(db, "owner_onboarding")) for (const row of db.query("SELECT * FROM owner_onboarding").iterate() as Iterable<{ owner_id: string; body: string }>) {
+    const value = parse(row.body), mower = get("mower", value.primaryMowerId, row.owner_id), thread = get("thread", value.primaryThreadId, row.owner_id);
+    if (value.ownerId !== row.owner_id || mower.role !== "director" || thread.parentThreadId || thread.mowerId !== mower.id || !Number.isSafeInteger(value.revision) || Number(value.revision) < 1 || !Number.isSafeInteger(value.profileVersion) || Number(value.profileVersion) < 1 || !date(value.createdAt) || !date(value.updatedAt)) fail("invalid primary director onboarding reference");
+    get("profile", `${value.profileId}:${value.profileVersion}`, row.owner_id);
+  }
   for (const row of db.query("SELECT * FROM outbox").iterate() as Iterable<Row>) { const payload = parse(row.body); if (String(row.destination).startsWith("thread:")) get("thread", String(row.destination).slice(7), row.owner_id); if (!payload) fail("invalid outbox"); }
   if (has(db, "telegram_routes")) {
     for (const row of db.query("SELECT * FROM telegram_routes").iterate() as Iterable<Row>) get("thread", row.thread_id, row.owner_id);
@@ -163,6 +202,17 @@ function validateReferences(db: Database): void {
   if (has(db, "permission_advisers")) {
     for (const row of db.query("SELECT * FROM permission_advisers").iterate() as Iterable<Row>) { get("mower", row.mower_id, row.owner_id); get("thread", row.thread_id, row.owner_id); get("profile", `${row.profile_id}:${row.profile_version}`, row.owner_id); }
     for (const row of db.query("SELECT * FROM permission_advice").iterate() as Iterable<Row>) { const parent = run(row.run_id, row.owner_id); if (parent.thread_id !== row.thread_id) fail("cross-thread advice"); if (!db.query("SELECT 1 FROM approvals WHERE id=? AND owner_id=?").get(String(row.approval_id), String(row.owner_id))) fail("missing advice approval"); parse(row.base_profile); parse(row.body); }
+  }
+  if(has(db,"thread_purges")){
+    const purge=(purgeId:unknown,ownerId?:unknown):Row=>{const row=db.query("SELECT * FROM thread_purges WHERE id=?").get(String(purgeId)) as Row|null;if(!row||(ownerId!==undefined&&row.owner_id!==ownerId))fail("invalid purge reference");return row!;};
+    const tombstone=(kind:string,resourceId:unknown,ownerId:unknown):Row=>{const row=db.query("SELECT * FROM purged_resources WHERE kind=? AND id=? AND owner_id=?").get(kind,String(resourceId),String(ownerId)) as Row|null;if(!row)fail("missing removal tombstone");return row!;};
+    const sha=(value:unknown)=>typeof value==="string"&&/^[0-9a-f]{64}$/.test(value);
+    for(const row of db.query("SELECT * FROM thread_purges").iterate() as Iterable<Row>){const body=parse(row.body),job=object(body.job);if(job.id!==row.id||job.ownerId!==row.owner_id||job.threadId!==row.thread_id||job.status!=="done"||!sha(row.request_hash)||!date(job.createdAt)||!date(job.updatedAt))fail("invalid completed removal job");tombstone("thread",row.thread_id,row.owner_id);if(db.query("SELECT 1 FROM objects WHERE kind='thread' AND id=?").get(String(row.thread_id)))fail("removed thread remains in controller objects");}
+    for(const row of db.query("SELECT * FROM purged_resources").iterate() as Iterable<Row>){purge(row.purge_id,row.owner_id);if(!["thread","run","approval","task","advice","legacy"].includes(String(row.kind))||typeof row.id!=="string"||!row.id||row.id.length>128)fail("invalid removed resource");}
+    for(const row of db.query("SELECT * FROM purged_receipts").iterate() as Iterable<Row>){purge(row.purge_id);if(!owner(row.owner_id)||!sha(row.key_hash)||!sha(row.fingerprint))fail("invalid removed receipt");}
+    for(const row of db.query("SELECT * FROM purged_legacy_sources").iterate() as Iterable<Row>){purge(row.purge_id,row.owner_id);if(!sha(row.source_hash))fail("invalid removed legacy source");}
+    for(const row of db.query("SELECT * FROM family_usage_debits").iterate() as Iterable<Row>){tombstone("thread",row.purged_thread_id,row.owner_id);if(!Number.isSafeInteger(row.tokens)||Number(row.tokens)<0||typeof row.cost!=="string"||!Number.isFinite(Number(row.cost))||Number(row.cost)<0)fail("invalid retained family usage");const root=db.query("SELECT owner_id FROM objects WHERE kind='thread' AND id=?").get(String(row.root_thread_id)) as Row|null;if(root){if(root.owner_id!==row.owner_id)fail("cross-owner family usage");}else tombstone("thread",row.root_thread_id,row.owner_id);}
+    for(const row of db.query("SELECT * FROM host_cleanup_plans").iterate() as Iterable<Row>){purge(row.purge_id,row.owner_id);tombstone("thread",row.thread_id,row.owner_id);const plan=validateHostCleanupPlan(parse(row.body));if(plan.id!==row.id||plan.ownerId!==row.owner_id||plan.threadId!==row.thread_id||plan.workerId!==row.worker_id||plan.purgeId!==row.purge_id)fail("invalid host cleanup plan");}
   }
 }
 function inspect(db: Database): void { schema(db); validateReferences(db); }
@@ -231,6 +281,7 @@ export async function restoreControlBackup(options: ControlRestoreOptions): Prom
         safety.uncertainDeliveries = db.query("UPDATE outbox SET status='uncertain' WHERE status IN('pending','sending') AND destination NOT LIKE 'thread:%'").run().changes;
         db.exec("UPDATE outbox SET status='cancelled' WHERE status IN('pending','sending') AND destination LIKE 'thread:%'");
         if (has(db, "telegram_links")) db.exec("DELETE FROM telegram_links; DELETE FROM telegram_link_codes; DELETE FROM telegram_handles; DELETE FROM telegram_subscriptions; DELETE FROM telegram_routes; UPDATE telegram_deliveries SET lease_id=NULL,lease_until=NULL");
+        if(has(db,"host_cleanup_plans"))for(const row of db.query("SELECT id,body FROM host_cleanup_plans").all() as Array<{id:string;body:string}>){const plan=parse(row.body);delete plan.approvedAt;delete plan.approvedBy;delete plan.approvalDigest;delete plan.approvalExpiresAt;delete plan.leaseUntil;if(plan.status!=="done"){plan.status="blocked";plan.generation=Number(plan.generation??0)+1;delete plan.resultDigest;delete plan.finishedGeneration;plan.updatedAt=at;plan.outstanding=["Restored backup: verify the current host and request cleanup explicitly; no deletion was replayed."];}db.query("UPDATE host_cleanup_plans SET body=? WHERE id=?").run(JSON.stringify(plan),row.id);}
         db.query("INSERT INTO metadata(key,value) VALUES('restored_at',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(at);
       }).immediate();
       inspect(db); db.exec("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE");

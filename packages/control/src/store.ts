@@ -3,7 +3,9 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { dirname } from "node:path";
 import { canDelegateProfile, isPermissionProfile } from "@laun/policy";
+import { catalogStorageIdentity } from "@laun/broker";
 import { checkpointReference } from "@laun/storage";
+import { purgedOwner, purgedReceipt } from "./retention-guard.js";
 import type { BrokerConnection, ControlApproval, ControlPrincipal, ControlRun, ControlRunStatus,
   MowerRecord, StoredProfile, TaskRecord, ThreadEvent, ThreadRecord, WorkerJob, WorkerRecord } from "@laun/protocol";
 
@@ -41,7 +43,8 @@ const runFrom = (r: RunRow): ControlRun => ({ id:r.id, ownerId:r.owner_id, threa
 /** Transactional control metadata. Pi's own conversation files remain separate. */
 export class ControlStore {
   readonly db: Database;
-  constructor(path: string) {
+  admissionGuard?:()=>void;
+  constructor(readonly path: string) {
     if (path !== ":memory:") {
       mkdirSync(dirname(path), { recursive:true, mode:0o700 });
       try{const fd=openSync(path,"ax",0o600);closeSync(fd);}catch(e){if((e as NodeJS.ErrnoException).code!=="EEXIST")throw e;}
@@ -51,6 +54,7 @@ export class ControlStore {
     // Reject a future schema before CREATE/ALTER or journal changes. An old
     // binary must not partially initialize a database it cannot understand.
     try{
+      if(!this.db.query("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").get())this.db.exec("PRAGMA auto_vacuum=INCREMENTAL");
       if(this.db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'").get()){
         const schema=this.db.query("SELECT value FROM metadata WHERE key='schema'").get() as {value:string}|null;
         if(schema&&schema.value!=="1")throw new Error("unsupported control database schema");
@@ -73,6 +77,7 @@ export class ControlStore {
       CREATE TABLE IF NOT EXISTS receipts(owner_id TEXT NOT NULL,key TEXT NOT NULL,fingerprint TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(owner_id,key));
       CREATE TABLE IF NOT EXISTS worker_sequences(run_id TEXT NOT NULL,generation INTEGER NOT NULL,next_sequence INTEGER NOT NULL,PRIMARY KEY(run_id,generation));
       CREATE TABLE IF NOT EXISTS inference_calls(run_id TEXT NOT NULL,generation INTEGER NOT NULL,request_id TEXT NOT NULL,fingerprint TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(run_id,generation,request_id));
+      CREATE TABLE IF NOT EXISTS durable_commits(thread_id TEXT NOT NULL,sequence INTEGER NOT NULL,request_id TEXT NOT NULL,fingerprint TEXT NOT NULL,adapter TEXT NOT NULL,version INTEGER NOT NULL,body TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(thread_id,sequence),UNIQUE(thread_id,request_id));
       CREATE TABLE IF NOT EXISTS routing(key TEXT PRIMARY KEY,owner_id TEXT NOT NULL,thread_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS checkpoints(thread_id TEXT PRIMARY KEY,body TEXT NOT NULL,updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL,destination TEXT NOT NULL,body TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending');`);
@@ -82,15 +87,20 @@ export class ControlStore {
     const columns=this.db.query("PRAGMA table_info(runs)").all() as {name:string}[];
     if(!columns.some(c=>c.name==="model"))this.db.exec("ALTER TABLE runs ADD COLUMN model TEXT");
     if(!columns.some(c=>c.name==="instructions"))this.db.exec("ALTER TABLE runs ADD COLUMN instructions TEXT");
-    this.db.exec("UPDATE runs SET model=(SELECT json_extract(m.body,'$.model') FROM objects t JOIN objects m ON m.kind='mower' AND m.id=json_extract(t.body,'$.mowerId') WHERE t.kind='thread' AND t.id=runs.thread_id) WHERE model IS NULL");
+    // Old queues without a model snapshot cannot choose today's mower default
+    // and start spending automatically. Keep them explicitly unreplayable.
+    const missing=this.db.query("SELECT id,thread_id FROM runs WHERE model IS NULL AND status IN ('queued','running','waiting_permission','interrupted') AND (status!='interrupted' OR cancel_requested=0)").all() as {id:string;thread_id:string}[];
+    this.transaction(()=>{for(const run of missing){this.db.query("UPDATE runs SET status='interrupted',cancel_requested=1,lease_until=NULL,updated_at=? WHERE id=?").run(now(),run.id);this.event(run.thread_id,"system",{status:"interrupted",text:"This older run has no admitted model. Abandon it and send fresh input to select a model; it will not replay automatically."},run.id);}});
     if(path!==":memory:")for(const file of [path,`${path}-wal`,`${path}-shm`])if(existsSync(file))chmodSync(file,0o600);
   }
   close() { this.db.close(); }
   transaction<T>(f:()=>T):T { return this.db.transaction(f).immediate(); }
   put<T extends Owned>(kind:ObjectKind, value:T) {
+    this.assertNotPurged(kind,value.id);
     this.db.query("INSERT INTO objects VALUES(?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body,owner_id=excluded.owner_id").run(kind,value.id,value.ownerId,JSON.stringify(value));
   }
   get<T extends Owned>(kind:ObjectKind, objectId:string, principal?:ControlPrincipal):T {
+    this.assertNotPurged(kind,objectId,principal);
     const row = this.db.query("SELECT body FROM objects WHERE kind=? AND id=?").get(kind,objectId) as {body:string}|null;
     if (!row) throw new ControlError(`${kind} not found`,404);
     const value = JSON.parse(row.body) as T;
@@ -100,10 +110,15 @@ export class ControlStore {
   list<T extends Owned>(kind:ObjectKind, principal:ControlPrincipal):T[] {
     const rows = (principal.admin ? this.db.query("SELECT body FROM objects WHERE kind=?").all(kind) :
       this.db.query("SELECT body FROM objects WHERE kind=? AND owner_id=?").all(kind,principal.id)) as {body:string}[];
-    return rows.map((r)=>JSON.parse(r.body));
+    return rows.map((r)=>JSON.parse(r.body)).filter(value=>!purgedOwner(this.db,kind,value.id));
+  }
+  assertNotPurged(kind:string,resourceId:string,p?:ControlPrincipal){
+    const ownerId=purgedOwner(this.db,kind,resourceId);
+    if(ownerId)throw new ControlError(p&&!p.admin&&p.id!==ownerId?`${kind} not found`:`${kind} controller copy was removed`,p&&!p.admin&&p.id!==ownerId?404:410);
   }
   profile(profileId:string, version:number, p?:ControlPrincipal):StoredProfile { return this.get("profile",`${profileId}:${version}`,p); }
   createProfile(p:ControlPrincipal,input:unknown, previous?:StoredProfile):StoredProfile {
+    this.admissionGuard?.();
     const b=record(input); const profileId=previous?.id.split(":")[0] ?? id();
     const value:StoredProfile={id:profileId,version:previous ? previous.version+1 : 1,mode:b.mode as StoredProfile["mode"],rules:b.rules as StoredProfile["rules"],
       name:previous?.name ?? text(b.name,"name",80),ownerId:previous?.ownerId ?? p.id,createdAt:now()};
@@ -130,6 +145,7 @@ export class ControlStore {
     }
   }
   createMower(p:ControlPrincipal,input:unknown):MowerRecord {
+    this.admissionGuard?.();
     const b=record(input); const name=text(b.name,"name",80);
     if(b.instructions!==undefined&&b.instructions!==null&&typeof b.instructions!=="string")throw new ControlError("instructions must be text");
     const instructions=typeof b.instructions==="string"&&b.instructions.trim()?text(b.instructions,"instructions",16000):undefined;
@@ -148,6 +164,7 @@ export class ControlStore {
     });
   }
   createThread(p:ControlPrincipal,input:unknown):ThreadRecord {
+    this.admissionGuard?.();
     const b=record(input);const mower=this.get<MowerRecord>("mower",text(b.mowerId,"mowerId",100),p);
     if(mower.archivedAt) throw new ControlError("mower archived",409);
     if(this.profile(mower.profileId,mower.profileVersion,p).revokedAt)throw new ControlError("profile revoked",403);
@@ -168,6 +185,7 @@ export class ControlStore {
     });
   }
   event(threadId:string,kind:ThreadEvent["kind"],payload:ThreadEvent["payload"],runId?:string):ThreadEvent {
+    this.assertNotPurged("thread",threadId);
     const at=now();const result=this.db.query("INSERT INTO events(thread_id,run_id,created_at,kind,payload) VALUES(?,?,?,?,?)").run(threadId,runId??null,at,kind,JSON.stringify(payload));
     return {sequence:Number(result.lastInsertRowid),threadId,runId,createdAt:at,kind,payload};
   }
@@ -192,6 +210,7 @@ export class ControlStore {
       const thread=this.get<ThreadRecord>("thread",threadId,p); if(thread.archivedAt)throw new ControlError("thread archived",409);
       const existing=this.db.query("SELECT * FROM runs WHERE thread_id=? AND request_id=?").get(threadId,requestId) as RunRow|null;
       if(existing){if(existing.prompt!==prompt)throw new ControlError("requestId was used for different input",409);return runFrom(existing);}
+      this.admissionGuard?.();
       this.assertThreadAuthority(thread);
       if(source==="task"&&thread.stoppedAt)throw new ControlError("thread stopped; awaiting direct user input",409);
       if(source==="user")delete thread.stoppedAt;
@@ -206,32 +225,49 @@ export class ControlStore {
     });
   }
   run(runId:string,p?:ControlPrincipal):ControlRun {
+    this.assertNotPurged("run",runId,p);
     const row=this.db.query("SELECT * FROM runs WHERE id=?").get(runId) as RunRow|null;
     if(!row || (p&&!p.admin&&row.owner_id!==p.id))throw new ControlError("run not found",404); return runFrom(row);
   }
   runs(p:ControlPrincipal):ControlRun[]{
     const rows=(p.admin?this.db.query("SELECT * FROM runs WHERE status IN ('queued','running','waiting_permission','interrupted') OR rowid IN(SELECT rowid FROM runs ORDER BY created_at DESC,rowid DESC LIMIT 1000) ORDER BY created_at DESC,rowid DESC").all():
       this.db.query("SELECT * FROM runs WHERE owner_id=? AND (status IN ('queued','running','waiting_permission','interrupted') OR rowid IN(SELECT rowid FROM runs WHERE owner_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1000)) ORDER BY created_at DESC,rowid DESC").all(p.id,p.id)) as RunRow[];
-    return rows.map(runFrom);
+    return rows.filter(row=>!purgedOwner(this.db,"run",row.id)).map(runFrom);
   }
   threadRuns(p:ControlPrincipal,threadId:string):ControlRun[]{this.get("thread",threadId,p);return (this.db.query("SELECT * FROM runs WHERE thread_id=? AND (status IN ('queued','running','waiting_permission','interrupted') OR rowid IN(SELECT rowid FROM runs WHERE thread_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1000)) ORDER BY created_at DESC,rowid DESC").all(threadId,threadId) as RunRow[]).map(runFrom);}
+  private dedicatedAdviser(threadId:string):boolean{
+    if(!this.db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='permission_advisers'").get())return false;
+    const reference=this.db.query("SELECT mower_id,profile_id,profile_version FROM permission_advisers WHERE thread_id=?").get(threadId) as {mower_id:string;profile_id:string;profile_version:number}|null;
+    if(!reference)return false;
+    const thread=this.get<ThreadRecord>("thread",threadId),mower=this.get<MowerRecord>("mower",thread.mowerId),profile=this.profile(thread.profileId,thread.profileVersion);
+    return !thread.parentThreadId&&mower.role==="adviser"&&reference.mower_id===mower.id&&reference.profile_id===profile.id&&reference.profile_version===profile.version&&profile.mode==="isolated"&&profile.rules.length===0;
+  }
   claim(worker:WorkerRecord,leaseMs=30_000,fleetCapacity?:number):WorkerJob|null {
+    this.admissionGuard?.();
     return this.transaction(()=>{
+      // Auth and request-body reads may have yielded since this snapshot was
+      // obtained. Current registration/revocation/capacity wins at dispatch.
+      const current=this.db.query("SELECT body FROM objects WHERE kind='worker' AND id=?").get(worker.id) as {body:string}|null;
+      if(current)worker=JSON.parse(current.body) as WorkerRecord;
+      else if(!worker.local||worker.id!=="local")return null;
+      if(worker.drainingAt)return null;
+      const capacity=Math.min(worker.capacity,worker.reportedCapacity??worker.capacity);
       const active=this.db.query("SELECT thread_id FROM runs WHERE worker_id=? AND status IN ('running','waiting_permission')").all(worker.id) as {thread_id:string}[];
-      const advisers=active.filter(r=>{const t=this.get<ThreadRecord>("thread",r.thread_id);return this.get<MowerRecord>("mower",t.mowerId).role==="adviser";}).length;
+      const advisers=active.filter(r=>this.dedicatedAdviser(r.thread_id)).length;
       const ordinary=active.length-advisers;
       const fleet=fleetCapacity===undefined?[]:this.db.query("SELECT thread_id FROM runs WHERE status IN ('running','waiting_permission')").all() as {thread_id:string}[];
-      const fleetAdvisers=fleet.filter(r=>{const t=this.get<ThreadRecord>("thread",r.thread_id);return this.get<MowerRecord>("mower",t.mowerId).role==="adviser";}).length;
+      const fleetAdvisers=fleet.filter(r=>this.dedicatedAdviser(r.thread_id)).length;
       const fleetOrdinary=fleet.length-fleetAdvisers;
       // One bounded adviser slot remains available while an ordinary run is
       // parked on permission, including yards configured with capacity one.
-      if((ordinary>=worker.capacity&&advisers>=1) || worker.status==="revoked") return null;
+      if((ordinary>=capacity&&advisers>=1) || worker.status==="revoked") return null;
       const candidates=this.db.query("SELECT r.* FROM runs r JOIN objects t ON t.kind='thread' AND t.id=r.thread_id JOIN objects m ON m.kind='mower' AND m.id=json_extract(t.body,'$.mowerId') WHERE r.status='queued' AND NOT EXISTS(SELECT 1 FROM runs a WHERE a.thread_id=r.thread_id AND a.status IN ('running','waiting_permission','interrupted')) ORDER BY CASE WHEN json_extract(m.body,'$.role')='adviser' THEN 0 ELSE 1 END,r.created_at,r.rowid LIMIT 100").all() as RunRow[];
       for(const row of candidates){
         if(!worker.local && row.owner_id!==worker.ownerId)continue;
         const thread=this.get<ThreadRecord>("thread",row.thread_id); const mower=this.get<MowerRecord>("mower",thread.mowerId);
-        if(mower.role==="adviser"?advisers>=1:ordinary>=worker.capacity)continue;
-        if(fleetCapacity!==undefined&&(mower.role==="adviser"?fleetAdvisers>=1:fleetCapacity>0&&fleetOrdinary>=fleetCapacity))continue;
+        const adviser=this.dedicatedAdviser(thread.id);
+        if(adviser?advisers>=1:ordinary>=capacity)continue;
+        if(fleetCapacity!==undefined&&(adviser?fleetAdvisers>=1:fleetCapacity>0&&fleetOrdinary>=fleetCapacity))continue;
         try{this.assertThreadAuthority(thread);}catch(error){this.setRunStatus(row.id,"error");this.event(thread.id,"system",{status:"error",text:(error as Error).message},row.id);continue;}
         // Threads with remote history are host-pinned until explicit checkpoint restore exists.
         const previous=this.db.query("SELECT worker_id FROM runs WHERE thread_id=? AND worker_id IS NOT NULL ORDER BY created_at DESC,rowid DESC LIMIT 1").get(thread.id) as {worker_id:string}|null;
@@ -303,14 +339,17 @@ export class ControlStore {
   }
   approvals(p:ControlPrincipal):ControlApproval[]{
     const rows=(p.admin?this.db.query("SELECT body FROM approvals").all():this.db.query("SELECT body FROM approvals WHERE owner_id=?").all(p.id)) as {body:string}[];
-    return rows.map(r=>JSON.parse(r.body));
+    return rows.map(r=>JSON.parse(r.body) as ControlApproval).filter(value=>!purgedOwner(this.db,"approval",value.id));
   }
   approval(approvalId:string,p?:ControlPrincipal):ControlApproval{
+    this.assertNotPurged("approval",approvalId,p);
     const row=this.db.query("SELECT body FROM approvals WHERE id=?").get(approvalId) as {body:string}|null;
     if(!row)throw new ControlError("approval not found",404);const a=JSON.parse(row.body) as ControlApproval;
     if(p&&!p.admin&&a.ownerId!==p.id)throw new ControlError("approval not found",404);return a;
   }
   requestApproval(value:ControlApproval,fingerprint:string):ControlApproval{
+    this.assertNotPurged("approval",value.id);
+    this.assertNotPurged("run",value.action.runId);
     return this.transaction(()=>{
       const existing=this.db.query("SELECT body FROM approvals WHERE run_id=? AND fingerprint=?").get(value.action.runId,fingerprint) as {body:string}|null;
       if(existing)return JSON.parse(existing.body);
@@ -337,10 +376,18 @@ export class ControlStore {
     for(const row of rows){const a=JSON.parse(row.body) as ControlApproval;a.status="expired";this.updateApproval(a);}
   }
   receipt<T>(p:ControlPrincipal,key:string,fingerprint:string,create:()=>T):T{
-    return this.transaction(()=>{const row=this.db.query("SELECT fingerprint,body FROM receipts WHERE owner_id=? AND key=?").get(p.id,key) as {fingerprint:string;body:string}|null;
+    return this.transaction(()=>{if(purgedReceipt(this.db,p.id,hash(key)))throw new ControlError("idempotent result controller copy was removed",410);const row=this.db.query("SELECT fingerprint,body FROM receipts WHERE owner_id=? AND key=?").get(p.id,key) as {fingerprint:string;body:string}|null;
       if(row){if(row.fingerprint!==fingerprint)throw new ControlError("idempotency key conflict",409);return JSON.parse(row.body);}
       const value=create();this.db.query("INSERT INTO receipts VALUES(?,?,?,?)").run(p.id,key,fingerprint,JSON.stringify(value));return value;});
   }
   saveConnection(value:BrokerConnection){this.put("connection",value);}
-  checkpoint(threadId:string):string|undefined{return (this.db.query("SELECT body FROM checkpoints WHERE thread_id=?").get(threadId) as {body:string}|null)?.body;}
+  saveCatalog(expected:BrokerConnection,catalog:Required<Pick<BrokerConnection,"tools"|"catalogDigest"|"discoveredAt">>):BrokerConnection{
+    if(Object.keys(catalog).some(k=>!["tools","catalogDigest","discoveredAt"].includes(k))||!Array.isArray(catalog.tools)||catalog.tools.length>512||!/^[0-9a-f]{64}$/.test(catalog.catalogDigest)||!Number.isFinite(Date.parse(catalog.discoveredAt)))throw new ControlError("invalid discovered catalog");
+    return this.transaction(()=>{
+      const latest=this.get<BrokerConnection>("connection",expected.id,{id:expected.ownerId,admin:false});
+      if(latest.enabled===false||canonical(catalogStorageIdentity(latest))!==canonical(catalogStorageIdentity(expected)))throw new ControlError("connector or its catalog changed during discovery; reload before retrying",409);
+      const updated={...latest,tools:catalog.tools,catalogDigest:catalog.catalogDigest,discoveredAt:catalog.discoveredAt};this.saveConnection(updated);return updated;
+    });
+  }
+  checkpoint(threadId:string):string|undefined{this.assertNotPurged("thread",threadId);return (this.db.query("SELECT body FROM checkpoints WHERE thread_id=?").get(threadId) as {body:string}|null)?.body;}
 }

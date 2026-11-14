@@ -35,6 +35,12 @@ test("mower purpose is snapshotted with admitted work and unsupported steering i
  expect(()=>store.submit(alice,thread.id,{text:"steer",requestId:"unsupported",mode:"steer"})).toThrow("steering must be explicitly supported");expect(store.threadRuns(alice,thread.id)).toHaveLength(2);
 });
 
+test("a queue from before model snapshots remains stopped instead of using a changed mower default",()=>{
+ const {store,path}=setup(),{thread}=fixture(store),run=store.submit(alice,thread.id,{text:"Old queued input",requestId:"old-model"});store.close();stores.splice(stores.indexOf(store),1);
+ const previous=new Database(path);previous.exec("ALTER TABLE runs DROP COLUMN instructions; ALTER TABLE runs DROP COLUMN model");previous.close();
+ const migrated=new ControlStore(path);stores.push(migrated);expect(migrated.run(run.id).status).toBe("interrupted");expect(migrated.run(run.id).model).toBeUndefined();expect(migrated.run(run.id).cancelRequested).toBe(true);expect(migrated.claim(local)).toBeNull();
+});
+
 describe("transactional control registry",()=>{
   test("names, profiles and FIFO submissions survive reopen with ownership enforced",()=>{
     const {store,path}=setup();const {mower,thread}=fixture(store);
@@ -85,5 +91,8 @@ test("permission adviser has one bounded reserved slot beside a parked capacity-
  const profile=store.createProfile(alice,{name:"Adviser",mode:"isolated",rules:[]});const adviser=store.createMower(alice,{name:"Gatekeeper",role:"adviser",profileId:profile.id,profileVersion:1});
  const a=store.createThread(alice,{mowerId:adviser.id,title:"Advice"}),b=store.createThread(alice,{mowerId:adviser.id,title:"Other advice"});
  store.submit(alice,a.id,{text:"Help with permission",requestId:"advice"});store.submit(alice,b.id,{text:"Other",requestId:"other"});
+ expect(store.claim(normal)).toBeNull(); // A display role alone never reserves capacity.
+ store.db.exec("CREATE TABLE permission_advisers(owner_id TEXT PRIMARY KEY,mower_id TEXT NOT NULL,thread_id TEXT NOT NULL,profile_id TEXT NOT NULL,profile_version INTEGER NOT NULL)");
+ store.db.query("INSERT INTO permission_advisers VALUES(?,?,?,?,?)").run(alice.id,adviser.id,a.id,profile.id,profile.version);
  expect(store.claim(normal)?.thread.id).toBe(a.id);expect(store.claim(normal)).toBeNull();
 });

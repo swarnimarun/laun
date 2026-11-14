@@ -161,6 +161,7 @@ function validateDraft(raw: string, profile: StoredProfile, approval: ControlApp
 /** Validate a completed model result into an unapplied proposal, with stable persistence. */
 export function inspectAdvice(service: ControlService, principal: ControlPrincipal, runId: string): AdviceResult {
   initialize(service);
+  service.store.assertNotPurged("advice",runId,principal);
   const row = service.store.db.query("SELECT * FROM permission_advice WHERE run_id=?").get(runId) as AdviceRow | null;
   if (!row || (!principal.admin && row.owner_id !== principal.id)) throw new ControlError("advice not found", 404);
   const stored = JSON.parse(row.body) as AdviceResult;

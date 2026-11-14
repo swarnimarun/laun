@@ -77,7 +77,7 @@ export function moveThreadWorker(store: ControlStore, principal: ControlPrincipa
     const worker = store.get<WorkerRecord>("worker", workerId);
     if (!worker.local && worker.ownerId !== thread.ownerId) throw new ControlError("worker not found", 404);
     const age = worker.lastSeenAt ? Date.now() - Date.parse(worker.lastSeenAt) : Infinity;
-    if (worker.status !== "online" || !Number.isFinite(age) || age < -5000 || age > 60_000) throw new ControlError("target worker must be online with a recent authenticated heartbeat", 409);
+    if (worker.status !== "online" || worker.drainingAt || !Number.isFinite(age) || age < -5000 || age > 60_000) throw new ControlError("target worker must accept work and have a recent authenticated heartbeat", 409);
     const hasHistory = !!store.db.query("SELECT id FROM runs WHERE thread_id=? AND generation>0 LIMIT 1").get(thread.id);
     let checkpoint: ThreadLifecycleResult["checkpoint"];
     if (hasHistory) {

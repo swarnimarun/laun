@@ -1,17 +1,21 @@
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
 import { evaluatePermission } from "@laun/policy";
 import { isAgentEvent } from "@laun/protocol";
-import { captureCheckpoint, recoverCheckpoint, placementChanged, recordPlacement } from "@laun/storage";
+import { captureCheckpoint, recoverCheckpoint, placementChanged, recordPlacement, inspectDiskReserve, StorageAdmissionError, type DiskReserve } from "@laun/storage";
 import type { AgentRuntime, BrokerConnection, ControlApproval, ControlContext, ControlPrincipal, ControlRun, ControlState, MowerRecord,
   PermissionAction, RuntimePermissionRequest, StoredProfile, TaskRecord, ThreadRecord, WorkerJob, WorkerRecord } from "@laun/protocol";
 import { ControlError, ControlStore, canonical, hash, id, now, record, text } from "./store.js";
 import { requestAdvice } from "./adviser.js";
+import { claimHostCleanup,finishHostCleanup,heartbeatHostCleanup } from "./cleanup.js";
+import type {HostCleanupJob,RuntimeThreadCleanupResult} from "@laun/protocol";
+import { createRunInferenceClient } from "./inference.js";
+import { retainedFamilyTokens } from "./retention-guard.js";
 import type { RuntimeInferenceService } from "@laun/protocol";
 
 export interface BrokerSurface {
   discover(context:ControlContext,connectionId:string):Promise<BrokerConnection>;
-  invoke(context:ControlContext,connectionId:string,tool:string,args:unknown,digest:string):Promise<unknown>;
+  invoke(context:ControlContext,connectionId:string,tool:string,args:unknown,digest:string,signal?:AbortSignal):Promise<unknown>;
 }
 export interface ControlOptions {
   store:ControlStore; runtime?:AgentRuntime; dataDir:string; mode:ControlState["readiness"]["mode"];
@@ -20,6 +24,7 @@ export interface ControlOptions {
   defaultModel?:string;
   maxConcurrentRuns?:number;
   inference?:RuntimeInferenceService;
+  minFreeDiskBytes?:number;
 }
 const owner = (ownerId:string):ControlPrincipal=>({id:ownerId,admin:false});
 const sleep = (ms:number)=>new Promise<void>(r=>setTimeout(r,ms));
@@ -45,11 +50,16 @@ export class ControlService {
   private ticking=false;
   private closed=false;
   private jobs=new Set<Promise<void>>();
+  private storageBlocked=false;
+  private localCleanup?:{controller:AbortController;promise:Promise<void>};
+  private cleanupError?:string;
   constructor(readonly options:ControlOptions){
     this.store=options.store;this.runtime=options.runtime;this.broker=options.broker;
+    options.inference ??= this.runtime?.inference;
     mkdirSync(options.dataDir,{recursive:true,mode:0o700});
+    this.store.admissionGuard=()=>{const health=this.storageHealth();if(!health.acceptingWork)throw new StorageAdmissionError(health.message);};
     if(this.runtime){
-      const worker:WorkerRecord={id:"local",ownerId:"service",name:"Local yard",labels:["local"],capacity:options.capacity??2,status:"online",lastSeenAt:now(),createdAt:now(),local:true,checkpointVersion:this.runtime.checkpointVersion};
+      const worker:WorkerRecord={id:"local",ownerId:"service",name:"Local yard",labels:["local"],capacity:options.capacity??2,status:"online",lastSeenAt:now(),createdAt:now(),local:true,checkpointVersion:this.runtime.checkpointVersion,durabilityAdapter:this.runtime.durabilityAdapter,inferenceMode:"controller"};
       try {worker.createdAt=this.store.get<WorkerRecord>("worker","local").createdAt;}catch{}
       this.store.put("worker",worker);
     }
@@ -57,9 +67,15 @@ export class ControlService {
     this.timer.unref();
   }
   readiness():ControlState["readiness"]{
-    return {runtime:!!this.runtime,mode:this.options.mode,inferenceRelay:!!this.options.inference,defaultModel:this.options.defaultModel,message:this.runtime ?
+    return {runtime:!!this.runtime,mode:this.options.mode,storage:this.storageHealth(),durableJournal:true,inferenceRelay:!!this.options.inference,defaultModel:this.options.defaultModel,message:this.runtime ?
       this.options.mode==="isolated"?"Pi runtime tools execute through OpenShell":"Trusted local execution: tools can access this user’s host; use isolated VPS mode for containment":
       "No local runtime configured. Enroll a yard or enable explicit trusted local/OpenShell execution."};
+  }
+  storageHealth():DiskReserve{
+    const minimum=this.options.minFreeDiskBytes??512*1024*1024;
+    try{const paths=new Set([this.options.dataDir,...(this.store.path!==":memory:"?[dirname(resolve(this.store.path))]:[])]);
+      const reports=[...paths].map(path=>inspectDiskReserve(path,minimum));return reports.find(r=>!r.acceptingWork)??reports.sort((a,b)=>a.freeBytes-b.freeBytes)[0]!;
+    }catch{return {freeBytes:0,minimumBytes:minimum,acceptingWork:false,message:"Cannot inspect controller storage; restore access before admitting more work"};}
   }
   async listModels(){return await (this.options.inference?.listModels?.()??this.runtime?.listModels?.())??[];}
   state(p:ControlPrincipal):ControlState{
@@ -69,7 +85,12 @@ export class ControlService {
       workers,tasks:this.store.list("task",p),approvals:this.store.approvals(p),connections:this.store.list("connection",p),readiness:this.readiness()};
   }
   context(run:ControlRun):ControlContext{
-    const thread=this.store.get<ThreadRecord>("thread",run.threadId);return {principalId:thread.ownerId,workspaceId:thread.workspaceId,mowerId:thread.mowerId,threadId:thread.id,runId:run.id};
+    const thread=this.store.get<ThreadRecord>("thread",run.threadId);return {principalId:thread.ownerId,workspaceId:thread.workspaceId,mowerId:thread.mowerId,threadId:thread.id,runId:run.id,generation:run.generation};
+  }
+  assertActiveContext(context:ControlContext):void{
+    this.store.admissionGuard?.();const run=this.store.run(context.runId,owner(context.principalId)),thread=this.store.get<ThreadRecord>("thread",context.threadId,owner(context.principalId));
+    if(!Number.isSafeInteger(context.generation)||context.generation!==run.generation||run.threadId!==thread.id||thread.mowerId!==context.mowerId||thread.workspaceId!==context.workspaceId||run.cancelRequested||!run.workerId)throw new ControlError("stale broker context",409);
+    this.store.fence(run.id,run.workerId,context.generation!);this.store.assertThreadAuthority(thread);
   }
   private profiles(thread:ThreadRecord):StoredProfile[]{
     const result:StoredProfile[]=[];let current:ThreadRecord|undefined=thread;const seen=new Set<string>();
@@ -79,9 +100,11 @@ export class ControlService {
   }
   async authorize(context:ControlContext,request:RuntimePermissionRequest,callId:string=id()):Promise<void>{
     const run=this.store.run(context.runId);const thread=this.store.get<ThreadRecord>("thread",context.threadId);
+    if(context.generation!==undefined&&context.generation!==run.generation)throw new ControlError("stale run generation",409);
     if(run.threadId!==thread.id||thread.ownerId!==context.principalId||thread.mowerId!==context.mowerId||thread.workspaceId!==context.workspaceId)throw new ControlError("action identity mismatch",403);
-    const action:PermissionAction={id:`${callId}_g${run.generation}`,...context,operation:request.operation,resource:request.resource,argumentsDigest:hash(canonical(request.arguments))};
+    const action:PermissionAction={id:`${callId}_g${run.generation}`,...context,generation:run.generation,operation:request.operation,resource:request.resource,argumentsDigest:hash(canonical(request.arguments))};
     const evaluate=()=>{
+      this.store.admissionGuard?.();
       const current=this.store.run(run.id);
       this.store.assertThreadAuthority(this.store.get("thread",thread.id));
       if(current.generation!==run.generation)throw new ControlError("stale run generation",409);
@@ -139,15 +162,48 @@ export class ControlService {
   async tick(){
     if(this.closed||this.ticking)return;this.ticking=true;
     try{
+      this.scheduleLocalCleanup();
+      const storage=this.storageHealth();if(!storage.acceptingWork){
+        if(!this.storageBlocked)console.error(`[control] ${storage.message}`);this.storageBlocked=true;
+        // Stop local effects before any metadata write that could fail at ENOSPC.
+        for(const active of this.active.values()){active.controller.abort();this.cancelRuntime(active.job.thread.id);}
+        for(const run of this.store.runs({id:"service",admin:true}).filter(r=>["running","waiting_permission"].includes(r.status))){
+          try{this.store.transaction(()=>{this.store.setRunStatus(run.id,"interrupted");this.store.db.query("UPDATE runs SET cancel_requested=1 WHERE id=?").run(run.id);this.store.expireRunApprovals(run.id);this.store.event(run.threadId,"system",{status:"interrupted",text:"Execution stopped at the controller storage reserve. Free space and confirm it has stopped before resuming."},run.id);});}catch{}
+        }
+        return;
+      }this.storageBlocked=false;
       this.store.interruptExpired();this.reconcileTasks();this.drainTaskResults();
       if(!this.runtime)return;
       const worker=this.store.get<WorkerRecord>("worker","local");
       this.store.heartbeat(worker.id);
+      if(this.localCleanup)return;
       while(this.active.size<worker.capacity+1){const job=this.store.claim(worker,30_000,this.options.maxConcurrentRuns??4);if(!job)break;
         const controller=new AbortController();this.active.set(job.run.id,{job,controller});
         const promise=this.execute(job,controller).catch(e=>console.error("[control] execution cleanup:",e.message));
         this.jobs.add(promise);void promise.finally(()=>this.jobs.delete(promise));}
     }finally{this.ticking=false;}
+  }
+  private scheduleLocalCleanup(){
+    if(this.closed||this.localCleanup||this.active.size||!this.runtime?.cleanupThread)return;
+    let job:HostCleanupJob|null;
+    try{job=claimHostCleanup(this.store,"local");this.cleanupError=undefined;}
+    catch(error){const message=(error as Error).message;if(this.cleanupError!==message)console.error(`[control] cleanup waiting: ${message}`);this.cleanupError=message;return;}
+    if(!job)return;
+    const controller=new AbortController(),promise=this.executeLocalCleanup(job,controller);
+    this.localCleanup={controller,promise};this.jobs.add(promise);
+    void promise.finally(()=>{this.jobs.delete(promise);if(this.localCleanup?.promise===promise)this.localCleanup=undefined;if(!this.closed)void this.tick();});
+  }
+  private async executeLocalCleanup(job:HostCleanupJob,controller:AbortController):Promise<void>{
+    let renewing=false;
+    const timer=setInterval(()=>{if(renewing)return;renewing=true;try{heartbeatHostCleanup(this.store,"local",job.planId,job.generation);}catch{controller.abort();}finally{renewing=false;}},1000);timer.unref();
+    let result:RuntimeThreadCleanupResult;
+    try{
+      heartbeatHostCleanup(this.store,"local",job.planId,job.generation);
+      result=await this.runtime!.cleanupThread!({threadId:job.threadId,placementIds:job.placementIds,confirmedStopped:true,signal:controller.signal});
+      controller.signal.throwIfAborted();
+    }catch{result={verified:false,removedPaths:0,removedSandboxes:0,outstanding:["Cleanup stopped without a verified result; inspect this host before approving another attempt."]};}
+    try{finishHostCleanup(this.store,"local",job.planId,job.generation,result);}catch{/* A withdrawn/expired generation remains blocked; never retry deletion. */}
+    finally{clearInterval(timer);}
   }
   private async execute(job:WorkerJob,controller:AbortController){
     const {run,thread,mower}=job;const runtime=this.runtime!;
@@ -163,8 +219,10 @@ export class ControlService {
       mkdirSync(base,{recursive:true,mode:0o700});
       await recordPlacement(base,thread.placementId);
       const context=this.context(run);
-      const result=await runtime.run({threadId:thread.id,runId:run.id,placementId:thread.placementId,prompt:run.prompt,model:run.model??mower.model,workspaceRoot:join(base,"work"),sessionDir:join(base,"session")},{
+      const result=await runtime.run({threadId:thread.id,runId:run.id,placementId:thread.placementId,prompt:run.prompt,instructions:run.instructions,model:run.model??mower.model,workspaceRoot:join(base,"work"),sessionDir:join(base,"session")},{
+        inference:this.options.inference?createRunInferenceClient(this,{runId:run.id,generation:run.generation,workerId:"local"},controller.signal):undefined,
         emit:event=>{this.store.fence(run.id,"local",run.generation);if(event.sessionId!==thread.id||!isAgentEvent(event))throw new ControlError("invalid runtime event",502);
+          if(event.type==="usage"&&this.store.db.query("SELECT 1 FROM inference_calls WHERE run_id=? AND generation=? LIMIT 1").get(run.id,run.generation))return;
           this.store.event(thread.id,"agent",{event},run.id);this.enforceBudget(thread,run,event);},
         authorize:request=>this.authorize(context,{...request,signal:request.signal??controller.signal}),
         invokeTool:(name,args,signal)=>this.invoke(context,name,args,signal),
@@ -186,7 +244,7 @@ export class ControlService {
     let root=thread;while(root.parentThreadId)root=this.store.get("thread",root.parentThreadId);
     const family=new Set<string>([root.id]);let changed=true;const all=this.store.list<ThreadRecord>("thread",owner(thread.ownerId));
     while(changed){changed=false;for(const t of all)if(t.parentThreadId&&family.has(t.parentThreadId)&&!family.has(t.id)){family.add(t.id);changed=true;}}
-    let tokens=0;for(const t of family){const rows=this.store.db.query("SELECT payload FROM events WHERE thread_id=? AND kind='agent'").all(t) as {payload:string}[];
+    let tokens=retainedFamilyTokens(this.store.db,root.id);for(const t of family){const rows=this.store.db.query("SELECT payload FROM events WHERE thread_id=? AND kind='agent'").all(t) as {payload:string}[];
       for(const row of rows){const e=JSON.parse(row.payload).event;if(e?.type==="usage")tokens+=Math.max(0,Number(e.totalTokens??((e.inputTokens??0)+(e.outputTokens??0)))||0);}}
     if(tokens>max){this.cancelTree(owner(thread.ownerId),root.id);this.store.event(root.id,"system",{text:`Family token budget exceeded (${tokens}/${max})`},run.id);}
   }
@@ -202,7 +260,9 @@ export class ControlService {
     }
   }
   async invoke(context:ControlContext,name:string,input:unknown,signal?:AbortSignal):Promise<unknown>{
+    this.store.admissionGuard?.();
     const p=owner(context.principalId);const run=this.store.run(context.runId,p);const source=this.store.get<ThreadRecord>("thread",context.threadId,p);
+    if(context.generation!==undefined&&context.generation!==run.generation)throw new ControlError("stale run generation",409);
     if(run.threadId!==source.id||source.mowerId!==context.mowerId||source.workspaceId!==context.workspaceId)throw new ControlError("tool context identity mismatch",403);
     if(run.cancelRequested||!["running","waiting_permission"].includes(run.status))throw new ControlError("run inactive",409);
     const assertCurrent=()=>{const current=this.store.run(run.id,p);this.store.assertThreadAuthority(this.store.get("thread",source.id,p));if(current.generation!==run.generation||current.cancelRequested||!current.leaseUntil||Date.parse(current.leaseUntil)<=Date.now()||!["running","waiting_permission"].includes(current.status))throw new ControlError("stale run generation",409);};
@@ -248,7 +308,7 @@ export class ControlService {
       if(!this.broker)throw new ControlError("MCP broker unavailable",503);
       const connectionId=text(b.connectionId,"connectionId",100);this.store.get("connection",connectionId,p);
       assertCurrent();
-      return this.broker.invoke(context,connectionId,text(b.tool,"tool",256),b.arguments??{},text(b.schemaDigest,"schemaDigest",64));
+      return this.broker.invoke({...context,generation:run.generation},connectionId,text(b.tool,"tool",256),b.arguments??{},text(b.schemaDigest,"schemaDigest",64),signal);
     }
     throw new ControlError("unknown broker tool",404);
   }
@@ -293,5 +353,13 @@ export class ControlService {
       try{this.store.submit(p,thread.id,{text:payload.text,requestId:row.id},"task");this.store.db.query("UPDATE outbox SET status='delivered' WHERE id=?").run(row.id);}catch{/* Pending result stays durable until admission is possible. */}
     });
   }
-  async close(){this.closed=true;clearInterval(this.timer);for(const a of this.active.values())a.controller.abort();await this.runtime?.close();await Promise.allSettled([...this.jobs]);}
+  async close(){
+    if(this.closed){await Promise.allSettled([...this.jobs]);return;}
+    this.closed=true;clearInterval(this.timer);this.localCleanup?.controller.abort();for(const a of this.active.values())a.controller.abort();
+    try{this.store.transaction(()=>{for(const run of this.store.runs({id:"service",admin:true}).filter(r=>["running","waiting_permission"].includes(r.status))){
+      this.store.setRunStatus(run.id,"interrupted");this.store.db.query("UPDATE runs SET cancel_requested=1 WHERE id=?").run(run.id);this.store.expireRunApprovals(run.id);
+      this.store.event(run.threadId,"system",{status:"interrupted",text:"Controller stopped during execution. Confirm the prior attempt has stopped before resuming or abandoning it."},run.id);
+    }});}catch{/* Shutdown must still stop execution when metadata writes fail. */}
+    await this.runtime?.close();await Promise.allSettled([...this.jobs]);
+  }
 }

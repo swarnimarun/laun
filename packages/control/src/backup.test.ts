@@ -10,7 +10,7 @@ import { createControlBackup, restoreControlBackup } from "./backup.js";
 import { ensureAdviser } from "./adviser.js";
 import { handleTelegramConnectorRequest } from "./connectors.js";
 import { ControlService } from "./service.js";
-import { ControlStore, hash } from "./store.js";
+import { ControlStore, canonical, hash } from "./store.js";
 
 const dirs: string[] = [], stores: ControlStore[] = [], services: ControlService[] = [];
 const p = { id: `user_${"a".repeat(32)}`, admin: false };
@@ -52,6 +52,14 @@ async function setup() {
 }
 
 describe("offline v2 control backup and safe restore", () => {
+  test("known earlier schema-one backups restore and gain nullable instruction snapshots without changing authority",async()=>{
+    const f=await setup();await createControlBackup({dataDir:f.source,destination:f.backup,confirmOffline:true});
+    const archived=new Database(join(f.backup,"control.sqlite"));archived.exec("ALTER TABLE runs DROP COLUMN instructions");archived.close();rewriteManifest(f.backup);
+    await restoreControlBackup({backupDir:f.backup,targetDir:f.target,confirmOffline:true});
+    const restored=new ControlStore(join(f.target,"control.sqlite"));stores.push(restored);
+    expect((restored.db.query("PRAGMA table_info(runs)").all() as {name:string}[]).some(c=>c.name==="instructions")).toBe(true);
+    expect(restored.run(f.active.id).instructions).toBeUndefined();expect(restored.run(f.active.id).status).toBe("interrupted");expect(restored.run(f.queued.id).status).toBe("interrupted");
+  });
   test("consistent SQLite archive preserves checkpoints, principals, profiles and references without exporting credential files", async () => {
     const f = await setup();
     const manifest = await createControlBackup({ dataDir: f.source, destination: f.backup, confirmOffline: true });
@@ -77,11 +85,17 @@ describe("offline v2 control backup and safe restore", () => {
   test("old queued/running authority never replays; links, approvals and credentials must be renewed", async () => {
     const f = await setup(); await createControlBackup({ dataDir: f.source, destination: f.backup, confirmOffline: true });
     // The original yard later performed work represented as queued in the
-    // snapshot. Restoring that snapshot must not execute it a second time.
-    f.store.finish(f.active.id, f.worker.id, f.job.run.generation, "done", "effect already happened after backup");
+    // snapshot. The fixture has stopped its controller, so first simulate an
+    // operator reconciling that interrupted attempt and issuing a fresh lease.
+    // Its stale pre-shutdown generation must remain unusable.
+    expect(()=>f.store.finish(f.active.id,f.worker.id,f.job.run.generation,"done")).toThrow("stale run lease");
+    f.store.setRunStatus(f.active.id,"queued");f.store.db.query("UPDATE runs SET cancel_requested=0,lease_until=NULL WHERE id=?").run(f.active.id);
+    const resumed=f.store.claim(f.worker)!;expect(resumed.run.id).toBe(f.active.id);
+    f.store.finish(f.active.id, f.worker.id, resumed.run.generation, "done", "effect already happened after backup");
     const later = f.store.claim(f.worker)!; expect(later.run.id).toBe(f.queued.id); f.store.finish(later.run.id, f.worker.id, later.run.generation, "done", "queued action also already happened");
     const result = await restoreControlBackup({ backupDir: f.backup, targetDir: f.target, confirmOffline: true });
-    expect(result.safety.interruptedRuns).toBe(2); expect(result.safety.expiredApprovals).toBe(1); expect(result.safety.revokedWorkers).toBe(1); expect(result.safety.revokedHumanKeys).toBe(1);
+    // Graceful fixture shutdown has already expired its pending approval.
+    expect(result.safety.interruptedRuns).toBe(2); expect(result.safety.expiredApprovals).toBe(0); expect(result.safety.revokedWorkers).toBe(1); expect(result.safety.revokedHumanKeys).toBe(1);
     expect(result.safety.interruptedInferenceCalls).toBe(1);
     expect(result.safety.uncertainDeliveries).toBeGreaterThan(0);
     const store = new ControlStore(join(f.target, "control.sqlite")); stores.push(store);
@@ -98,6 +112,16 @@ describe("offline v2 control backup and safe restore", () => {
     const deliveries = await handleTelegramConnectorRequest(service, request("/connectors/telegram/poll", { botId: "123" }, true), telegram);
     expect(await deliveries!.json()).toMatchObject({ deliveries: [] });
     expect(() => store.decide(p, f.approval.id, "approve")).toThrow("already settled");
+  });
+
+  test("unused approvals captured before an abrupt stop become inert on restore",async()=>{
+    const f=await setup();
+    // Model an offline crash image that retained an unused, previously approved
+    // action rather than the fixture's orderly shutdown expiration.
+    f.store.updateApproval({...f.approval,status:"approved"});
+    await createControlBackup({dataDir:f.source,destination:f.backup,confirmOffline:true});
+    const result=await restoreControlBackup({backupDir:f.backup,targetDir:f.target,confirmOffline:true});expect(result.safety.expiredApprovals).toBe(1);
+    const restored=new ControlStore(join(f.target,"control.sqlite"));stores.push(restored);expect(restored.approval(f.approval.id).status).toBe("expired");expect(()=>restored.decide(p,f.approval.id,"approve")).toThrow("already settled");
   });
 
   test("tampering fails before publishing and never changes the original source or existing target", async () => {
@@ -117,7 +141,7 @@ describe("offline v2 control backup and safe restore", () => {
     const db = new Database(join(f.backup, "control.sqlite"));
     if (kind === "schema") db.exec("CREATE TABLE future_automatic_effects(payload TEXT)");
     else if (kind === "reference") { const thread = f.store.get<ThreadRecord>("thread", f.thread.id); thread.ownerId = `user_${"b".repeat(32)}`; db.query("UPDATE objects SET owner_id=?,body=? WHERE kind='thread' AND id=?").run(thread.ownerId, JSON.stringify(thread), thread.id); }
-    else db.exec("ALTER TABLE runs RENAME TO previous_runs; CREATE TABLE runs(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL,thread_id TEXT NOT NULL,request_id TEXT NOT NULL,prompt TEXT NOT NULL,status TEXT NOT NULL,worker_id TEXT,generation INTEGER NOT NULL DEFAULT 0,lease_until TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,cancel_requested INTEGER NOT NULL DEFAULT 0,summary TEXT,model TEXT); INSERT INTO runs SELECT * FROM previous_runs; DROP TABLE previous_runs; CREATE INDEX run_queue ON runs(status,created_at)");
+    else db.exec("ALTER TABLE runs RENAME TO previous_runs; CREATE TABLE runs(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL,thread_id TEXT NOT NULL,request_id TEXT NOT NULL,prompt TEXT NOT NULL,status TEXT NOT NULL,worker_id TEXT,generation INTEGER NOT NULL DEFAULT 0,lease_until TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,cancel_requested INTEGER NOT NULL DEFAULT 0,summary TEXT,model TEXT,instructions TEXT); INSERT INTO runs SELECT * FROM previous_runs; DROP TABLE previous_runs; CREATE INDEX run_queue ON runs(status,created_at)");
     db.close(); rewriteManifest(f.backup);
     await expect(restoreControlBackup({ backupDir: f.backup, targetDir: f.target, confirmOffline: true })).rejects.toThrow(kind === "schema" ? "unsupported database schema" : kind === "reference" ? "cross-owner" : "idempotency constraint");
     expect(existsSync(f.target)).toBe(false);
@@ -131,6 +155,37 @@ describe("offline v2 control backup and safe restore", () => {
     expect(JSON.parse(readFileSync(join(f.target, "keys.json"), "utf8"))).toEqual([]);
   });
 
+  test("central durable commit order and hashes survive an inert restore", async () => {
+    const f = await setup();
+    for (const [index, kind] of ["snapshot", "commits"].entries()) {
+      const envelope = { adapter: "pi-durable@1.5.2", version: 1, payload: { kind, opaque: "inert runtime data" } }, body = canonical(envelope);
+      f.store.db.query("INSERT INTO durable_commits VALUES(?,?,?,?,?,?,?,?)").run(f.thread.id, index + 1, hash(canonical({ expectedSequence: index, envelope })), hash(body), envelope.adapter, 1, body, new Date().toISOString());
+    }
+    await createControlBackup({ dataDir: f.source, destination: f.backup, confirmOffline: true }); await restoreControlBackup({ backupDir: f.backup, targetDir: f.target, confirmOffline: true });
+    const store = new ControlStore(join(f.target, "control.sqlite")); stores.push(store);
+    expect(store.db.query("SELECT * FROM durable_commits ORDER BY sequence").all()).toEqual(f.store.db.query("SELECT * FROM durable_commits ORDER BY sequence").all());
+    expect(store.run(f.active.id).status).toBe("interrupted"); expect(store.claim(f.worker)).toBeNull();
+  });
+  test.each(["sequence gap", "adapter change", "fingerprint"])("a recomputed archive digest cannot hide a durable ledger %s", async problem => {
+    const f = await setup();
+    for (const [index, kind] of ["snapshot", "commits"].entries()) {
+      if (problem === "sequence gap" && index === 0) continue;
+      const envelope = { adapter: problem === "adapter change" && index === 1 ? "other-adapter" : "pi-durable@1.5.2", version: 1, payload: { kind } }, body = canonical(envelope);
+      f.store.db.query("INSERT INTO durable_commits VALUES(?,?,?,?,?,?,?,?)").run(f.thread.id, index + 1, hash(canonical({ expectedSequence: index, envelope })), problem === "fingerprint" ? "0".repeat(64) : hash(body), envelope.adapter, 1, body, new Date().toISOString());
+    }
+    await expect(createControlBackup({ dataDir: f.source, destination: f.backup, confirmOffline: true })).rejects.toThrow("durable"); expect(existsSync(f.backup)).toBe(false);
+  });
+  test("primary director intent survives inactive resources, while cross-owner pointers fail closed", async () => {
+    const f = await setup(); const profile = f.store.createProfile(p, { name: "Primary snapshot", mode: "isolated", rules: [] }), mower = f.store.createMower(p, { name: "Primary director", role: "director", profileId: profile.id, profileVersion: 1 }), thread = f.store.createThread(p, { mowerId: mower.id, title: "Primary history" });
+    f.store.db.exec("CREATE TABLE owner_onboarding(owner_id TEXT PRIMARY KEY,body TEXT NOT NULL)");
+    const pointer = { ownerId: p.id, primaryMowerId: mower.id, primaryThreadId: thread.id, profileId: profile.id, profileVersion: 1, revision: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    f.store.db.query("INSERT INTO owner_onboarding VALUES(?,?)").run(p.id, JSON.stringify(pointer));
+    mower.archivedAt = new Date().toISOString(); f.store.put("mower", mower); profile.revokedAt = new Date().toISOString(); f.store.db.query("UPDATE objects SET body=? WHERE kind='profile' AND id=?").run(JSON.stringify(profile), `${profile.id}:1`);
+    await createControlBackup({ dataDir: f.source, destination: f.backup, confirmOffline: true }); await restoreControlBackup({ backupDir: f.backup, targetDir: f.target, confirmOffline: true });
+    const restored = new ControlStore(join(f.target, "control.sqlite")); stores.push(restored); expect(JSON.parse((restored.db.query("SELECT body FROM owner_onboarding").get() as { body: string }).body)).toEqual(pointer);
+    const db = new Database(join(f.backup, "control.sqlite")); db.query("UPDATE owner_onboarding SET owner_id=?,body=?").run(`user_${"b".repeat(32)}`, JSON.stringify({ ...pointer, ownerId: `user_${"b".repeat(32)}` })); db.close(); rewriteManifest(f.backup);
+    await expect(restoreControlBackup({ backupDir: f.backup, targetDir: join(f.root, "invalid-pointer"), confirmOffline: true })).rejects.toThrow("cross-owner");
+  });
   test("symlinks, unknown payload files and absent explicit offline confirmation fail closed", async () => {
     const f = await setup();
     await expect(createControlBackup({ dataDir: f.source, destination: f.backup, confirmOffline: false as true })).rejects.toThrow("confirmOffline");

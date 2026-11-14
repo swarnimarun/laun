@@ -3,6 +3,7 @@ import { checkBearer } from "@laun/protocol";
 import type { ControlApproval, ControlPrincipal, MowerRecord, TaskRecord, TelegramDelivery, TelegramIdentity, TelegramInboundUpdate, TelegramIngestResult, ThreadEvent, ThreadRecord } from "@laun/protocol";
 import { ControlService } from "./service.js";
 import { canonical, ControlError, hash, id, now, record, text } from "./store.js";
+import { ownerOnboarding } from "./onboarding.js";
 
 export interface TelegramConnectorOptions {
   serviceToken: string;
@@ -14,7 +15,7 @@ export interface TelegramConnectorOptions {
 }
 interface Identity extends TelegramIdentity { topicId: string }
 interface Route { route_key: string; bot_id: string; user_id: string; chat_id: string; topic_id: string; owner_id: string; thread_id: string }
-interface Payload { botId: string; userId: string; chatId: string; topicId: string; routeKey: string; text: string; buttons?: TelegramDelivery["buttons"]; onboarding?: boolean }
+interface Payload { botId: string; userId: string; chatId: string; topicId: string; routeKey: string; text: string; buttons?: TelegramDelivery["buttons"]; onboarding?: boolean; sourceThreadId?:string;sourceThreadIds?:string[];sourceVersion?:1 }
 interface OutboxRow { id: string; owner_id: string; destination: string; body: string; status: string }
 const initialized = new WeakSet<object>();
 const HELP = "🌱 Laun · your mower crew\n\n/link <code> — link the account code from the web app (private chat only)\n/new [mower name] | <goal> — start a named mower thread\n/mowers — list your mowers\n/thread [thread id] — inspect or change this chat/topic’s thread\n/delegate [mower name] | <goal> — delegate from the selected thread\n/status [thread id] — progress and pending permission requests\n/approve <handle> or /deny <handle> — decide an exact request\n/deliveries — inspect uncertain deliveries\n/retry <delivery id> — explicitly retry a possibly delivered message\n\nPlain text follows up through a durable queue. Link your account before starting work. Group chats require a separate server allowlist.";
@@ -54,12 +55,12 @@ function splitTelegram(value: string): string[] {
   for (const char of value) { if (current.length + char.length > 3500) { chunks.push(current); current = ""; } current += char; }
   if (current) chunks.push(current); return chunks;
 }
-function enqueue(service: ControlService, scope: Identity, ownerId: string, sourceId: string, value: string, buttons?: TelegramDelivery["buttons"], onboarding = false) {
+function enqueue(service: ControlService, scope: Identity, ownerId: string, sourceId: string, value: string, buttons?: TelegramDelivery["buttons"], onboarding = false, sourceThreadId?:string,sourceThreadIds?:string[]) {
   const key = routeKey(scope);
   const chunks = splitTelegram(value);
   for (let index = 0; index < chunks.length; index++) {
     const deliveryId = hash(`telegram:${scope.botId}:${key}:${sourceId}:${index}`);
-    const payload: Payload = { ...scope, routeKey: key, text: chunks[index]!, ...(index === chunks.length - 1 && buttons ? { buttons } : {}), ...(onboarding ? { onboarding: true } : {}) };
+    const payload: Payload = { ...scope, routeKey: key, text: chunks[index]!, ...(index === chunks.length - 1 && buttons ? { buttons } : {}), ...(onboarding ? { onboarding: true } : {}),sourceVersion:1,...(sourceThreadId?{sourceThreadId}:{}),...(sourceThreadIds?{sourceThreadIds}:{}) };
     service.store.db.query("INSERT OR IGNORE INTO outbox(id,owner_id,destination,body,status) VALUES(?,?,?,?,'pending')").run(deliveryId, ownerId, `telegram:${key}`, JSON.stringify(payload));
     service.store.db.query("INSERT OR IGNORE INTO telegram_deliveries(id,bot_id,next_at,updated_at) VALUES(?,?,?,?)").run(deliveryId, scope.botId, now(), now());
   }
@@ -108,14 +109,15 @@ function pickMower(service: ControlService, ownerId: string, selector: string | 
     return service.store.createMower(p, { name: selector, model: options.defaultModel, ...(parent ? { profileId: parent.profileId, profileVersion: parent.profileVersion } : {}) });
   }
   if (parent) return service.store.createMower(p, { name: `Mower ${id().slice(0, 6)}`, model: service.store.get<MowerRecord>("mower", parent.mowerId, p).model, profileId: parent.profileId, profileVersion: parent.profileVersion });
-  return all.find((m) => m.role === "director") ?? service.store.createMower(p, { name: "Groundskeeper", role: "director", model: options.defaultModel });
+  const primary=ownerOnboarding(service,p)?.primaryMowerId;
+  return all.find(m=>m.id===primary&&m.role==="director")??all.find((m) => m.role === "director") ?? service.store.createMower(p, { name: all.some(m=>m.name.toLowerCase()==="groundskeeper")?`Groundskeeper ${id().slice(0,6)}`:"Groundskeeper", role: "director", model: options.defaultModel });
 }
 function namedGoal(input: string): { selector?: string; goal: string } {
   const split = input.indexOf("|");
   if (split < 0) return { goal: text(input, "goal") };
   return { selector: input.slice(0, split).trim() || undefined, goal: text(input.slice(split + 1), "goal") };
 }
-function command(service: ControlService, scope: Identity, input: TelegramInboundUpdate, options: TelegramConnectorOptions): { text: string; ownerId: string; buttons?: TelegramDelivery["buttons"]; callbackAnswer?: string; onboarding?: boolean } {
+function command(service: ControlService, scope: Identity, input: TelegramInboundUpdate, options: TelegramConnectorOptions): { text: string; ownerId: string; buttons?: TelegramDelivery["buttons"]; callbackAnswer?: string; onboarding?: boolean;sourceThreadIds?:string[] } {
   const ownerId = linkedOwner(service, scope);
   const fallbackOwner = `telegram_${scope.botId}_${scope.userId}`;
   const source = input.text?.trim() ?? "";
@@ -145,17 +147,18 @@ function command(service: ControlService, scope: Identity, input: TelegramInboun
   if (name === "approve" || name === "deny") return { ownerId, text: decideHandle(service, scope, ownerId, args, name) };
   if (name === "mowers") return { ownerId, text: service.store.list<MowerRecord>("mower", p).filter((m) => !m.archivedAt).slice(0, 30).map((m) => `${m.name} · ${m.role}\n${m.id}`).join("\n\n") || "No mowers yet. /new <goal> creates your groundskeeper." };
   if (name === "thread") {
-    if (args) { const thread = service.store.get<ThreadRecord>("thread", args, p); if (thread.archivedAt) throw new ControlError("Thread is archived"); selectThread(service, scope, ownerId, thread); return { ownerId, text: `Routing this user/chat/topic to ${thread.title}\n${thread.id}` }; }
+    if (args) { const thread = service.store.get<ThreadRecord>("thread", args, p); if (thread.archivedAt) throw new ControlError("Thread is archived"); selectThread(service, scope, ownerId, thread); return { ownerId,sourceThreadIds:[thread.id],text: `Routing this user/chat/topic to ${thread.title}\n${thread.id}` }; }
     const selected = currentThread(service, scope, ownerId);
-    return { ownerId, text: `${selected ? `Selected: ${selected.title}\n${selected.id}\n\n` : "No thread selected.\n\n"}${service.store.list<ThreadRecord>("thread", p).filter((t) => !t.archivedAt).slice(-10).map((t) => `${t.title}\n/thread ${t.id}`).join("\n\n") || "/new <goal> starts one."}` };
+    const listed=service.store.list<ThreadRecord>("thread",p).filter(t=>!t.archivedAt).slice(-10);
+    return { ownerId,sourceThreadIds:[...new Set([...(selected?[selected.id]:[]),...listed.map(t=>t.id)])],text: `${selected ? `Selected: ${selected.title}\n${selected.id}\n\n` : "No thread selected.\n\n"}${listed.map((t) => `${t.title}\n/thread ${t.id}`).join("\n\n") || "/new <goal> starts one."}` };
   }
   if (name === "status") {
     const thread = args ? service.store.get<ThreadRecord>("thread", args, p) : currentThread(service, scope, ownerId);
     if (!thread) throw new ControlError("No thread selected; use /thread <id> or /new <goal>");
     const runs = service.store.runs(p).filter((run) => run.threadId === thread.id).slice(0, 4);
     const pending = service.store.approvals(p).filter((a) => a.action.threadId === thread.id && a.status === "pending" && Date.parse(a.expiresAt) > Date.now());
-    for (const approval of pending) { const prompt = approvalMessage(service, scope, ownerId, approval); enqueue(service, scope, ownerId, `approval:${approval.id}`, prompt.text, prompt.buttons); }
-    return { ownerId, text: `${thread.title}\n${thread.id}\n${runs.map((r) => `${r.status} · ${r.summary ?? r.prompt.slice(0, 200)}`).join("\n") || "No runs yet."}\nPending decisions: ${pending.length}` };
+    for (const approval of pending) { const prompt = approvalMessage(service, scope, ownerId, approval); enqueue(service, scope, ownerId, `approval:${approval.id}`, prompt.text, prompt.buttons,false,approval.action.threadId); }
+    return { ownerId,sourceThreadIds:[thread.id],text: `${thread.title}\n${thread.id}\n${runs.map((r) => `${r.status} · ${r.summary ?? r.prompt.slice(0, 200)}`).join("\n") || "No runs yet."}\nPending decisions: ${pending.length}` };
   }
   if (name === "deliveries") {
     const rows = service.store.db.query("SELECT o.id,o.body,o.status FROM outbox o JOIN telegram_deliveries d ON d.id=o.id WHERE o.owner_id=? AND d.bot_id=? AND o.status IN('uncertain','failed') ORDER BY d.updated_at DESC LIMIT 10").all(ownerId, scope.botId) as OutboxRow[];
@@ -172,19 +175,19 @@ function command(service: ControlService, scope: Identity, input: TelegramInboun
     const { selector, goal } = namedGoal(args); const mower = pickMower(service, ownerId, selector, options, parent);
     const thread = service.store.createThread(p, { mowerId: mower.id, title: goal.slice(0, 160), parentThreadId: parent.id });
     const run = service.store.submit(p, thread.id, { text: goal, requestId: `telegram:${scope.botId}:${input.updateId}` });
-    const task: TaskRecord = { id: id(), ownerId, parentThreadId: parent.id, threadId: thread.id, mowerId: mower.id, title: goal.slice(0, 160), status: "queued", createdAt: now(), updatedAt: now(), handoffCount: 0 };
+    const task: TaskRecord = { id: id(), ownerId, parentThreadId: parent.id, threadId: thread.id, mowerId: mower.id, title: goal.slice(0, 160),goal, status: "queued", createdAt: now(), updatedAt: now(), handoffCount: 0 };
     service.store.put("task", task); service.store.event(parent.id, "task", { taskId: task.id, threadId: thread.id, text: `Delegated: ${goal.slice(0, 200)}` });
     selectThread(service, scope, ownerId, thread, true);
     // Keep the director selected for later plain messages while subscribing to its child.
     service.store.db.query("UPDATE telegram_routes SET thread_id=? WHERE route_key=?").run(parent.id, routeKey(scope));
-    return { ownerId, text: `Delegated to ${mower.name}\nTask ${task.id}\nThread ${thread.id}\nRun ${run.id}\nUse /thread ${thread.id} to interact directly.` };
+    return { ownerId,sourceThreadIds:[parent.id,thread.id],text: `Delegated to ${mower.name}\nTask ${task.id}\nThread ${thread.id}\nRun ${run.id}\nUse /thread ${thread.id} to interact directly.` };
   }
   if (name && name !== "new") throw new ControlError("Unknown command. /help lists supported commands");
   let thread = name === "new" ? undefined : currentThread(service, scope, ownerId);
   const { selector, goal } = name === "new" ? namedGoal(args) : { goal: text(source, "message") };
   if (!thread) { const mower = pickMower(service, ownerId, selector, options); thread = service.store.createThread(p, { mowerId: mower.id, title: goal.slice(0, 160) }); selectThread(service, scope, ownerId, thread, true); }
   const run = service.store.submit(p, thread.id, { text: goal, requestId: `telegram:${scope.botId}:${input.updateId}` });
-  return { ownerId, text: `Queued for ${service.store.get<MowerRecord>("mower", thread.mowerId, p).name}\nThread ${thread.id}\nRun ${run.id}` };
+  return { ownerId,sourceThreadIds:[thread.id],text: `Queued for ${service.store.get<MowerRecord>("mower", thread.mowerId, p).name}\nThread ${thread.id}\nRun ${run.id}` };
 }
 
 function permitted(payload: Payload, ownerId: string, options: TelegramConnectorOptions, service: ControlService): boolean {
@@ -206,7 +209,7 @@ function materialize(service: ControlService, options: TelegramConnectorOptions)
     const events = service.store.events(p, thread.id, route.cursor);
     let buffer = ""; let first: number | undefined; let last: number | undefined;
     const flush = () => {
-      if (buffer) enqueue(service, scope, route.owner_id, `text:${thread.id}:${first}:${last}`, `[${mower.name} · ${thread.title}]\n${buffer}`);
+      if (buffer) enqueue(service, scope, route.owner_id, `text:${thread.id}:${first}:${last}`, `[${mower.name} · ${thread.title}]\n${buffer}`,undefined,false,thread.id);
       buffer = ""; first = undefined; last = undefined;
     };
     for (const entry of events.events) {
@@ -220,14 +223,14 @@ function materialize(service: ControlService, options: TelegramConnectorOptions)
         const approval = service.store.approval(entry.payload.approvalId, p);
         if (approval.status === "pending" && Date.parse(approval.expiresAt) > Date.now()) {
           const prompt = approvalMessage(service, scope, route.owner_id, approval);
-          enqueue(service, scope, route.owner_id, `approval:${approval.id}`, `[${mower.name} · ${thread.title}]\n${prompt.text}`, prompt.buttons);
+          enqueue(service, scope, route.owner_id, `approval:${approval.id}`, `[${mower.name} · ${thread.title}]\n${prompt.text}`, prompt.buttons,false,thread.id);
         }
       } else if (entry.kind === "agent" && entry.payload.event?.type === "error") {
-        enqueue(service, scope, route.owner_id, `event:${thread.id}:${entry.sequence}`, `[${mower.name} · ${thread.title}]\nRun reported an error: ${entry.payload.event.message}`);
+        enqueue(service, scope, route.owner_id, `event:${thread.id}:${entry.sequence}`, `[${mower.name} · ${thread.title}]\nRun reported an error: ${entry.payload.event.message}`,undefined,false,thread.id);
       } else if (entry.kind === "system" && typeof entry.payload.status === "string" && ["done", "error", "cancelled", "interrupted"].includes(entry.payload.status)) {
-        enqueue(service, scope, route.owner_id, `event:${thread.id}:${entry.sequence}`, `[${mower.name} · ${thread.title}]\n${entry.payload.status}: ${entry.payload.text ?? entry.payload.status}`);
+        enqueue(service, scope, route.owner_id, `event:${thread.id}:${entry.sequence}`, `[${mower.name} · ${thread.title}]\n${entry.payload.status}: ${entry.payload.text ?? entry.payload.status}`,undefined,false,thread.id);
       } else if (entry.kind === "task") {
-        enqueue(service, scope, route.owner_id, `event:${thread.id}:${entry.sequence}`, `[${mower.name} · ${thread.title}]\n${entry.payload.text ?? "Task updated"}\n${entry.payload.threadId ? `/thread ${String(entry.payload.threadId)}` : ""}`);
+        enqueue(service, scope, route.owner_id, `event:${thread.id}:${entry.sequence}`, `[${mower.name} · ${thread.title}]\n${entry.payload.text ?? "Task updated"}\n${entry.payload.threadId ? `/thread ${String(entry.payload.threadId)}` : ""}`,undefined,false,thread.id);
       }
     }
     flush();
@@ -316,7 +319,7 @@ export async function handleTelegramConnectorRequest(
         let answer: ReturnType<typeof command>;
         try { answer = service.store.transaction(() => command(service, scope, input, options)); }
         catch (error) { answer = { ownerId: linkedOwner(service, scope) ?? `telegram_${scope.botId}_${scope.userId}`, text: message(error), onboarding: !linkedOwner(service, scope), callbackAnswer: input.callbackData ? "Decision not applied" : undefined }; }
-        enqueue(service, scope, answer.ownerId, `update:${input.updateId}`, answer.text, answer.buttons, answer.onboarding);
+        enqueue(service, scope, answer.ownerId, `update:${input.updateId}`, answer.text, answer.buttons, answer.onboarding,undefined,answer.sourceThreadIds);
         const receipt: TelegramIngestResult = { accepted: true, ...(answer.callbackAnswer ? { callbackAnswer: answer.callbackAnswer } : {}) };
         db.query("INSERT INTO telegram_inbox VALUES(?,?,?,?)").run(scope.botId, input.updateId, fingerprint, JSON.stringify(receipt)); return receipt;
       });

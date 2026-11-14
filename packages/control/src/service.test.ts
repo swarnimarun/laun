@@ -56,6 +56,7 @@ test("old generation permission wait cannot authorize after reassignment",async(
 
 test("API enforces owner boundaries and idempotent submissions",async()=>{
  const {service,store,thread}=setup();const bob={id:"bob",admin:false};
+ expect((await handleControlRequest(service,request("/mowers",{name:"Fake capacity exemption",role:"adviser"}),p)).status).toBe(403);
  expect((await handleControlRequest(service,new Request(`http://local/api/v2/threads/${thread.id}/events`),bob)).status).toBe(404);
  expect((await handleControlRequest(service,request(`/threads/${thread.id}/messages`,{text:"work",requestId:"key"}),p)).status).toBe(202);
  expect((await handleControlRequest(service,request(`/threads/${thread.id}/messages`,{text:"work",requestId:"key"}),p)).status).toBe(202);

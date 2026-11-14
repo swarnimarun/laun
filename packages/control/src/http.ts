@@ -7,12 +7,17 @@ import { ControlService } from "./service.js";
 import { inspectAdvice, requestAdvice, redactAdviceText } from "./adviser.js";
 import { streamInference } from "./inference.js";
 import { rebaseThreadProfile, moveThreadWorker } from "./lifecycle.js";
+import { appendDurableRecord, loadDurableRecords } from "./durability.js";
+import { configureOnboarding, onboardingStatus } from "./onboarding.js";
+import {beginThreadPurge,continueThreadPurge,inspectThreadPurge,listHostCleanupPlans,listThreadPurges,previewThreadPurge} from "./retention.js";
+import {approveHostCleanupPlan,claimHostCleanup,fenceWorkerCleanup,finishHostCleanup,heartbeatHostCleanup,previewHostCleanupPlan,revokeHostCleanupPlan} from "./cleanup.js";
+import {rotateWorkerKey,setWorkerDraining} from "./fleet.js";
 import { canonical, ControlError, hash, id, now, record, text } from "./store.js";
 
 export interface ControlHttpOptions { allowLoopback?:boolean; resolveSecret?:(ref:string)=>string|undefined }
 async function body(req:Request){
   const path=new URL(req.url).pathname;
-  const limit=path.endsWith("/worker/checkpoint")?64*1024*1024:path.includes("/worker/")?2_097_152:262_144;
+  const limit=path.endsWith("/worker/checkpoint")||path.endsWith("/worker/durable-append")?64*1024*1024:path.includes("/worker/")?2_097_152:262_144;
   const decoder=new TextDecoder("utf-8",{fatal:true});let raw="",bytes=0;
   if(req.body){const reader=req.body.getReader();try{for(;;){const chunk=await reader.read();if(chunk.done)break;bytes+=chunk.value.byteLength;
     if(bytes>limit){await reader.cancel();throw new ControlError("request body too large",413);}raw+=decoder.decode(chunk.value,{stream:true});}raw+=decoder.decode();
@@ -25,21 +30,33 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
   const url=new URL(req.url);const path=url.pathname.replace(/^\/api\/v2/,"");const store=service.store;
   try{
     if(path.startsWith("/worker/")){
-      const key=req.headers.get("authorization")?.match(/^Bearer (.+)$/i)?.[1];const worker=key?store.authenticateWorker(key):null;
+      const key=req.headers.get("authorization")?.match(/^Bearer (.+)$/i)?.[1];let worker=key?store.authenticateWorker(key):null;
       if(!worker)return reply({error:"unauthorized worker"},401);
       const b=await body(req);if(req.method!=="POST")throw new ControlError("method not allowed",405);
+      // Revocation while a body is arriving must not be overwritten by a
+      // stale heartbeat/capability snapshot or dispatch new private work.
+      worker=key?store.authenticateWorker(key):null;if(!worker)return reply({error:"unauthorized worker"},401);
+      if(path==="/worker/cleanup-poll"){store.heartbeat(worker.id);return reply({job:claimHostCleanup(store,worker.id)});}
+      if(path==="/worker/cleanup-heartbeat")return reply(heartbeatHostCleanup(store,worker.id,text(b.planId,"planId",100),Number(b.generation)));
+      if(path==="/worker/cleanup-finish")return reply({plan:finishHostCleanup(store,worker.id,text(b.planId,"planId",100),Number(b.generation),b.result as import("@laun/protocol").RuntimeThreadCleanupResult)});
       if(path==="/worker/poll"){
+        const reportedCapacity=b.capacity??1;if(!Number.isSafeInteger(reportedCapacity)||Number(reportedCapacity)<1||Number(reportedCapacity)>16)throw new ControlError("invalid worker capacity");worker.reportedCapacity=Number(reportedCapacity);
+        const durable=b.durabilityAdapter;
+        if(!durable||typeof durable!=="object"||Array.isArray(durable)||(durable as Record<string,unknown>).version!==1||typeof (durable as Record<string,unknown>).adapter!=="string"||!/^[-a-zA-Z0-9._@]{1,80}$/.test(String((durable as Record<string,unknown>).adapter)))throw new ControlError("upgrade this yard: a controller-acknowledged durable journal adapter is required",409);
+        worker.durabilityAdapter=durable as {adapter:string;version:1};store.put("worker",worker);
         if(b.inferenceMode!==undefined){if(b.inferenceMode!=="controller"&&b.inferenceMode!=="local")throw new ControlError("invalid inference mode");worker.inferenceMode=b.inferenceMode;store.put("worker",worker);}
         if(b.checkpointVersion!==undefined){if(typeof b.checkpointVersion!=="string"||b.checkpointVersion.length>100||!/^[-a-zA-Z0-9@._]+$/.test(b.checkpointVersion))throw new ControlError("invalid checkpoint runtime version");worker.checkpointVersion=b.checkpointVersion;store.put("worker",worker);}
         store.heartbeat(worker.id);
         const activeIds=Array.isArray(b.activeRunIds)?b.activeRunIds:[];
-        if(activeIds.length>16||activeIds.some(v=>typeof v!=="string"))throw new ControlError("invalid activeRunIds");
+        if(activeIds.length>17||activeIds.some(v=>typeof v!=="string"))throw new ControlError("invalid activeRunIds");
         const existing=store.runs({id:worker.ownerId,admin:false}).find(r=>r.workerId===worker.id&&["running","waiting_permission"].includes(r.status)&&!activeIds.includes(r.id)&&r.leaseUntil&&Date.parse(r.leaseUntil)>Date.now());
         if(existing){const thread=store.get<ThreadRecord>("thread",existing.threadId);const snapshot=store.checkpoint(thread.id);return reply({job:{run:existing,thread,mower:store.get("mower",thread.mowerId),checkpoint:snapshot?checkpointReference(snapshot,thread.id):undefined}});}
         return reply({job:store.claim(worker,30_000,service.options.maxConcurrentRuns??4)});
       }
       const runId=text(b.runId,"runId",100),generation=Number(b.generation);
       const run=store.fence(runId,worker.id,generation);
+      if(path==="/worker/durable-load")return reply(loadDurableRecords(store,worker,b));
+      if(path==="/worker/durable-append")return reply(appendDurableRecord(store,worker,b));
       if(path==="/worker/inference-describe"){
         if(!service.options.inference||!run.model)throw new ControlError("controller inference unavailable",503);
         store.assertThreadAuthority(store.get("thread",run.threadId));if(run.cancelRequested)throw new ControlError("run cancelled",409);
@@ -56,7 +73,7 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
         const row=store.db.query("SELECT body FROM checkpoints WHERE thread_id=?").get(run.threadId) as {body:string}|null;
         if(!row)throw new ControlError("checkpoint not found",404);return reply({checkpoint:row.body});
       }
-      if(path==="/worker/heartbeat"){store.heartbeat(worker.id,run.id,generation);return reply({cancelRequested:run.cancelRequested});}
+      if(path==="/worker/heartbeat"){if(!service.storageHealth().acceptingWork)return reply({cancelRequested:true});store.heartbeat(worker.id,run.id,generation);return reply({cancelRequested:run.cancelRequested});}
       if(path==="/worker/events"){
         if(!Number.isSafeInteger(b.sequence)||Number(b.sequence)<0||!isAgentEvent(b.event)||b.event.sessionId!==run.threadId)throw new ControlError("invalid worker event");
         const event=b.event;
@@ -94,14 +111,38 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
     if(path==="/me"&&req.method==="GET")return reply({principalId:p.id,admin:p.admin});
     if(path==="/state"&&req.method==="GET")return reply(service.state(p));
     if(path==="/models"&&req.method==="GET")return reply({models:await service.listModels()});
+    if(path==="/onboarding"&&req.method==="GET")return reply(await onboardingStatus(service,p));
+    if(path==="/onboarding"&&req.method==="POST")return reply(await configureOnboarding(service,p,await body(req)));
+    if(path==="/purges"&&req.method==="GET")return reply({purges:listThreadPurges(store,p)});
+    const purgePreview=path.match(/^\/threads\/([A-Za-z0-9_-]+)\/purge-preview$/);
+    if(purgePreview&&req.method==="GET")return reply({preview:previewThreadPurge(store,p,purgePreview[1]!)});
+    const beginPurge=path.match(/^\/threads\/([A-Za-z0-9_-]+)\/purge$/);
+    if(beginPurge&&req.method==="POST")return reply({job:beginThreadPurge(store,p,beginPurge[1]!,await body(req) as unknown as import("@laun/protocol").ThreadPurgeInput)},202);
+    const purgeRoute=path.match(/^\/purges\/([A-Za-z0-9_-]+)(\/continue|\/host-copies)?$/);
+    if(purgeRoute){
+      if(!purgeRoute[2]&&req.method==="GET")return reply({job:inspectThreadPurge(store,p,purgeRoute[1]!)});
+      if(purgeRoute[2]==="/host-copies"&&req.method==="GET"){inspectThreadPurge(store,p,purgeRoute[1]!);return reply({plans:listHostCleanupPlans(store,p,purgeRoute[1]!)});}
+      if(purgeRoute[2]==="/continue"&&req.method==="POST"){const b=await body(req);return reply({job:continueThreadPurge(store,p,purgeRoute[1]!,{maxRows:b.maxRows===undefined?undefined:Number(b.maxRows)})});}
+    }
     const directRun=path.match(/^\/runs\/([A-Za-z0-9_-]+)$/);
     if(directRun&&req.method==="GET")return reply({run:store.run(directRun[1]!,p)});
     const threadRuns=path.match(/^\/threads\/([A-Za-z0-9_-]+)\/runs$/);
     if(threadRuns&&req.method==="GET")return reply({runs:store.threadRuns(p,threadRuns[1]!)});
-    if(path==="/mowers"&&req.method==="POST"){const b=await body(req);return reply(store.createMower(p,{...b,model:b.model??service.options.defaultModel}),201);}
+    if(path==="/mowers"&&req.method==="POST"){const b=await body(req);if(b.role==="adviser")throw new ControlError("Gatekeeper identities are managed by the permission adviser",403);return reply(store.createMower(p,{...b,model:b.model??service.options.defaultModel}),201);}
     if(path==="/threads"&&req.method==="POST")return reply(store.createThread(p,await body(req)),201);
     if(path==="/profiles"&&req.method==="POST")return reply(store.createProfile(p,await body(req)),201);
     if(path==="/workers"&&req.method==="POST")return reply(store.registerWorker(p,await body(req)),201);
+    const workerMaintenance=path.match(/^\/workers\/([A-Za-z0-9_-]+)\/(drain|resume|rotate)$/);
+    if(workerMaintenance&&req.method==="POST"){
+      if(workerMaintenance[2]==="rotate")return reply(rotateWorkerKey(store,p,workerMaintenance[1]!,await body(req) as unknown as import("@laun/protocol").WorkerKeyRotation));
+      return reply({worker:setWorkerDraining(store,p,workerMaintenance[1]!,workerMaintenance[2]==="drain")});
+    }
+    const hostCleanup=path.match(/^\/host-copies\/([A-Za-z0-9_-]+)(\/approve|\/revoke)?$/);
+    if(hostCleanup){
+      if(!hostCleanup[2]&&req.method==="GET")return reply({review:previewHostCleanupPlan(store,p,hostCleanup[1]!)});
+      if(hostCleanup[2]==="/approve"&&req.method==="POST")return reply({plan:approveHostCleanupPlan(store,p,hostCleanup[1]!,await body(req) as unknown as import("@laun/protocol").HostCleanupApproval)});
+      if(hostCleanup[2]==="/revoke"&&req.method==="POST"){const b=await body(req);return reply({plan:revokeHostCleanupPlan(store,p,hostCleanup[1]!,{expectedDigest:text(b.expectedDigest,"expectedDigest",64)})});}
+    }
     const lifecyclePath=path.match(/^\/threads\/([A-Za-z0-9_-]+)\/(profile|move)$/);
     if(lifecyclePath&&req.method==="POST")return reply(lifecyclePath[2]==="profile"?rebaseThreadProfile(store,p,lifecyclePath[1]!,await body(req)):moveThreadWorker(store,p,lifecyclePath[1]!,await body(req)));
     const checkpointPath=path.match(/^\/threads\/([A-Za-z0-9_-]+)\/(checkpoint|checkpoint-reference)$/);
@@ -111,7 +152,8 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
     }
     let m=path.match(/^\/mowers\/([a-zA-Z0-9_-]+)$/);
     if(m&&req.method==="PATCH"){
-      const mower=store.get<MowerRecord>("mower",m[1]!,p);const b=await body(req);
+      const b=await body(req);const mower=store.get<MowerRecord>("mower",m[1]!,p);
+      if(mower.role==="adviser"&&(b.profileId!==undefined||b.workerId!==undefined||b.instructions!==undefined||b.archived===true))throw new ControlError("Gatekeeper retains its managed advice-only profile and placement; stop its thread to pause it",409);
       if(b.name!==undefined){const name=text(b.name,"name",80);if(store.list<MowerRecord>("mower",{id:mower.ownerId,admin:false}).some(other=>other.id!==mower.id&&!other.archivedAt&&other.name.toLowerCase()===name.toLowerCase()))throw new ControlError("mower name already exists",409);mower.name=name;}
       if(b.model!==undefined)mower.model=text(b.model,"model",256);
       if(b.instructions!==undefined){if(b.instructions!==null&&typeof b.instructions!=="string")throw new ControlError("instructions must be text");mower.instructions=typeof b.instructions==="string"&&b.instructions.trim()?text(b.instructions,"instructions",16000):undefined;}
@@ -123,7 +165,7 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
     }
     m=path.match(/^\/profiles\/([a-zA-Z0-9_-]+)\/(revisions|revoke)$/);
     if(m&&req.method==="POST"){
-      const previous=store.latestProfile(m[1]!,p);const b=await body(req);
+      const b=await body(req);const previous=store.latestProfile(m[1]!,p);
       if(m[2]==="revisions"){if(b.expectedBaseVersion!==previous.version)throw new ControlError("profile changed; reload and review the latest revision",409);return reply(store.createProfile(p,b,previous),201);}
       const version=b.version===undefined?previous.version:Number(b.version);const profile=store.profile(m[1]!,version,p);profile.revokedAt=now();
       store.db.query("UPDATE objects SET body=? WHERE kind='profile' AND id=?").run(JSON.stringify(profile),`${profile.id}:${version}`);
@@ -142,12 +184,13 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
       }
       if(m[2]==="messages"&&req.method==="POST"){const run=store.submit(p,threadId,await body(req));void service.tick();return reply(run,202);}
       if(m[2]==="cancel"&&req.method==="POST"){service.cancelTree(p,threadId);return reply({accepted:true});}
-      if(m[2]==="archive"&&req.method==="POST"){service.cancelTree(p,threadId);const thread=store.get<ThreadRecord>("thread",threadId,p);thread.archivedAt=now();store.put("thread",thread);return reply(thread);}
+      if(m[2]==="archive"&&req.method==="POST"){let thread=store.get<ThreadRecord>("thread",threadId,p);if(store.get<MowerRecord>("mower",thread.mowerId,p).role==="adviser")throw new ControlError("Gatekeeper keeps its durable advice thread; stop it to pause",409);service.cancelTree(p,threadId);thread=store.get<ThreadRecord>("thread",threadId,p);thread.archivedAt=now();store.put("thread",thread);return reply(thread);}
     }
     m=path.match(/^\/runs\/([a-zA-Z0-9_-]+)\/resume$/);
     if(m&&req.method==="POST"){
       const b=await body(req);const run=store.run(m[1]!,p);
       if(run.status!=="interrupted")throw new ControlError("run is not interrupted",409);
+      if(!run.model)throw new ControlError("this older run has no admitted model; abandon it and send fresh input instead of replaying",409);
       if(b.confirmedStopped!==true)throw new ControlError("confirm previous execution has stopped before resuming",409);
       store.setRunStatus(run.id,"queued");store.db.query("UPDATE runs SET cancel_requested=0,lease_until=NULL WHERE id=?").run(run.id);
       store.event(run.threadId,"system",{text:"Operator reconciled interrupted execution; resuming durable request"},run.id);void service.tick();return reply(store.run(run.id));
@@ -188,6 +231,7 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
     m=path.match(/^\/workers\/([a-zA-Z0-9_-]+)\/revoke$/);
     if(m&&req.method==="POST"){
       const worker=store.get<WorkerRecord>("worker",m[1]!,p);if(worker.local)throw new ControlError("disable local runtime in server configuration");worker.status="revoked";store.put("worker",worker);
+      fenceWorkerCleanup(store,worker.id,"Worker credentials were revoked; review host state before any further deletion.");
       for(const run of store.runs(p).filter(r=>r.workerId===worker.id&&["running","waiting_permission"].includes(r.status))){store.setRunStatus(run.id,"interrupted");store.expireRunApprovals(run.id);}return reply(worker);
     }
     if(path==="/connections"&&req.method==="POST"){
@@ -201,9 +245,9 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
     }
     m=path.match(/^\/connections\/([a-zA-Z0-9_-]+)(\/discover)?$/);
     if(m){
-      const connection=store.get<BrokerConnection>("connection",m[1]!,p);
+      let connection=store.get<BrokerConnection>("connection",m[1]!,p);
       if(!m[2]&&req.method==="PATCH"){
-        const b=await body(req);const before=canonical({url:connection.url,protocol:connection.protocolVersion,secret:connection.secretRef});
+        const b=await body(req);connection=store.get<BrokerConnection>("connection",m[1]!,p);const before=canonical({url:connection.url,protocol:connection.protocolVersion,secret:connection.secretRef});
         if(b.name!==undefined)connection.name=text(b.name,"name",80);
         if(b.url!==undefined){const endpoint=new URL(text(b.url,"url",4096));if(endpoint.username||endpoint.password||endpoint.hash||!["http:","https:"].includes(endpoint.protocol))throw new ControlError("invalid endpoint");connection.url=endpoint.href;}
         if(b.protocolVersion!==undefined){if(!["2026-07-28","2025-11-25"].includes(String(b.protocolVersion)))throw new ControlError("invalid MCP protocol version");connection.protocolVersion=b.protocolVersion as BrokerConnection["protocolVersion"];}
@@ -218,10 +262,11 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
         // An authenticated operator explicitly requests read-only discovery.
         // This short-lived broker permits only this endpoint's network action;
         // it cannot authorize tool invocation or create a mower grant.
-        const operatorBroker=createToolBroker({allowLoopback:options.allowLoopback,loadConnection:connectionId=>connectionId===connection.id?connection:undefined,
+        const operatorBroker=createToolBroker({allowLoopback:options.allowLoopback,loadConnection:connectionId=>connectionId===connection.id?store.get<BrokerConnection>("connection",connectionId):undefined,
           saveConnection:value=>store.saveConnection(value),resolveSecret:ref=>options.resolveSecret?.(ref),
+          saveCatalog:(expected,catalog)=>store.saveCatalog(expected,catalog),
           authorize:async(_ctx,operation,resource)=>{if(operation!=="network.connect"||resource!==new URL(connection.url).origin)throw new ControlError("operator discovery scope exceeded",403);}});
-        return reply(await operatorBroker.discover({principalId:connection.ownerId,workspaceId:connection.workspaceId,mowerId:"operator",threadId:"operator",runId:id()},connection.id));
+        return reply(await operatorBroker.discover({principalId:connection.ownerId,workspaceId:connection.workspaceId,mowerId:"operator",threadId:"operator",runId:id()},connection.id,req.signal));
       }
       if(req.method==="DELETE"){connection.enabled=false;store.saveConnection(connection);return reply(connection);}
     }
