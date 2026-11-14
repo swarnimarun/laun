@@ -91,6 +91,17 @@ describe("Telegram identity, durable routing and callback authority", () => {
     expect(c.store.db.query("SELECT * FROM telegram_links").all()).toHaveLength(1);
   });
 
+  test("private-chat topics retain independent routing and allow a private account link",async()=>{
+    const c=fixture(),code=String((await c.human("/identity/telegram-link",{})).data.code);
+    await c.client.ingest(incoming(`/link ${code}`,{topicId:"10"}));
+    await c.client.ingest(incoming("/new Fern | private topic ten",{topicId:"10"}));await c.client.ingest(incoming("/new Clover | private topic twenty",{topicId:"20"}));
+    await c.client.ingest(incoming("follow private ten",{topicId:"10"}));await c.client.ingest(incoming("follow private twenty",{topicId:"20"}));
+    const threads=c.store.list<ThreadRecord>("thread",owner),ten=threads.find(t=>t.title==="private topic ten")!,twenty=threads.find(t=>t.title==="private topic twenty")!;expect(threads).toHaveLength(2);
+    expect(c.store.runs(owner).find(r=>r.prompt==="follow private ten")!.threadId).toBe(ten.id);expect(c.store.runs(owner).find(r=>r.prompt==="follow private twenty")!.threadId).toBe(twenty.id);
+    const replies=await c.drain();expect(replies.some(d=>d.topicId==="10")).toBe(true);expect(replies.some(d=>d.topicId==="20")).toBe(true);
+    await expect(c.client.ingest(incoming("/help",{chatId:"2",topicId:"10"}))).rejects.toThrow("invalid private");
+  });
+
   test("approval handles bind exact user/chat/topic before granting", async () => {
     const c = fixture(); await c.link(); await c.link("2", "other-human");
     await c.client.ingest(incoming("/new Echo | gated command"));
@@ -148,9 +159,8 @@ describe("Telegram identity, durable routing and callback authority", () => {
     const thread = c.store.list<ThreadRecord>("thread", owner)[0]!;
     c.store.event(thread.id, "agent", { event: { type: "text", sessionId: thread.id, delta: "🌱".repeat(4000) } });
     const first = (await c.client.poll()).deliveries;
-    expect(first.length).toBeGreaterThan(1); expect(first.every((d) => d.text.length <= 3500)).toBe(true);
+    expect(first).toHaveLength(1); expect(first.every((d) => d.text.length <= 3500)).toBe(true);
     const again = (await c.client.poll()).deliveries; expect(again).toHaveLength(0);
-    for (const delivery of first.slice(1)) await c.client.ack(delivery, { status: "delivered", messageId: "42" });
     await c.restart();
     c.store.db.query("UPDATE telegram_deliveries SET lease_until=? WHERE id=?").run("2000-01-01T00:00:00Z", first[0]!.id);
     expect((await c.client.poll()).deliveries).toHaveLength(0);
@@ -167,9 +177,9 @@ describe("Telegram identity, durable routing and callback authority", () => {
     for (let n = 0; n < 64; n++) await c.client.ingest(incoming("/help", { userId: "2", chatId: "2" }));
     c.options.allowlist = ["1"];
     await c.link();
-    expect((await c.client.poll()).deliveries).toHaveLength(0);
     const next = (await c.client.poll()).deliveries;
     expect(next.some((d) => d.chatId === "1" && d.text.includes("Linked"))).toBe(true);
+    for(let n=0;n<64;n++)await c.client.poll();
     expect(c.store.db.query("SELECT COUNT(*) n FROM outbox WHERE owner_id='telegram_123_2' AND status='pending'").get()).toEqual({ n: 0 });
   }, 10_000);
 
@@ -182,6 +192,43 @@ describe("Telegram identity, durable routing and callback authority", () => {
     expect(messages.length).toBeGreaterThan(8);
     expect(messages.every((d) => d.text.length <= 3500 && !/[\uD800-\uDBFF]$/.test(d.text))).toBe(true);
     expect(messages.map((d) => d.text).join("")).toBe(`[Fern · preserve the full answer]\n${full}`);
+  });
+
+  test("edited and unsupported updates are durable notices without admitting agent work",async()=>{
+    const c=fixture();await c.link();await c.drain();
+    const edited:TelegramInboundUpdate={botId:"123",userId:"1",chatId:"1",updateId:++update,notice:"edited"};await c.client.ingest(edited);await c.client.ingest(edited);
+    await c.client.ingest({...edited,updateId:++update,notice:"unsupported"});
+    expect(c.store.runs(owner)).toHaveLength(0);expect(c.store.list("mower",owner)).toHaveLength(0);
+    const replies=await c.drain();expect(replies).toHaveLength(2);expect(replies[0]!.text).toContain("immutable");expect(replies[1]!.text).toContain("not downloaded");
+    await expect(c.client.ingest({...edited,text:"must not run"})).rejects.toThrow("exactly one");
+  });
+
+  test("pre-send verification rejects revoked identities and expired or replaced leases",async()=>{
+    const c=fixture();await c.link();const delivery=(await c.client.poll()).deliveries[0]!;
+    const verify=()=>c.human("/connectors/telegram/verify",{botId:"123",id:delivery.id,leaseId:delivery.leaseId},"bridge-secret");
+    // This fixture's human helper can send the dedicated bridge token directly.
+    expect((await verify()).data).toEqual({authorized:true});
+    c.options.allowlist=[];expect((await verify()).response.status).toBe(403);c.options.allowlist=["1","2"];
+    c.store.db.query("UPDATE telegram_deliveries SET lease_until='2000-01-01T00:00:00Z' WHERE id=?").run(delivery.id);expect((await verify()).response.status).toBe(409);
+    c.store.db.query("UPDATE telegram_deliveries SET lease_until=? WHERE id=?").run(new Date(Date.now()+60_000).toISOString(),delivery.id);
+    await c.human("/identity/telegram-link",{userId:"1"},"human","DELETE");expect((await verify()).response.status).toBe(409);
+  });
+
+  test("rate-limited content cannot be overtaken while reconciliation commands remain deliverable",async()=>{
+    const c=fixture();await c.link();await c.client.ingest(incoming("/new Fern | ordered content"));await c.drain();
+    const thread=c.store.list<ThreadRecord>("thread",owner)[0]!,full="content ".repeat(1200);c.store.event(thread.id,"agent",{event:{type:"text",sessionId:thread.id,delta:full}});
+    const first=(await c.client.poll()).deliveries[0]!;await c.client.ack(first,{status:"retry",retryAfterMs:60_000});expect((await c.client.poll()).deliveries).toHaveLength(0);
+    await c.client.ingest(incoming("/deliveries"));const control=(await c.client.poll()).deliveries;expect(control).toHaveLength(1);expect(control[0]!.text).toContain("No uncertain");await c.client.ack(control[0]!,{status:"delivered",messageId:"control"});expect((await c.client.poll()).deliveries).toHaveLength(0);
+    c.store.db.query("UPDATE telegram_deliveries SET next_at='2000-01-01T00:00:00Z' WHERE id=?").run(first.id);const retry=(await c.client.poll()).deliveries[0]!;expect(retry.id).toBe(first.id);await c.client.ack(retry,{status:"delivered",messageId:"first"});
+    const rest=await c.drain();expect([retry,...rest].map(d=>d.text).join("")).toBe(`[Fern · ordered content]\n${full}`);
+  });
+
+  test("Telegram status reads a thread's own history beyond the global recent-run window",async()=>{
+    const c=fixture();await c.link();await c.client.ingest(incoming("/new Fern | old work"));const thread=c.store.list<ThreadRecord>("thread",owner)[0]!,worker=c.store.registerWorker(owner,{name:"History fixture"}).worker,job=c.store.claim(worker)!;
+    c.store.finish(job.run.id,worker.id,job.run.generation,"done","old terminal result remains visible");
+    const other=c.store.createThread(owner,{mowerId:thread.mowerId});const at=new Date(Date.now()+1000).toISOString();
+    c.store.transaction(()=>{const insert=c.store.db.query("INSERT INTO runs(id,owner_id,thread_id,request_id,prompt,status,created_at,updated_at,model) VALUES(?,?,?,?,?,'done',?,?,?)");for(let n=0;n<1001;n++)insert.run(`recent-${n}`,owner.id,other.id,`recent-${n}`,"later history",at,at,"faux/faux-1");});
+    await c.drain();await c.client.ingest(incoming(`/status ${thread.id}`));const replies=await c.drain();expect(replies.some(d=>d.text.includes("old terminal result remains visible"))).toBe(true);
   });
 });
 

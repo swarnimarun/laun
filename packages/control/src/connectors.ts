@@ -15,7 +15,7 @@ export interface TelegramConnectorOptions {
 }
 interface Identity extends TelegramIdentity { topicId: string }
 interface Route { route_key: string; bot_id: string; user_id: string; chat_id: string; topic_id: string; owner_id: string; thread_id: string }
-interface Payload { botId: string; userId: string; chatId: string; topicId: string; routeKey: string; text: string; buttons?: TelegramDelivery["buttons"]; onboarding?: boolean; sourceThreadId?:string;sourceThreadIds?:string[];sourceVersion?:1 }
+interface Payload { botId: string; userId: string; chatId: string; topicId: string; routeKey: string; text: string; buttons?: TelegramDelivery["buttons"]; onboarding?: boolean; sourceThreadId?:string;sourceThreadIds?:string[];sourceVersion?:1;controlReply?:true;orderGroup?:string }
 interface OutboxRow { id: string; owner_id: string; destination: string; body: string; status: string }
 const initialized = new WeakSet<object>();
 const HELP = "🌱 Laun · your mower crew\n\n/link <code> — link the account code from the web app (private chat only)\n/new [mower name] | <goal> — start a named mower thread\n/mowers — list your mowers\n/thread [thread id] — inspect or change this chat/topic’s thread\n/delegate [mower name] | <goal> — delegate from the selected thread\n/status [thread id] — progress and pending permission requests\n/approve <handle> or /deny <handle> — decide an exact request\n/deliveries — inspect uncertain deliveries\n/retry <delivery id> — explicitly retry a possibly delivered message\n\nPlain text follows up through a durable queue. Link your account before starting work. Group chats require a separate server allowlist.";
@@ -42,7 +42,7 @@ function identity(value: unknown, options: TelegramConnectorOptions): Identity {
   if (!/^-?\d{1,20}$/.test(chatId) || !/^\d{1,20}$/.test(topicId)) throw new ControlError("invalid Telegram chat/topic", 400);
   if (chatId.startsWith("-")) {
     if (!options.allowChats?.includes(chatId)) throw new ControlError("Telegram group chat is not allowlisted", 403);
-  } else if (chatId !== userId || topicId !== "0") throw new ControlError("invalid private Telegram route", 403);
+  } else if (chatId !== userId) throw new ControlError("invalid private Telegram route", 403);
   return { botId, userId, chatId, topicId };
 }
 function routeKey(identity: Identity): string { return hash(canonical(identity)); }
@@ -60,7 +60,7 @@ function enqueue(service: ControlService, scope: Identity, ownerId: string, sour
   const chunks = splitTelegram(value);
   for (let index = 0; index < chunks.length; index++) {
     const deliveryId = hash(`telegram:${scope.botId}:${key}:${sourceId}:${index}`);
-    const payload: Payload = { ...scope, routeKey: key, text: chunks[index]!, ...(index === chunks.length - 1 && buttons ? { buttons } : {}), ...(onboarding ? { onboarding: true } : {}),sourceVersion:1,...(sourceThreadId?{sourceThreadId}:{}),...(sourceThreadIds?{sourceThreadIds}:{}) };
+    const payload: Payload = { ...scope, routeKey: key, text: chunks[index]!, ...(index === chunks.length - 1 && buttons ? { buttons } : {}), ...(onboarding ? { onboarding: true } : {}),sourceVersion:1,...(sourceThreadId?{sourceThreadId}:{}),...(sourceThreadIds?{sourceThreadIds}:{}),orderGroup:sourceId,...(sourceId.startsWith("update:")?{controlReply:true as const}:{}) };
     service.store.db.query("INSERT OR IGNORE INTO outbox(id,owner_id,destination,body,status) VALUES(?,?,?,?,'pending')").run(deliveryId, ownerId, `telegram:${key}`, JSON.stringify(payload));
     service.store.db.query("INSERT OR IGNORE INTO telegram_deliveries(id,bot_id,next_at,updated_at) VALUES(?,?,?,?)").run(deliveryId, scope.botId, now(), now());
   }
@@ -124,7 +124,7 @@ function command(service: ControlService, scope: Identity, input: TelegramInboun
   const match = source.match(/^\/([a-z]+)(?:@[A-Za-z0-9_]+)?(?:\s+([\s\S]*))?$/i);
   const name = match?.[1]?.toLowerCase(); const args = match?.[2]?.trim() ?? "";
   if (name === "link") {
-    if (scope.chatId !== scope.userId || scope.topicId !== "0") throw new ControlError("Send /link privately to the bot; never post account codes in a group", 403);
+    if (scope.chatId !== scope.userId) throw new ControlError("Send /link privately to the bot; never post account codes in a group", 403);
     if (!/^launlink_[A-Za-z0-9_-]{22}$/.test(args)) throw new ControlError("Get a fresh Telegram link code from the authenticated web app");
     const row = service.store.db.query("SELECT * FROM telegram_link_codes WHERE hash=?").get(hash(args)) as { owner_id: string; expires_at: string; used_at: string | null } | null;
     if (!row || row.used_at || Date.parse(row.expires_at) <= Date.now()) throw new ControlError("This link code is invalid, expired or already used. Get a fresh code in the web app");
@@ -139,6 +139,7 @@ function command(service: ControlService, scope: Identity, input: TelegramInboun
   if (name === "start" || name === "help") return { ownerId: ownerId ?? fallbackOwner, text: HELP, onboarding: !ownerId };
   if (!ownerId) return { ownerId: fallbackOwner, text: "Link your account before starting work. Open the authenticated Laun web app, generate a Telegram link code, and send /link <code> here in a private chat.", onboarding: true };
   const p = principal(ownerId);
+  if(input.notice)return {ownerId,text:input.notice==="edited"?"Accepted messages are immutable. This edit did not change or restart agent work. Send a new text message to provide a correction.":"Laun currently accepts text messages and commands. This attachment was not downloaded or sent to an agent. Send its relevant content as text."};
   if (input.callbackData) {
     const decoded = input.callbackData.match(/^laun:([ad]):([A-Za-z0-9_-]{22})$/);
     if (!decoded) throw new ControlError("Unknown permission button");
@@ -155,7 +156,7 @@ function command(service: ControlService, scope: Identity, input: TelegramInboun
   if (name === "status") {
     const thread = args ? service.store.get<ThreadRecord>("thread", args, p) : currentThread(service, scope, ownerId);
     if (!thread) throw new ControlError("No thread selected; use /thread <id> or /new <goal>");
-    const runs = service.store.runs(p).filter((run) => run.threadId === thread.id).slice(0, 4);
+    const runs = service.store.threadRuns(p,thread.id).slice(0, 4);
     const pending = service.store.approvals(p).filter((a) => a.action.threadId === thread.id && a.status === "pending" && Date.parse(a.expiresAt) > Date.now());
     for (const approval of pending) { const prompt = approvalMessage(service, scope, ownerId, approval); enqueue(service, scope, ownerId, `approval:${approval.id}`, prompt.text, prompt.buttons,false,approval.action.threadId); }
     return { ownerId,sourceThreadIds:[thread.id],text: `${thread.title}\n${thread.id}\n${runs.map((r) => `${r.status} · ${r.summary ?? r.prompt.slice(0, 200)}`).join("\n") || "No runs yet."}\nPending decisions: ${pending.length}` };
@@ -290,6 +291,9 @@ export async function handleTelegramConnectorRequest(
             db.query("DELETE FROM telegram_handles WHERE route_key=?").run(route.route_key);
             db.query("UPDATE outbox SET status='cancelled' WHERE destination=? AND status IN('pending','sending','uncertain')").run(`telegram:${route.route_key}`);
           }
+          // Link/help/status replies may exist before a thread route is
+          // selected. Unlink revokes those claimed copies as well.
+          db.query("UPDATE outbox SET status='cancelled' WHERE owner_id=? AND destination LIKE 'telegram:%' AND json_extract(body,'$.botId')=? AND json_extract(body,'$.userId')=? AND status IN('pending','sending','uncertain')").run(authenticated.id,options.botId,userId);
           db.query("DELETE FROM telegram_routes WHERE bot_id=? AND user_id=? AND owner_id=?").run(options.botId, userId, authenticated.id);
           db.query("DELETE FROM telegram_links WHERE bot_id=? AND user_id=? AND owner_id=?").run(options.botId, userId, authenticated.id);
         });
@@ -308,10 +312,11 @@ export async function handleTelegramConnectorRequest(
     if (path === "/connectors/telegram/ingest") {
       const scope = identity(b, options);
       if (!Number.isSafeInteger(b.updateId) || Number(b.updateId) < 0) throw new ControlError("invalid Telegram update ID");
-      if ((typeof b.text === "string") === (typeof b.callbackData === "string")) throw new ControlError("send exactly one text or callback");
+      if ([typeof b.text==="string",typeof b.callbackData==="string",typeof b.notice==="string"].filter(Boolean).length!==1) throw new ControlError("send exactly one text, callback or notice");
       if (b.text !== undefined) text(b.text, "text");
       if (b.callbackData !== undefined) text(b.callbackData, "callbackData", 64);
-      const input: TelegramInboundUpdate = { ...scope, updateId: Number(b.updateId), ...(b.text !== undefined ? { text: String(b.text) } : { callbackData: String(b.callbackData) }) };
+      if(b.notice!==undefined&&!["edited","unsupported"].includes(String(b.notice)))throw new ControlError("invalid Telegram notice");
+      const input: TelegramInboundUpdate = { ...scope, updateId: Number(b.updateId), ...(b.text !== undefined ? { text: String(b.text) } : b.callbackData!==undefined?{ callbackData: String(b.callbackData) }:{notice:b.notice as TelegramInboundUpdate["notice"]}) };
       const fingerprint = hash(canonical(input));
       const result = service.store.transaction(() => {
         const previous = db.query("SELECT fingerprint,body FROM telegram_inbox WHERE bot_id=? AND update_id=?").get(scope.botId, input.updateId) as { fingerprint: string; body: string } | null;
@@ -329,7 +334,19 @@ export async function handleTelegramConnectorRequest(
       const limit = Math.max(1, Math.min(8, Number.isSafeInteger(b.limit) ? Number(b.limit) : 4));
       const deliveries = service.store.transaction(() => {
         materialize(service, options);
-        const rows = db.query("SELECT o.* FROM outbox o JOIN telegram_deliveries d ON d.id=o.id WHERE d.bot_id=? AND o.status='pending' AND d.next_at<=? ORDER BY d.next_at,d.rowid LIMIT 64").all(options.botId, now()) as OutboxRow[];
+        // Content stays FIFO even after rate limits or unknown send outcomes.
+        // Human command replies may bypass parked content so /deliveries and
+        // /retry remain usable. Chunks within each reply still stay ordered.
+        const rows = db.query(`SELECT * FROM (
+          SELECT o.*,d.next_at delivery_next,d.rowid delivery_order,
+          ROW_NUMBER() OVER(PARTITION BY o.destination ORDER BY d.next_at,d.rowid) route_order
+          FROM outbox o JOIN telegram_deliveries d ON d.id=o.id
+          WHERE d.bot_id=? AND o.status='pending' AND d.next_at<=?
+          AND NOT EXISTS(SELECT 1 FROM outbox prior JOIN telegram_deliveries pd ON pd.id=prior.id
+            WHERE prior.destination=o.destination AND pd.rowid<d.rowid AND prior.status IN('pending','sending','uncertain')
+            AND ((COALESCE(json_extract(o.body,'$.controlReply'),0)!=1 AND COALESCE(json_extract(prior.body,'$.controlReply'),0)!=1)
+              OR json_extract(prior.body,'$.orderGroup')=json_extract(o.body,'$.orderGroup')))
+          ) WHERE route_order=1 ORDER BY delivery_next,delivery_order LIMIT 64`).all(options.botId, now()) as OutboxRow[];
         const selected: TelegramDelivery[] = [];
         for (const row of rows) {
           const payload = JSON.parse(row.body) as Payload;
@@ -346,6 +363,14 @@ export async function handleTelegramConnectorRequest(
         return selected;
       });
       return json({ deliveries });
+    }
+    if(path==="/connectors/telegram/verify"){
+      const deliveryId=text(b.id,"id",100),leaseId=text(b.leaseId,"leaseId",100);
+      service.store.transaction(()=>{
+        const row=db.query("SELECT d.lease_id,d.lease_until,o.body,o.owner_id,o.status FROM telegram_deliveries d JOIN outbox o ON o.id=d.id WHERE d.id=? AND d.bot_id=?").get(deliveryId,options.botId) as {lease_id:string;lease_until:string;body:string;owner_id:string;status:string}|null;
+        if(!row||row.lease_id!==leaseId||row.status!=="sending"||Date.parse(row.lease_until)<=Date.now())throw new ControlError("stale Telegram delivery lease; do not send",409);
+        if(!permitted(JSON.parse(row.body),row.owner_id,options,service))throw new ControlError("Telegram delivery route was revoked; do not send",403);
+      });return json({authorized:true});
     }
     if (path === "/connectors/telegram/ack") {
       const deliveryId = text(b.id, "id", 100), leaseId = text(b.leaseId, "leaseId", 100);

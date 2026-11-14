@@ -9,6 +9,7 @@ export interface TelegramInboundUpdate extends TelegramIdentity {
   updateId: number;
   text?: string;
   callbackData?: string;
+  notice?: "edited" | "unsupported";
 }
 export interface TelegramDelivery {
   id: string;
@@ -19,4 +20,5 @@ export interface TelegramDelivery {
   buttons?: Array<{ text: string; callbackData: string }>;
 }
 export interface TelegramIngestResult { accepted: true; callbackAnswer?: string }
+export interface TelegramDeliveryAuthorization {authorized:true}
 export interface TelegramLinkCode { code: string; expiresAt: string; botId: string }

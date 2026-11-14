@@ -7,7 +7,7 @@ export type { CheckpointFile, ThreadCheckpoint, CheckpointReference } from "./ch
 export type { InferenceJsonValue, RuntimeInferenceEnvelope, RuntimeInferenceRequest, RuntimeInferenceUsage, RuntimeInferenceClient, RuntimeInferenceService, WorkerInferenceStreamItem } from "./inference.js";
 export type { RuntimeDurabilityEnvelope, RuntimeDurabilityRecord, RuntimeDurabilityPage, RuntimeDurabilityAppend, RuntimeDurabilityClient } from "./durability.js";
 export type { BrokerConnection, BrokerContext, BrokerTool, BrokerToolResult, McpProtocolVersion, PermissionProposal } from "./broker.js";
-export type { TelegramIdentity, TelegramInboundUpdate, TelegramDelivery, TelegramIngestResult, TelegramLinkCode } from "./connector.js";
+export type { TelegramIdentity, TelegramInboundUpdate, TelegramDelivery, TelegramIngestResult, TelegramLinkCode, TelegramDeliveryAuthorization } from "./connector.js";
 export type { AdviceResult } from "./advice.js";
 export type {CliArtifactManifest} from "./artifact.js";
 export type { ControlContext, RuntimeRunInput, RuntimePermissionRequest, RuntimeCallbacks, RuntimeResult, RuntimeModel, AgentRuntime,
