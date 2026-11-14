@@ -107,6 +107,10 @@ Evaluation requirements:
 
 Do not fork Pi merely for mower terminology, director orchestration, or a web UI. A fork becomes justified only by a demonstrated missing enforcement hook or durability guarantee that cannot be built at the adapter/broker boundary. Record the blocker, minimal patch, upstream issue, maintenance owner, license notices, compatibility fixture suite, and update process. A Rust port is a future adapter/server implementation, not a prerequisite for this work.
 
+### Bounded compatibility evidence from this session
+
+The isolated [Pi Durable experiment](../../experiments/pi-durable/README.md) pins 1.5.2 outside production workspaces. Four probes pass under Bun 1.4.4: JSONL with fsync and upstream Node SQLite each support faux-model generation, disk reopen, same-request submission deduplication, and sleeping task checkpoint resume. The Node SQLite adapter works for those exercised operations; a new Bun facade is not required merely to start this evaluation. Isolated strict TypeScript checking also passes. This is orderly close/reopen evidence, not abrupt-crash, complete conformance, sandbox, or production migration evidence. The larger adoption gates above remain open.
+
 ## 6. Admission, execution, and restart state machine
 
 Separate thread lifecycle (`open`, `archived`, `deleting`) from run lifecycle (`queued`, `leased`, `running`, `waiting_permission`, `reconciling`, `succeeded`, `failed`, `cancelled`, `interrupted`). A successful run requires an explicit terminal outcome. EOF, timeout, model errors, host disappearance, and “handled without model work” remain distinct outcomes.
@@ -164,3 +168,5 @@ Cross-cutting failure cases: process crash versus host power loss, partial disk 
 ## 10. Review record
 
 Runtime review author: `runtime_review` sub-agent. Local code inspection and upstream 1.5.2 API research completed on 2026-11-14. Root/security cross-review must reconcile this proposal with the permissions and control-plane sections before implementation. No code in this document is a claim of deployed or tested Pi Durable support.
+
+Independent product/operations cross-review: `product_review` found no blocking issue in checkpoint location, uncertain-effect reconciliation, or experimental adapter sequencing. Root review requested the bounded compatibility spike above; it completed without production integration. The stream integrity subset of R1 was implemented separately with shared event validation and eight targeted gateway tests; it does not close the full R1 or R4 stage.

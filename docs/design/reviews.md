@@ -21,3 +21,12 @@ Remaining validation gates are explicit in each section. Multi-user resource
 ACLs, a credential broker, actual runtime/tool mediation, outbound workers,
 server-owned checkpoint archives and live sandbox probes are required before
 the full product can claim those guarantees.
+
+Final implementation review also caught failure-order problems in gateway
+startup and deletion. Initialization now runs inside cleanup protection, and
+persistent index deletion precedes event disposal. Both have disk-failure
+regression tests. Over-budget boot recovery no longer accesses an uninitialized
+API object, timeout denials settle evicted pending approvals, and corrupt
+history fails replay. Root reviewed the deployment profile/parser and the
+real upstream Pi Durable experiment; full source-suite validation passed
+503 tests with one opt-in live skip. No live VPS qualification is implied.

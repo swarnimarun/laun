@@ -1,5 +1,10 @@
 # Roadmap — what is not built yet
 
+Historical v1 evidence follows, including conflicting deployment snapshots.
+For the 2026-11-14 source audit, independently reviewed architecture and actual
+implementation status, use [docs/design](design/README.md). Do not treat the
+old missing/done labels below as a current security or capability assessment.
+
 What laun is missing, in the order it should be built, with the evidence
 that a feature is actually missing and a definition of done for each. Read this
 alongside `DEVELOPMENT.md` (how to run it, and the lane/worker/validator workflow).
