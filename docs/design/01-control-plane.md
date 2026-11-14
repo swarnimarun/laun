@@ -1,6 +1,6 @@
 # Laun control plane and delivery plan
 
-Status: proposal, 2026-11-14. Existing v1 remains the compatibility baseline. This design does not certify the current deployment as isolated or production-ready. No Rust port is planned now. Bun remains the runtime; JSON contracts make future implementations language agnostic.
+Historical baseline audit and accepted design, 2026-11-14. The gaps and delivery slices below describe the v1 starting point. See [implementation](implementation.md) and [current acceptance status](../core-status.md) for completed behavior and remaining checks. This design alone does not certify a deployment. No Rust port is planned now; Bun and versioned JSON contracts remain the current implementation.
 
 ## Product model
 

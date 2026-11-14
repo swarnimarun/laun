@@ -231,8 +231,13 @@ guests in the immutable configured workspace after a verified `Stopped` state.
 Foreign workspaces and unknown identities remain outstanding. Both list and
 direct lookup corroborate absence because CLI `get` also fetches policy and
 can fail independently. Authentication/transport failures and asynchronous
-deletion never count as successful absence. Enumeration is capped at1000
-visible guests; tree verification at50000 entries per copy and128 copies.
+deletion never count as successful absence. Enumeration is capped at 1,000
+visible guests; tree verification at 50,000 entries per copy and 128 copies.
+An accepted asynchronous guest deletion is followed by at most 5 seconds of
+read-only verification, never another delete request. Present records retain
+the exact identity and stopped/deleting phase; strict NotFound and a matching
+all-workspaces list absence must agree. Guest operations share a 120 second
+overall deadline and respect earlier cancellation/lease loss.
 The result is verified only when every check completes with no outstanding
 items. Controller approval/lease fencing must precede calling this method;
 an expired or lost acknowledgement requires reconciliation rather than an

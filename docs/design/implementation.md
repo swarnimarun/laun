@@ -1,84 +1,61 @@
 # Implementation and validation ledger
 
-Updated 2026-11-14. This ledger describes the first reviewed delivery tranche,
-not completion of the fleet/MCP product. The eight-slice plan remains in
-[01-control-plane.md](01-control-plane.md).
+Updated 2026-11-14. The reviewed [eight-slice plan](01-control-plane.md) is implemented on the harness-v2 JJ stack. [Core status](../core-status.md) records the completed local acceptance checks and the remaining environment limits. Start with [how Laun works](../how-it-works.md) for the current architecture and [demos](../demos.md) for a walkthrough.
 
-## Implemented in the existing Bun services
+## Architecture that is now implemented
 
-| Change | Behavior now | Qualification |
-|---|---|---|
-| Shared request validation | Reject malformed goals, models, repos and runtime identifiers; do not propagate caller-injected authority fields | Protocol owns the contract; does not yet authorize arbitrary repository acquisition |
-| Shared stream validation | Reject cross-session/malformed events, invalid UTF-8, oversized records and EOF without terminal outcome; release stream readers | Recovery errors followed by running are not final outcomes; worker/run generation fencing is still needed |
-| Session index integrity | Fail on corrupt/unreadable/duplicate records; exclusive private temp snapshot, file sync, atomic rename, memory swap after persistence; defensive copies | Single writer, no directory fsync/power-loss guarantee; legacy missing runtime explicitly becomes Pi |
-| Run/delete failure ordering | Index failures release process-local run slots; failed index deletion preserves event log and session | No transactional inbox, reconciliation scheduler or external-effect deduplication yet |
-| Lifetime session state | Token totals and pending approvals replay across full history; display eviction cannot lower spend; timeout denials clear pending state | History scan still reads whole file; durable accounting needs transactional metadata before scale |
-| Absolute log cursor | Cursors advance beyond display-ring eviction and survive intact-history reopen; response includes oldest available cursor | Old clients get existing events/next plus additive oldest; subscriptions still need explicit gap UI and versioned event envelopes |
-| Corrupt history | Invalid/cross-session or unterminated history refuses replay, preserving the source for recovery | Restore a verified backup; no automatic repair or silent tail truncation. Corruption may affect one lazy-loaded thread rather than prevent all service startup |
-| Key revocation | Persistent revoked-ID tombstones prevent bootstrap reimport from restoring access; malformed store refuses reset; failed writes preserve live auth state | Rotate to a fresh key ID; old binaries ignore tombstones, so rollback needs credential migration/rotation; single-writer/rename durability only |
-| Child credential containment | Host Pi children lose reserved controller env variables and preload hooks; Git loses model/control secrets and inherited Git helpers/config | Trusted local mode still has same-user filesystem access; provider/Pi environment preserved. Sandbox CLI supervisor retains its required auth; this is not full sandbox enforcement |
-| Deployment profiles | Loopback app ports, gateway limit/recovery env propagation, local base without broken SDK config, isolated OpenShell overlay with explicit verified-TLS identity paths and preflight | Config/source smoke only; Docker unavailable here. Gateway, kernel enforcement, provider readiness and real container boot require disposable VPS qualification |
-| Permission foundation | Protocol-owned immutable profile/action/grant types; exact-resource deny-first evaluator, isolated/manual/auto semantics, context/digest/version/expiry binding and profile attenuation | Library only. No production tool interception, grant ledger, ACLs, shared-profile registry, adviser runtime or enforcement UI claim |
+The Bun gateway serves the browser at /app and owner-scoped control API at /api/v2. The control service owns identities, immutable permissions, admission, task routing, leases, approvals, event cursors, checkpoints, inference-call receipts and the replicated Pi ledger. A runtime-neutral AgentRuntime contract in packages/protocol keeps Pi types inside packages/runtime. The exact-pinned Pi Durable 1.5.2 adapter supplies the real harness rather than a local rewrite of its scheduler.
 
-The kernel receives trusted server-built identities and trusted grant records.
-A caller must canonicalize resources/arguments, check ancestor authority and
-current revocations, and atomically consume a grant with dispatch. Calling the
-pure function twice does not consume a grant. A grant cannot override an
-explicit deny, missing rule, isolated-mode ask or revoked profile. Exact string
-matching deliberately does not pretend to secure arbitrary shell commands.
+A yard may run beside the controller or connect outbound from another host. Central inference is the default for remote yards: model/provider credentials stay on the controller, and a worker cannot choose arbitrary inference endpoints or headers. Local runtime inference follows the same admission/accounting fence. No provider failure falls back to the explicitly labeled demo.
 
-## Upstream compatibility experiment
+The controller must acknowledge Pi storage commits before the harness releases them. A seed snapshot followed by ordered fingerprinted commit batches reconstructs the fixed server head before a lost/replaced yard schedules work. This protects current conversation state in addition to end-of-run checkpoint archives. Workspace files still need a captured checkpoint; arbitrary external effects still require explicit reconciliation.
 
-[The isolated Pi Durable spike](../../experiments/pi-durable/README.md) pins
-Pi Durable/AI/Chord **1.5.2** outside production workspaces. Four tests exercise
-upstream Harness.open, faux-model submission, request-ID deduplication after
-close/reopen and a persisted sleeping task checkpoint using JSONL and SQLite
-under Bun **1.4.4**. It does not change the executor runtime or production Pi
-version. No real model credentials or API calls are needed.
+The browser, CLI and Telegram clients use the same durable identities and authorization. Telegram links a bot/user to a stable owner, then keeps each user/chat/topic route independent. Legacy globally authenticated sessions are a separately enabled compatibility surface; the v2 gateway does not start their resume/sweeper behavior by default.
 
-Orderly reopen is demonstrated. SIGKILL, power loss, mid-tool interruption,
-permission interception, plugin containment, OpenShell environment integration,
-child ownership and production migration remain unverified. SQLite retains
-upstream NORMAL synchronization defaults. A Pi fork remains unjustified until
-an actual adapter limitation is demonstrated.
+## Completed delivery slices
 
-## Required next work
+| Slice | Concrete result | Main evidence |
+| --- | --- | --- |
+| Trust baseline | Strict input/event validation, corrupt-store refusal, private durable writes, stable owner keys, legacy default-off, no automatic credential injection into tool state. | Gateway/key/config/legacy regressions and authenticated actual-process restart. |
+| Permission kernel | Missing-rule deny, immutable exact rules, ancestor attenuation, revocation, generation/argument-bound one-shot approval and explicit feedback/replan/stop. | Policy, broker, control, runtime, worker and browser effects/denial checks. |
+| Registry and setup | Named mowers/threads, persistent purpose/model snapshots, primary Groundskeeper wizard and CLI, stable owner identity, strict legacy history import. | Transaction/reopen/old-schema/onboarding/import/CLI/browser tests. |
+| Harness and tools | Real Pi Durable, trusted tool registry, no repository executable plugins, bounded turns/time, local/OpenShell execution, durable cancellation and no unsafe replay. | Real harness, parked tool, SIGKILL, lost-ACK, foreign-submission and server-ledger tests. |
+| Workers and recovery | Authenticated outbound scheduling, capacity/lease/generation fences, central inference, checkpoints, explicit moves, drain and stable-ID credential rotation. | Actual HTTP worker, full gateway replacement, active SIGTERM/restart, browser and CLI fleet tests. |
+| MCP and Automode | Reviewed HTTP connections, catalog/schema/credential binding, CAS catalog writes, DNS pinning, current-authority checks at every await; real durable advice-only Gatekeeper. | MCP race/transport tests and browser conversation, validated proposal, feedback and no-self-grant checks. |
+| Delegation and Telegram | Constrained children, full goals, direct child input, atomic handoff, once-only result admission; linked topics, encrypted inbox and durable ordered outbox. | Controller/Pi/browser tests and actual grammY fake-HTTP polling/admission failure checks. |
+| Install and operations | Compiled CLI with embedded verified templates/manifests, guarded SSH source setup, pinned images/toolchain, offline inert restore, retention and separately approved host cleanup. | Empty-directory binary/source/fake-SSH tests, backup/replacement tests and final packaged controller/OpenShell mTLS, recovery and cleanup qualification. |
 
-1. Transactional control metadata with principal/resource ACLs, immutable
-   profile bindings and durable submissions/approval/outbox records.
-2. Real mediated tool and MCP broker, scoped credential delivery, ancestor
-   authorization and replay-safe action grants, then permission adviser UX.
-3. Named mower/thread/yard registry integrated with an authenticated worker
-   lease, attempt generation, capacity and startup reconciliation path.
-4. Pin and qualify real Pi/OpenShell versions, archive server-owned sandbox
-   checkpoints, prove restart/restore and enforce every execution path.
-5. Bounded director delegation/handoff, direct child interaction, durable
-   Telegram topic/user routing and connector delivery; fleet UI follows those
-   actual capabilities.
-6. Packaged installer assets, clean-host provisioning, backup/restore/upgrade,
-   authenticated doctor readiness and live positive/negative sandbox probes.
+## Critical findings resolved during independent implementation reviews
 
-The old v1 shared-key API remains single-operator. This tranche does not make
-multi-user public exposure, OpenShell network auto-approval, arbitrary plugins,
-or automatic multi-host failover supported. Existing startup continuation and
-one-slot in-memory follow-up queue still need replacement with the reviewed
-reconciliation/inbox design. Session event appends and index changes are not a
-single transaction; append failures can still leave UI observations ahead of
-disk. Do not equate the cursor fix with transactional durable admission.
+- A delayed worker request body could revive an old credential snapshot after revocation. Authentication is repeated after reading the body, and dispatch reloads the current worker in the transaction.
+- Delayed mower/connection mutations could overwrite newer archive, disable or credential bindings. Current records are reloaded after the await, and catalog persistence is compare-and-set.
+- Mid-run Pi state originally lived only on the yard until its final checkpoint. The central acknowledged ledger now gates provider/tool progress and rebuilds lost local storage.
+- A new input could unpark an old unfinished Pi task. Foreign submissions/tasks are canceled and centrally acknowledged while scheduling remains paused.
+- Killing only the OpenShell CLI could leave background processes alive. Command stop now targets the entire sandbox and an unverified stop interrupts later work.
+- Runtime labels could exceed the actual CLI limit. Full 256-bit policy/resource identities use bounded base36 labels and are checked with retained guest/placement identity.
+- Worker cleanup needed an authenticated lease before effects, final cancellation checks before unlink and no admission after close. Regressions cover those boundaries.
+- Controller-only retention could not imply host filesystem authority. Host deletion has a separate digest-bound owner approval, its own lease/generation and verified/blocked result.
+- Telegram Bot.stop can acknowledge the last attempted update even when inbox persistence failed. Admission failure now exits polling without that acknowledgment; the actual grammY regression observes redelivery after restart.
+- Telegram output needed fresh route authority after throttling and ordering through 429/uncertain sends. Pre-send verification and content ordering now enforce those boundaries; command replies remain usable for reconciliation.
+- Development state was not excluded from Docker builder input. A curated context and actual synthetic sentinel proof close that gap. Checked earlier image layers contained none of the inspected private state; generated local app keys were rotated.
+- Busy yards accumulated terminal journals toward the recovery bound. Reviewed compaction only removes positively acknowledged terminal records; unknown outcomes remain preserved. Regression and final packaged qualification cover this maintenance path.
+- Revocation during asynchronous human-key admission could otherwise retain a stale owner snapshot. Admission rechecks current authority before committing a decision or new work.
+- MCP dispatch can succeed remotely before its response is lost or rejected. The controller records an unknown outcome and interrupts execution instead of letting the model retry; durable-write failures also fence further progress.
 
-## Validation
+## Supported boundaries
 
-Root TypeScript build and focused regression checks pass. The initial full
-suite needed process/loopback permissions unavailable in the restricted
-sandbox. Its only functional failures were five recovery fixture log variables
-intentionally removed by controller-env filtering; those fixture names were
-corrected, and all five targeted tests passed without weakening the filter.
+OpenShell supplies OS confinement only when explicitly enabled and its real probes pass. The supported guest policy has a hard Landlock filesystem ceiling and no direct network egress; authorized external tools go through the controller MCP broker. Actual cgroup probes enforce configured CPU and memory limits. Trusted local shell commands retain the host user's authority.
 
-Final validation: `bun run build` passed. `bun run test` passed **503 tests**,
-with **1 intentional live Goose skip**, **0 failures**, and 1,835 assertions
-across 34 source test files (70.59 seconds). The isolated experiment passed
-**4 tests / 16 assertions**, and `bun run typecheck` passes with its own
-exact-pinned TypeScript and Bun typings. Shell syntax and config/profile
-smoke checks passed; the latter do not execute Docker Compose.
-No Docker daemon, real Pi model execution or live OpenShell/VPS enforcement was
-exercised. The opt-in live Goose test remains intentionally skipped.
+Profiles support exact operation/resource selectors, not arbitrary shell-argument semantics. A director is not an administrator. Gatekeeper can explain intent and propose a revision but cannot grant authority. A shared profile edit does not silently change already-pinned threads; rebase is reviewed and leaves work stopped.
+
+Supported plugins are versioned discovered HTTP MCP tools. Arbitrary executable extensions, project MCP configuration, unreviewed OAuth callback servers, extra runtime engines and a Rust port are not silently enabled.
+
+Checkpoints and control backups have explicit scopes and limits. Dependencies/generated workspace files may be omitted with manifest records. Control backup does not include external credential files, a bridge queue with its key, every live guest volume or already-sent messages. Legacy import preserves history as passive data without resuming old tools or importing authority.
+
+## Evidence and environment limits
+
+See [core status](../core-status.md) for current counts and final integration gates. Browser proofs use a real disposable controller and Pi Durable with explicitly scripted providers. Separate real-provider proofs and live OpenShell evidence are in the [runtime README](../../packages/runtime/README.md).
+
+Live local OpenShell 0.1.8/rootless Podman on NixOS/WSL observed non-root execution, permitted workspace writes, denied outside writes, 2 CPUs/1 GiB, real Pi tools/reopen, cancellation and fresh guest checkpoint recovery. The final packaged controller-to-host mTLS topology also passed real tool execution, server-ledger recovery after cache loss, restart and separately approved host cleanup. The [packaged qualification record](../packaged-qualification.md) identifies the tested artifacts and scope.
+
+A disposable external VPS and real Telegram bot configuration have not been supplied. No external VPS was modified and no real Telegram messages were sent. Fake transport success is not described as a live connector/deployment proof. The [local development guide](../local-development.md) explains how to start a disposable demo.

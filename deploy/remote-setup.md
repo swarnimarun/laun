@@ -51,7 +51,9 @@ From a source checkout:
 
 An installed portable binary uses the same setup command without the Bun prefix. Supply --no-start to prepare files without claiming runtime readiness. An explicit published repository/revision selects a different source installation.
 
-Setup creates or reuses generated installation/human credentials, transfers them through SSH stdin, validates a dedicated canonical destination and private no-clobber configuration, checks required host paths and selects the isolated Compose overlay. It installs pinned Bun in an application tool directory rather than replacing a global runtime. Existing differing credentials or guardrails require explicit operator reconciliation; re-running setup does not silently overwrite them.
+Source setup carries the current JJ checkout, including unpublished changes, in a curated checksummed archive. It includes the exact Docker ignore boundary and a fixed list of public build scripts. A trusted receiver verifies the complete manifest before publishing without clobbering existing files; changed or unrecognized source needs an explicit upgrade. Identical interrupted transfers can resume through private source markers.
+
+Setup creates or reuses generated installation/human credentials, transfers them separately through SSH stdin, validates a dedicated canonical destination and private no-clobber configuration, checks required host paths and selects the isolated Compose overlay. It installs pinned Bun in an application tool directory rather than replacing a global runtime. Locked install, typecheck and a disposable no-model v2 contract check precede service startup. Existing differing credentials or guardrails require explicit operator reconciliation; re-running setup does not silently overwrite them.
 
 The default application port stays on VPS loopback. Use an SSH tunnel:
 

@@ -1,6 +1,6 @@
 # Permissions, authentication, OpenShell and connectors
 
-Status: proposed architecture and source audit, 2026-11-14. This is a focused code review, not a penetration test or a claim that every vulnerability has been found. No live OpenShell gateway, kernel boundary, external MCP server or VPS was exercised for this document.
+Historical baseline audit and accepted permission design, 2026-11-14. The findings below describe the v1 starting point. See [implementation](implementation.md) and [current acceptance status](../core-status.md) for the implemented enforcement and later live tests. This original review was not a penetration test or a claim that every vulnerability had been found.
 
 ## 1. Decision and trust boundaries
 

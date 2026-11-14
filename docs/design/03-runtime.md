@@ -1,6 +1,6 @@
 # Runtime, durable threads, and execution hosts
 
-Status: proposed architecture; implementation gates below are required before claiming delivery. Reviewed against the repository and primary upstream sources on 2026-11-14. This is a bounded design audit, not proof that every possible failure has been found. The existing session files and `index.json` remain authoritative until an explicit, tested migration lands.
+Historical baseline audit and accepted runtime design, 2026-11-14. The gaps and gates below describe the v1 starting point, when session files and index.json were authoritative. See [implementation](implementation.md) and [current acceptance status](../core-status.md) for v2 SQLite, Pi Durable, central journals and the explicit legacy importer. This bounded design review does not prove every possible failure has been found.
 
 ## 1. Decisions
 

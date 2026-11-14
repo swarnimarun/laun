@@ -1,10 +1,10 @@
 # Product, connectors, and operations design
 
-Status: proposed architecture, based on a source audit of the v1 baseline
-(`cff77fd8`) on 2026-11-14. This is
-an independent product/operations review of the requested direction; it does
-not certify a live deployment. Existing behavior below is evidenced by code.
-The architecture and acceptance checks describe work still to build.
+Historical baseline audit and accepted product/operations design, based on v1
+(`cff77fd8`) on 2026-11-14. Findings below describe that starting point. See
+[implementation](implementation.md) and [current acceptance status](../core-status.md)
+for completed workflows and later qualification. This independent design
+review alone does not certify a live deployment.
 
 ## 1. Product vocabulary and boundaries
 

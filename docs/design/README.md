@@ -1,9 +1,11 @@
 # Laun: durable mower harness
 
 Design and source audit dated **2026-11-14**, based on v1 commit `cff77fd8`.
-This is the current architectural plan; [the older roadmap](../roadmap.md)
-contains contradictory historical deployment snapshots and is not a current
-capability or security certification.
+This is the independently reviewed original architecture and delivery plan.
+Read [how Laun works](../how-it-works.md) for the implemented system and the
+[implementation ledger](implementation.md) for resolved findings. The
+[older roadmap](../roadmap.md) contains contradictory historical deployment
+snapshots and is not a current capability or security certification.
 
 Read in order:
 
@@ -20,9 +22,12 @@ The recommended vocabulary is **mowers** for agent identities,
 
 The reviewed direction preserves the functioning Bun/TypeScript base and
 adds server-owned control metadata. It does not start with a Pi rewrite or
-Rust port. Pi Durable 1.5.2 is a strong experimental candidate; qualification
-comes before adopting its scheduler. OpenShell 0.1.8 is the researched current
-release, while the existing vendored SDK remains 0.1.2 until a tested upgrade.
+Rust port. The implementation uses exact-pinned Pi Durable 1.5.2 after real
+harness, crash and central storage-acknowledgment tests. OpenShell 0.1.8 is the
+qualified CLI/gateway release for the supported v2 path. The older vendored
+SDK remains limited to the legacy compatibility surface. Both primary upstream
+release pages were rechecked on 2026-11-14; actual host qualification remains
+specific to the engine, kernel, certificates and artifact set.
 
 This plan is intentionally staged. A library decision engine does not enforce
 Pi tools; named targets do not constitute a fleet; extension dialogs do not

@@ -22,6 +22,31 @@ ACLs, a credential broker, actual runtime/tool mediation, outbound workers,
 server-owned checkpoint archives and live sandbox probes are required before
 the full product can claim those guarantees.
 
+The four numbered design documents preserve that initial audit. Their old
+gap lists are not a current implementation checklist; use
+[core status](../core-status.md) and [the implementation ledger](implementation.md).
+
+## V2 implementation reviews
+
+The runtime, broker/operations and UI/connector agents independently reviewed
+each other's implementation boundaries, with root integration and actual
+acceptance tests. Reviews found concrete defects rather than treating source
+presence as delivery evidence:
+
+| Boundary | Independent review | Corrections verified |
+| --- | --- | --- |
+| Permissions and MCP | Broker, runtime, UI and root | Generation/ancestor fences, abort checks after every asynchronous stage, logical credential binding and atomic catalog persistence. |
+| Harness and durable state | Runtime, broker and root | Controller-acknowledged Pi commits, no foreign-task replay, lost-ACK recovery, hard guest identities/resources and whole-sandbox command stop. Packaged qualification caught missing local-controller journal callbacks; local execution now uses the same ledger and has cache-loss/pre-inference failure tests. |
+| Worker/fleet maintenance | UI, runtime, broker and root | No start after close, current credential/capacity dispatch, separately approved cleanup leases, final unlink cancellation checks and bounded ACK-only journal compaction. |
+| Browser and CLI | UI, runtime and root | Primary setup without inference, managed adviser authority, explicit interruption/retention/fleet confirmations, secret-free browser persistence and portable public assets. |
+| Telegram | UI, broker and root | Actual grammY admission redelivery, immutable edits/media notices, private/forum topic separation, pre-send route checks, Unicode chunk order and usable uncertain-send reconciliation. |
+| Installation and recovery | Broker, UI, runtime and root | Private no-clobber paths/configuration, pinned source/capabilities, inert restore, actual image/source comparison and synthetic Docker context exclusions. |
+
+Actual live checks use temporary owned fixtures. Source review, scripted model
+tests, real provider calls, real browser tests and live kernel/container probes
+remain separately identified in the current acceptance checklist. No external
+VPS install or live Telegram delivery is inferred from local fake transports.
+
 Final implementation review also caught failure-order problems in gateway
 startup and deletion. Initialization now runs inside cleanup protection, and
 persistent index deletion precedes event disposal. Both have disk-failure
