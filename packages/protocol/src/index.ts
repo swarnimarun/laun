@@ -5,9 +5,11 @@
 export { isAgentEvent, isTerminalAgentEvent } from "./events.js";
 export type { CheckpointFile, ThreadCheckpoint, CheckpointReference } from "./checkpoint.js";
 export type { InferenceJsonValue, RuntimeInferenceEnvelope, RuntimeInferenceRequest, RuntimeInferenceUsage, RuntimeInferenceClient, RuntimeInferenceService, WorkerInferenceStreamItem } from "./inference.js";
+export type { RuntimeDurabilityEnvelope, RuntimeDurabilityRecord, RuntimeDurabilityPage, RuntimeDurabilityAppend, RuntimeDurabilityClient } from "./durability.js";
 export type { BrokerConnection, BrokerContext, BrokerTool, BrokerToolResult, McpProtocolVersion, PermissionProposal } from "./broker.js";
 export type { TelegramIdentity, TelegramInboundUpdate, TelegramDelivery, TelegramIngestResult, TelegramLinkCode } from "./connector.js";
 export type { AdviceResult } from "./advice.js";
+export type {CliArtifactManifest} from "./artifact.js";
 export type { ControlContext, RuntimeRunInput, RuntimePermissionRequest, RuntimeCallbacks, RuntimeResult, RuntimeModel, AgentRuntime,
   ControlPrincipal, StoredProfile, MowerRecord, ThreadRecord, ControlRunStatus, ControlRun, ThreadEvent, ThreadEventPage,
   ControlApproval, WorkerCapabilities, WorkerRecord, TaskRecord, ControlState, WorkerJob } from "./control.js";
@@ -159,7 +161,10 @@ export function checkBearer(authHeader: string | null | undefined, expectedToken
 
 export type { PublicAgentKeyRecord, GatewayMe } from "./identity.js";
 export type { ControlBackupManifest, ControlRestoreResult } from "./backup.js";
+export type {OwnerOnboarding,OnboardingStatus,CreateOnboarding,SelectPrimaryDirector,OnboardingResult} from "./onboarding.js";
+export type {DiskReserve} from "./storage.js";
 export type { ThreadProfileRebase, ThreadWorkerMove, ThreadLifecycleResult } from "./lifecycle.js";
+export type { LegacyImportFile, LegacyEntryPreview, LegacyImportPreview, LegacyImportReport, LegacyImportArchive, PassiveLegacyHistory } from "./legacy.js";
 
 export const AGENT_KEY_PREFIX = "laun";
 const AGENT_KEY_RE = /^laun_([0-9a-f]{8,32})_([A-Za-z0-9_-]{20,128})$/;
@@ -190,3 +195,5 @@ export function bearerToken(authHeader: string | null | undefined): string | nul
   const m = authHeader.match(/^Bearer\s+(.+)$/i);
   return m ? m[1].trim() : null;
 }
+export type * from "./retention.js";
+export type * from "./fleet.js";

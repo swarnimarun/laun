@@ -26,6 +26,7 @@ export interface PermissionAction {
   mowerId: string;
   threadId: string;
   runId: string;
+  generation?:number;
   workspaceId: string;
   operation: PermissionOperation;
   resource: string;

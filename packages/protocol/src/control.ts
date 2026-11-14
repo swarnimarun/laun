@@ -3,9 +3,14 @@ import type { PermissionAction, PermissionOperation, PermissionProfile } from ".
 import type { BrokerConnection } from "./broker.js";
 import type { CheckpointReference } from "./checkpoint.js";
 import type { RuntimeInferenceClient, RuntimeInferenceService } from "./inference.js";
+import type { RuntimeDurabilityClient } from "./durability.js";
+import type { DiskReserve } from "./storage.js";
+import type { RuntimeThreadCleanupInput, RuntimeThreadCleanupResult } from "./retention.js";
 
 export interface ControlContext {
   principalId: string; workspaceId: string; mowerId: string; threadId: string; runId: string;
+  /** Derived from the current server lease, never tool-supplied. */
+  generation?:number;
 }
 export interface RuntimeRunInput {
   threadId: string; runId: string; prompt: string; model: string; workspaceRoot: string; sessionDir: string;
@@ -18,6 +23,7 @@ export interface RuntimeCallbacks {
   authorize(request: RuntimePermissionRequest): Promise<void>;
   invokeTool?(name: string, args: unknown, signal?: AbortSignal): Promise<unknown>;
   inference?: RuntimeInferenceClient;
+  durability?: RuntimeDurabilityClient;
 }
 export interface RuntimeResult { status: "done" | "cancelled" | "error" | "interrupted"; summary?: string }
 export interface RuntimeModel { id: string; name: string; provider: string; configured: boolean }
@@ -28,6 +34,8 @@ export interface AgentRuntime {
   close(): void | Promise<void>;
   listModels?(): Promise<RuntimeModel[]>;
   inference?: RuntimeInferenceService;
+  durabilityAdapter?: { adapter: string; version: 1 };
+  cleanupThread?(input: RuntimeThreadCleanupInput): Promise<RuntimeThreadCleanupResult>;
 }
 
 export interface ControlPrincipal { id: string; admin: boolean }
@@ -74,8 +82,15 @@ export interface WorkerCapabilities {
   protocolVersion: number;
   checkpointVersion: string;
   inferenceModes: Array<"controller" | "local">;
+  durabilityAdapters?: Array<{adapter:string;version:1}>;
 }
 export interface WorkerRecord {
+  drainingAt?:string;
+  /** Absent on legacy records means revision one. */
+  credentialVersion?:number;
+  credentialRotatedAt?:string;
+  durabilityAdapter?:{adapter:string;version:1};
+  reportedCapacity?:number;
   inferenceMode?: "controller" | "local";
   id: string; ownerId: string; name: string; labels: string[]; capacity: number; status: "online" | "offline" | "revoked";
   lastSeenAt?: string; createdAt: string; local: boolean;
@@ -90,6 +105,6 @@ export interface TaskRecord {
 export interface ControlState {
   mowers: MowerRecord[]; threads: ThreadRecord[]; runs: ControlRun[]; profiles: StoredProfile[];
   workers: WorkerRecord[]; tasks: TaskRecord[]; approvals: ControlApproval[]; connections: BrokerConnection[];
-  readiness: { runtime: boolean; mode: "isolated" | "trusted-local" | "unconfigured"; message: string; defaultModel?: string; inferenceRelay?: boolean };
+  readiness: { runtime: boolean; mode: "isolated" | "trusted-local" | "unconfigured"; message: string; defaultModel?: string; inferenceRelay?: boolean;durableJournal?:boolean;storage?:DiskReserve };
 }
 export interface WorkerJob { run: ControlRun; thread: ThreadRecord; mower: MowerRecord; checkpoint?: CheckpointReference }

@@ -3,6 +3,8 @@ import { constants } from "node:fs";
 import { mkdir, open, lstat, readdir, realpath, rename, rm } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import type { CheckpointReference, ThreadCheckpoint } from "@laun/protocol";
+export {inspectDiskReserve,requireDiskReserve,StorageAdmissionError} from "./admission.js";
+export type {DiskReserve} from "./admission.js";
 export const MAX_CHECKPOINT_BYTES=48*1024*1024;
 export const MAX_CHECKPOINT_DATA_BYTES=32*1024*1024;
 const digest=(v:string|Uint8Array)=>createHash("sha256").update(v).digest("hex");

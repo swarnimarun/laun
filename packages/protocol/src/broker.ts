@@ -1,7 +1,7 @@
 import type { CapabilityRule, PermissionAction, PermissionProfile } from "./permissions.js";
 
 /** Authenticated identities supplied by the server, never inferred from tool args. */
-export type BrokerContext = Pick<PermissionAction, "principalId" | "workspaceId" | "mowerId" | "threadId" | "runId">;
+export type BrokerContext = Pick<PermissionAction, "principalId" | "workspaceId" | "mowerId" | "threadId" | "runId"> & {generation?:number};
 export type McpProtocolVersion = "2026-07-28" | "2025-11-25";
 
 export interface BrokerTool {
@@ -10,7 +10,7 @@ export interface BrokerTool {
   inputSchema: Record<string, unknown>;
   /** Complete discovered definition for identity revalidation, including annotations. */
   definition: Record<string, unknown>;
-  /** SHA-256 of endpoint, protocol and complete tool definition, not just its name. */
+  /** SHA-256 of endpoint, protocol, logical credential binding, local exception and complete definition. */
   schemaDigest: string;
   resource: string;
 }
