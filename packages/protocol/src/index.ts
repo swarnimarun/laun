@@ -2,6 +2,11 @@
 // Gateway, executor, and telegram-bridge must import from here.
 // No pi/goose/dots-specific wire details outside the executor.
 
+export { isAgentEvent, isTerminalAgentEvent } from "./events.js";
+
+export type { CapabilityRule, PermissionAction, PermissionEffect, PermissionGrant, PermissionMode,
+  PermissionOperation, PermissionProfile, PermissionVerdict } from "./permissions.js";
+
 export type RuntimeKind = "pi" | "goose" | "dots";
 
 export type SessionStatus =
@@ -88,15 +93,27 @@ export const DEFAULT_RUNTIME: RuntimeKind = "pi";
 export const GATEWAY_PORT = 8080;
 export const EXECUTOR_PORT = 8081;
 
-export function normalizeCreateSession(input: CreateSessionRequest): Required<Pick<CreateSessionRequest, "model" | "runtime">> & CreateSessionRequest {
-  const goal = (input.goal ?? "").trim();
+export function normalizeCreateSession(input: unknown): Required<Pick<CreateSessionRequest, "model" | "runtime">> & CreateSessionRequest {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("session must be an object");
+  const value = input as Record<string, unknown>;
+  if (typeof value.goal !== "string") throw new Error("goal is required and must be a string");
+  const goal = value.goal.trim();
   if (!goal) throw new Error("goal is required");
+  if (goal.includes("\0")) throw new Error("goal must not contain NUL");
   if (goal.length > 8000) throw new Error("goal too long (max 8000 chars)");
+  for (const [key, max] of [["repo", 4096], ["model", 256]] as const) {
+    const v = value[key];
+    if (v !== undefined && (typeof v !== "string" || v.length > max || v.includes("\0"))) {
+      throw new Error(`${key} must be a string of at most ${max} chars without NUL`);
+    }
+  }
+  const runtime = value.runtime ?? DEFAULT_RUNTIME;
+  if (runtime !== "pi" && runtime !== "goose" && runtime !== "dots") throw new Error("unsupported runtime");
   return {
-    ...input,
     goal,
-    model: input.model?.trim() || DEFAULT_MODEL,
-    runtime: input.runtime ?? DEFAULT_RUNTIME,
+    repo: (value.repo as string | undefined)?.trim() || undefined,
+    model: (value.model as string | undefined)?.trim() || DEFAULT_MODEL,
+    runtime,
   };
 }
 

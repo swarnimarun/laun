@@ -21,6 +21,19 @@ describe("protocol", () => {
     expect(() => normalizeCreateSession({ goal: "   " })).toThrow("goal is required");
   });
 
+  test.each([null, [], "goal", { goal: 1 }, { goal: "hi", runtime: "shell" },
+    { goal: "hi", repo: {} }, { goal: "hi", model: [] }, { goal: "hi", repo: "bad\0path" }].map((value) => ({ value })))(
+    "rejects malformed external sessions %j", ({ value }) => {
+      expect(() => normalizeCreateSession(value)).toThrow();
+    },
+  );
+
+  test("does not propagate caller-supplied authority fields", () => {
+    expect(normalizeCreateSession({ goal: " hi ", runtime: "goose", ownerId: "admin", workdir: "/" })).toEqual({
+      goal: "hi", runtime: "goose", model: "opencode-go/muse-spark-1.3-contributor", repo: undefined,
+    });
+  });
+
   test("parseAllowlist + isAllowlisted fail closed", () => {
     expect(parseAllowlist(undefined)).toEqual([]);
     expect(isAllowlisted("123", [])).toBe(false);
