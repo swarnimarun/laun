@@ -17,6 +17,9 @@ set -euo pipefail
 
 REMOTE_DIR="${1:-}"
 REPO_URL="${2:-}"
+SOURCE_REVISION="${3:-}"
+RELEASE_ONLY="${LAUN_RELEASE_ONLY:-false}"
+[[ "$RELEASE_ONLY" = true || "$RELEASE_ONLY" = false ]] || { echo 'LAUN_RELEASE_ONLY must be true or false' >&2; exit 1; }
 
 log() { printf '==> %s\n' "$*"; }
 warn() { printf '==> WARNING: %s\n' "$*" >&2; }
@@ -26,28 +29,50 @@ die() {
 }
 
 [ -n "$REMOTE_DIR" ] || die "usage: bash bootstrap.sh <remote-dir> [repo-url]"
-[ -d "$REMOTE_DIR" ] || die "remote dir does not exist: $REMOTE_DIR (create it and write .env first)"
-REMOTE_DIR="$(cd "$REMOTE_DIR" && pwd)"
+case "$REMOTE_DIR" in /opt/?*|/srv/?*|/home/?*/?*|/root/?*|/var/lib/laun|/var/lib/laun/?*|/tmp/?*) ;; *) die "remote-dir must be a dedicated absolute application directory, never an OS or home base";; esac
+[[ "$REMOTE_DIR" != *$'\n'* && "$REMOTE_DIR" != *$'\r'* && "$REMOTE_DIR" != */ && "$REMOTE_DIR" != *//* ]] || die "remote-dir must be canonical and single-line"
+current=""
+IFS=/ read -r -a components <<< "$REMOTE_DIR"
+for component in "${components[@]}"; do
+  [ -n "$component" ] || continue
+  [[ "$component" != . && "$component" != .. ]] || die "dot path components are refused"
+  case "$component" in .ssh|.aws|.gnupg|.kube|.azure|.pi|.codex) die "credential directories cannot contain an installation";; esac
+  current="$current/$component"
+  [ ! -L "$current" ] && [ -d "$current" ] || die "installation path must contain real directories only"
+  owner="$(stat -c %u -- "$current")"; mode="$(stat -c %a -- "$current")"
+  [[ "$owner" = 0 || "$owner" = "$(id -u)" || "$owner" = "${SUDO_UID:-$(id -u)}" ]] || die "installation path belongs to another user"
+  if (( (8#$mode & 0022) != 0 )); then (( (8#$mode & 01000) != 0 )) && [ "$current" != "$REMOTE_DIR" ] || die "installation path is writable by other users"; fi
+done
+case "${REMOTE_DIR##*/}" in .config|.local) die "shared configuration bases cannot be installation leaves";; esac
+[ "$(stat -c %u -- "$REMOTE_DIR")" = "$(id -u)" ] || die "existing installation must be owned by this installer; setup will not chown it"
+(( (8#$mode & 0077) == 0 )) || die "controller installation directory must be private"
+MARKER="$REMOTE_DIR/.laun-install.json"
+[ ! -L "$MARKER" ] && [ -f "$MARKER" ] && [ "$(stat -c %u -- "$MARKER")" = "$(id -u)" ] || die "missing verified controller marker; initialize a fresh directory with laun setup ssh or use the reviewed adoption workflow"
+marker_mode="$(stat -c %a -- "$MARKER")"; (( (8#$marker_mode & 0077) == 0 )) || die "controller marker must be private"
+printf '%s\n' '{"version":1,"kind":"controller"}' | cmp -s - "$MARKER" || die "installation marker does not identify a controller deployment"
 ENV_FILE="$REMOTE_DIR/.env"
-[ -f "$ENV_FILE" ] || die "missing $ENV_FILE — write it before bootstrapping (laun setup ssh does this)"
+[ ! -L "$ENV_FILE" ] && [ -f "$ENV_FILE" ] && [ "$(stat -c %u -- "$ENV_FILE")" = "$(id -u)" ] || die "configuration must be an installer-owned regular file; symlinks are refused"
+env_mode="$(stat -c %a -- "$ENV_FILE")"; (( (8#$env_mode & 0077) == 0 )) || die "configuration must be private before setup"
 
 # The checkout may overwrite .env, so keep the authoritative copy aside.
 ENV_BACKUP="$(mktemp)"
 CLONE_TMP=""
+DOCKER_INSTALLER=""
 cleanup() {
   rm -f "$ENV_BACKUP"
   [ -n "$CLONE_TMP" ] && rm -rf "$CLONE_TMP"
+  [ -n "$DOCKER_INSTALLER" ] && rm -f "$DOCKER_INSTALLER"
   return 0
 }
 trap cleanup EXIT
 cp "$ENV_FILE" "$ENV_BACKUP"
-chmod 600 "$ENV_FILE"
 
 # --- privileges -----------------------------------------------------------------
 SUDO=""
 if [ "$(id -u)" -ne 0 ]; then
   command -v sudo >/dev/null 2>&1 || die "this script needs root or passwordless sudo"
-  SUDO="sudo"
+  sudo -n true || die "this script needs passwordless sudo"
+  SUDO="sudo -n"
 fi
 
 APT_UPDATED=0
@@ -78,9 +103,12 @@ fi
 # --- docker ---------------------------------------------------------------------
 if ! command -v docker >/dev/null 2>&1; then
   log "installing docker"
-  curl -fsSL https://get.docker.com -o /tmp/laun-get-docker.sh || die "could not download the docker installer"
-  $SUDO sh /tmp/laun-get-docker.sh >/dev/null || die "docker install failed"
-  rm -f /tmp/laun-get-docker.sh
+  DOCKER_INSTALLER="$(mktemp)"
+  chmod 600 "$DOCKER_INSTALLER"
+  curl -fsSL https://get.docker.com -o "$DOCKER_INSTALLER" || die "could not download the docker installer"
+  $SUDO sh "$DOCKER_INSTALLER" >/dev/null || die "docker install failed"
+  rm -f "$DOCKER_INSTALLER"
+  DOCKER_INSTALLER=""
 fi
 if command -v systemctl >/dev/null 2>&1; then
   $SUDO systemctl enable --now docker >/dev/null 2>&1 || warn "could not enable docker through systemctl"
@@ -107,41 +135,55 @@ if [ "$(id -u)" -ne 0 ]; then
   fi
 fi
 
-# --- bun ------------------------------------------------------------------------
-if ! command -v bun >/dev/null 2>&1 && [ ! -x "$HOME/.bun/bin/bun" ]; then
-  log "installing bun"
-  curl -fsSL https://bun.sh/install | bash >/tmp/bun-install.log 2>&1 \
-    || { tail -5 /tmp/bun-install.log >&2; die "the bun installer failed (bun needs unzip; see the log above)"; }
-fi
-export PATH="$HOME/.bun/bin:$PATH"
-
 # --- source tree ----------------------------------------------------------------
-if [ -f "$REMOTE_DIR/package.json" ]; then
+if [ "$RELEASE_ONLY" = true ]; then
+  [ -f "$REMOTE_DIR/deploy/install-bun.sh" ] && [ -f "$REMOTE_DIR/deploy/docker-compose.yml" ] \
+    || die "portable deployment templates are incomplete"
+  log "using verified deployment templates from the released CLI (no checkout required)"
+elif [ -f "$REMOTE_DIR/package.json" ]; then
   log "reusing existing checkout at $REMOTE_DIR"
-  if [ -n "$REPO_URL" ] && [ -d "$REMOTE_DIR/.git" ] && command -v git >/dev/null 2>&1; then
-    git -C "$REMOTE_DIR" pull --ff-only >/dev/null 2>&1 || warn "git pull failed — continuing with the local checkout"
-  fi
+  log "source updates require the explicit upgrade workflow; setup does not pull floating revisions"
 else
   [ -n "$REPO_URL" ] \
     || die "no checkout at $REMOTE_DIR and no repo url given: rsync the repo there, or re-run with --repo-url <git-url>"
+  [[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]] || die "a new source checkout requires an exact --revision commit; floating branches are not deployed"
   log "cloning $REPO_URL"
   CLONE_TMP="$(mktemp -d)"
-  git clone --depth 1 "$REPO_URL" "$CLONE_TMP/repo" >/dev/null 2>&1 || die "git clone $REPO_URL failed"
+  git -c core.hooksPath=/dev/null clone --no-checkout --filter=blob:none -- "$REPO_URL" "$CLONE_TMP/repo" >/dev/null 2>&1 || die "git clone failed"
+  git -C "$CLONE_TMP/repo" -c core.hooksPath=/dev/null fetch --depth 1 origin "$SOURCE_REVISION" >/dev/null 2>&1 || die "could not fetch the pinned commit"
+  git -C "$CLONE_TMP/repo" -c core.hooksPath=/dev/null checkout --detach "$SOURCE_REVISION" >/dev/null 2>&1 || die "could not check out the pinned commit"
+  [ "$(git -C "$CLONE_TMP/repo" rev-parse HEAD)" = "$SOURCE_REVISION" ] || die "source commit verification failed"
+  [ ! -e "$CLONE_TMP/repo/.env" ] && [ ! -L "$CLONE_TMP/repo/.env" ] && [ ! -e "$CLONE_TMP/repo/.laun-install.json" ] && [ ! -L "$CLONE_TMP/repo/.laun-install.json" ] || die "source checkout contains deployment configuration; refusing to replace credentials or marker"
+  while IFS= read -r -d '' source_entry; do
+    destination="$REMOTE_DIR/$(basename "$source_entry")"
+    [ ! -e "$destination" ] && [ ! -L "$destination" ] || die "source checkout overlaps existing installation files; use explicit reviewed upgrade"
+  done < <(find "$CLONE_TMP/repo" -mindepth 1 -maxdepth 1 -print0)
   shopt -s dotglob
   mv "$CLONE_TMP/repo"/* "$REMOTE_DIR"/ || die "could not move the checkout into $REMOTE_DIR"
   shopt -u dotglob
 fi
 
-# The pre-written env file wins over anything the checkout brought along.
-cp "$ENV_BACKUP" "$ENV_FILE"
-chmod 600 "$ENV_FILE"
+# Setup never replaces or rotates the operator's credentials and guardrails.
+[ ! -L "$ENV_FILE" ] && cmp -s "$ENV_BACKUP" "$ENV_FILE" || die "configuration changed during setup; refusing to continue"
+
+# --- bun ------------------------------------------------------------------------
+[ -f "$REMOTE_DIR/deploy/install-bun.sh" ] || die "pinned Bun helper is missing from deployment artifacts"
+LAUN_BUN_BIN="$(bash "$REMOTE_DIR/deploy/install-bun.sh")" || die "pinned Bun provisioning failed"
+export PATH="$(dirname "$LAUN_BUN_BIN"):$PATH"
+SERVICE_IMAGE="$(bun -e 'import {pathToFileURL} from "node:url";const {readEnvValue}=await import(pathToFileURL(process.argv[1]).href);console.log(process.env.LAUN_SERVICE_IMAGE??readEnvValue(await Bun.file(process.argv[2]).text(),"LAUN_SERVICE_IMAGE")??"");' "$REMOTE_DIR/apps/laun/src/compose-profile.ts" "$ENV_FILE")" || die "could not read service image configuration"
+PULL_ONLY="$RELEASE_ONLY"
+[ -z "$SERVICE_IMAGE" ] || PULL_ONLY=true
 
 # --- build ----------------------------------------------------------------------
-if [ -x "$REMOTE_DIR/node_modules/.bin/tsc" ] || command -v bun >/dev/null 2>&1; then
+if [ "$PULL_ONLY" = false ]; then
   log "installing dependencies"
-  (cd "$REMOTE_DIR" && bun install --frozen-lockfile) || die "locked dependency installation failed"
+  (cd "$REMOTE_DIR" && bun install --frozen-lockfile --ignore-scripts) || die "locked dependency installation failed"
   log "typechecking"
   (cd "$REMOTE_DIR" && bun run build) || die "typecheck failed; refusing to deploy an invalid build"
+fi
+RELEASE_TAG="$(sed -n 's/^LAUN_TAG=\(.*\)$/\1/p' "$ENV_FILE" | tail -1 | tr -d "\"'[:space:]")"
+if [ "$RELEASE_ONLY" = true ]; then
+  [[ "$RELEASE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || die "portable setup requires a pinned release LAUN_TAG"
 fi
 
 # --- start ----------------------------------------------------------------------
@@ -157,7 +199,7 @@ else
   # bare home directory would mount the whole home (ssh keys included).
   REAL_USER="${SUDO_USER:-$(id -un)}"
   PI_HOME="$(getent passwd "$REAL_USER" | cut -d: -f6)"
-  [ -n "$PI_HOME" ] || PI_HOME="$(eval echo "~$REAL_USER")"
+  [ -n "$PI_HOME" ] || PI_HOME="$HOME"
   PI_CONFIG_DIR="${PI_CONFIG_DIR:-$PI_HOME/.pi}"
   case "$PI_CONFIG_DIR" in
     *.pi) ;;
@@ -170,35 +212,45 @@ else
   # Persist the resolved path so ANY later invocation — including a manual
   # `docker compose up` that never goes through this script — resolves the same
   # mount. Without this, compose falls back to ${HOME} which is /root under sudo.
-  if grep -q '^PI_CONFIG_DIR=' "$ENV_FILE" 2>/dev/null; then
-    sed -i "s|^PI_CONFIG_DIR=.*|PI_CONFIG_DIR=$PI_CONFIG_DIR|" "$ENV_FILE"
-  else
-    printf '\nPI_CONFIG_DIR=%s\n' "$PI_CONFIG_DIR" >> "$ENV_FILE"
-  fi
-  chmod 600 "$ENV_FILE"
+  export PI_CONFIG_DIR
+
+  # Resolve the v2 controller credential reference before sudo changes HOME.
+  # Read a static dotenv value; never source a credential-bearing environment.
+  PI_CONTROLLER_AUTH_DIR="${PI_CONTROLLER_AUTH_DIR:-$(bun -e 'import {pathToFileURL} from "node:url";const {readEnvValue}=await import(pathToFileURL(process.argv[1]).href);console.log(readEnvValue(await Bun.file(process.argv[2]).text(),"PI_CONTROLLER_AUTH_DIR")??"");' "$REMOTE_DIR/apps/laun/src/compose-profile.ts" "$ENV_FILE")}"
+  PI_CONTROLLER_AUTH_DIR="${PI_CONTROLLER_AUTH_DIR:-$PI_CONFIG_DIR/agent}"
+  case "$PI_CONTROLLER_AUTH_DIR" in /*) ;; *) die "PI_CONTROLLER_AUTH_DIR must be an absolute host path";; esac
+  [[ "$PI_CONTROLLER_AUTH_DIR" != *'$'* && "$PI_CONTROLLER_AUTH_DIR" != *$'\n'* && "$PI_CONTROLLER_AUTH_DIR" != *$'\r'* ]] || die "PI_CONTROLLER_AUTH_DIR must be a static single-line path"
+  if [ ! -d "$PI_CONTROLLER_AUTH_DIR" ]; then mkdir -p "$PI_CONTROLLER_AUTH_DIR"; chmod 700 "$PI_CONTROLLER_AUTH_DIR"; fi
+  if [ ! -f "$PI_CONTROLLER_AUTH_DIR/auth.json" ]; then warn "controller provider authentication is not configured; model execution remains unqualified"; fi
+  export PI_CONTROLLER_AUTH_DIR
 
   # The isolation overlay is mandatory when requested; no missing identity
   # or invalid configuration may silently select the developer profile.
   source "$REMOTE_DIR/deploy/compose-profile.sh"
   laun_compose_profile "$ENV_FILE" "$REMOTE_DIR/deploy/docker-compose.yml" true \
     || die "compose profile preflight failed"
-  log "starting the stack (docker compose up -d --build)"
-  (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env config --quiet) \
+  log "validating deployment configuration"
+  (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" PI_CONTROLLER_AUTH_DIR="$PI_CONTROLLER_AUTH_DIR" docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env config --quiet) \
     || die "docker compose configuration is invalid"
-  (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env up -d --build) \
-    || die "docker compose up failed — inspect: cd $REMOTE_DIR && docker compose logs"
+  if [ "$PULL_ONLY" = true ]; then
+    (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" PI_CONTROLLER_AUTH_DIR="$PI_CONTROLLER_AUTH_DIR" LAUN_TAG="$RELEASE_TAG" LAUN_SERVICE_IMAGE="$SERVICE_IMAGE" docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env pull) || die "pinned image pull failed"
+    (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" PI_CONTROLLER_AUTH_DIR="$PI_CONTROLLER_AUTH_DIR" LAUN_TAG="$RELEASE_TAG" LAUN_SERVICE_IMAGE="$SERVICE_IMAGE" docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env up -d --no-build) || die "released stack start failed"
+  else
+    (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" PI_CONTROLLER_AUTH_DIR="$PI_CONTROLLER_AUTH_DIR" docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env up -d --build) || die "source stack start failed"
+  fi
   healthy=0
+  readiness_probe='import {pathToFileURL} from "node:url";const {readEnvValue}=await import(pathToFileURL(process.argv[1]).href);const key=readEnvValue(await Bun.file(process.argv[2]).text(),"LAUN_KEY");if(!key)process.exit(1);try{const headers={authorization:`Bearer ${key}`};const r=await fetch(`http://127.0.0.1:${process.argv[3]}/api/v2/me`,{headers,signal:AbortSignal.timeout(3000)});if(!r.ok)process.exit(1);const me=await r.json();if(typeof me.principalId!=="string"||!me.principalId)process.exit(1);}catch{process.exit(1);}'
   for _ in $(seq 1 20); do
-    if curl -fsS "http://localhost:${GATEWAY_PORT}/health" >/dev/null 2>&1; then
+    if bun -e "$readiness_probe" "$REMOTE_DIR/apps/laun/src/compose-profile.ts" "$ENV_FILE" "$GATEWAY_PORT" >/dev/null 2>&1; then
       healthy=1
       break
     fi
     sleep 3
   done
   if [ "$healthy" = "1" ]; then
-    log "gateway is healthy on port ${GATEWAY_PORT}"
+    log "authenticated v2 control is reachable on port ${GATEWAY_PORT}; run laun doctor to inspect execution/model readiness (no inference was invoked)"
   else
-    die "gateway health check did not pass — inspect the compose logs"
+    die "authenticated v2 control probe did not pass — inspect the compose logs"
   fi
 fi
 

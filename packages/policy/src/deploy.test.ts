@@ -4,8 +4,8 @@ import { parse } from "yaml";
 
 // Parse and smoke-load config without Docker. This does not claim Docker
 // merge/daemon, certificate trust or real OpenShell enforcement validation.
-const base = parse(readFileSync(new URL("../../../deploy/docker-compose.yml", import.meta.url), "utf8"));
-const overlay = parse(readFileSync(new URL("../../../deploy/docker-compose.openshell.yml", import.meta.url), "utf8"));
+const base = parse(readFileSync(new URL("../../../deploy/docker-compose.yml", import.meta.url), "utf8"), { merge: true });
+const overlay = parse(readFileSync(new URL("../../../deploy/docker-compose.openshell.yml", import.meta.url), "utf8"), { merge: true });
 const executorModule = new URL("../../../apps/executor/src/config.ts", import.meta.url).href;
 const gatewayModule = new URL("../../../apps/gateway/src/config.ts", import.meta.url).href;
 
@@ -28,6 +28,14 @@ function environment(spec: Record<string, unknown>, env: Record<string, string>)
 
 describe("deployment profile config smoke", () => {
   const env = { GATEWAY_TOKEN: "fixture-token", HOME: "/tmp/operator" };
+
+  test("service image accepts a complete immutable digest while preserving repository/tag fallback", () => {
+    const reference = `ghcr.io/example/laun@sha256:${"a".repeat(64)}`;
+    for (const name of ["gateway", "executor", "telegram-bridge"]) {
+      expect(expand(base.services[name].image, { ...env, LAUN_SERVICE_IMAGE: reference, LAUN_TAG: "ignored" })).toBe(reference);
+      expect(expand(base.services[name].image, { ...env, LAUN_IMAGE: "ghcr.io/example/laun", LAUN_TAG: "0.1.0" })).toBe("ghcr.io/example/laun:0.1.0");
+    }
+  });
 
   test("base executor loads with OpenShell off and no identity mounts", async () => {
     const { loadConfig } = await import(executorModule);
@@ -91,7 +99,12 @@ describe("deployment profile config smoke", () => {
     expect(() => expand(auth.source, env)).toThrow("PI_CONTROLLER_AUTH_DIR");
     expect(expand(auth.source, { ...env, PI_CONTROLLER_AUTH_DIR: "/srv/laun/controller-auth" })).toBe("/srv/laun/controller-auth");
     expect(overlay.services.executor.volumes.some((mount: { target: string }) => mount.target === "/controller-auth")).toBe(false);
-    expect(base.services.gateway.volumes).toEqual(["laun-data:/data"]);
+    const dataMount=base.services.gateway.volumes.find((mount:unknown)=>typeof mount==="string"&&mount.endsWith(":/data"));
+    expect(expand(dataMount,env)).toBe("laun-data:/data");
+    expect(expand(dataMount,{...env,LAUN_DATA_DIR:"/srv/laun/recovered-data"})).toBe("/srv/laun/recovered-data:/data");
+    const baseAuth = base.services.gateway.volumes.find((mount: { target?: string }) => mount.target === "/controller-auth");
+    expect(baseAuth.bind.create_host_path).toBe(false);
+    expect(expand(baseAuth.source, env)).toBe("/tmp/operator/.pi/agent");
   });
 
   test("Telegram v2 routing gets a separate persistent encrypted delivery volume", () => {

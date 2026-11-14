@@ -12,44 +12,46 @@ if ! need docker; then
   curl -fsSL https://get.docker.com | sh
   sudo usermod -aG docker "$USER" || true
 fi
-if ! need bun; then
-  echo "==> Installing Bun"
-  curl -fsSL https://bun.sh/install | bash
-  export PATH="$HOME/.bun/bin:$PATH"
-fi
-if ! need pi; then
+LAUN_BUN_BIN="$(bash "$REPO_DIR/deploy/install-bun.sh")"
+export PATH="$(dirname "$LAUN_BUN_BIN"):$PATH"
+export LAUN_TOOLS_DIR="${LAUN_TOOLS_DIR:-$HOME/.local/share/laun/tools}"
+if ! need pi || ! pi --version 2>/dev/null | grep -Eq '(^|[[:space:]])1\.5\.2([[:space:]]|$)'; then
   echo "==> Installing pinned Pi 1.5.2 with Bun"
-  bun add --global --ignore-scripts @earendil-works/pi-coding-agent@1.5.2
-  install -d -m 755 "$HOME/.local/bin"
-  pi_package="${BUN_INSTALL:-$HOME/.bun}/install/global/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"
-  rm -f "$HOME/.local/bin/pi"
-  printf '#!/bin/sh\nexec bun "%s" "$@"\n' "$pi_package" > "$HOME/.local/bin/pi"
-  chmod 755 "$HOME/.local/bin/pi"
-  export PATH="$HOME/.local/bin:$PATH"
+  pi_root="$LAUN_TOOLS_DIR/pi/1.5.2"
+  [ ! -e "$pi_root" ] || { echo "Inspect the existing Pi tool cache before retrying: $pi_root" >&2; exit 1; }
+  install -d -m 755 "$pi_root/bin"
+  printf '%s\n' '{"private":true,"dependencies":{"@earendil-works/pi-coding-agent":"1.5.2"}}' > "$pi_root/package.json"
+  (cd "$pi_root" && "$LAUN_BUN_BIN" install --ignore-scripts)
+  pi_package="$pi_root/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"
+  # Values stay data even when an installation path contains shell punctuation.
+  "$LAUN_BUN_BIN" -e 'const quote=v=>"\x27"+v.replaceAll("\x27","\x27\\\x27\x27")+"\x27";await Bun.write(process.argv[1],"#!/bin/sh\nexec "+quote(process.argv[2])+" "+quote(process.argv[3])+" \"$@\"\n");' "$pi_root/bin/pi" "$LAUN_BUN_BIN" "$pi_package"
+  chmod 755 "$pi_root/bin/pi"
+  export PATH="$pi_root/bin:$PATH"
   pi --version
 fi
-if ! need openshell; then
+if ! need openshell || ! openshell --version 2>/dev/null | grep -Eq '(^|[[:space:]])0\.1\.8([[:space:]]|$)'; then
   echo "==> Installing pinned OpenShell v0.1.8"
-  openshell_installer="$(mktemp)"
-  trap 'rm -f "$openshell_installer"' EXIT
-  curl -fLsS https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.8/install.sh -o "$openshell_installer"
-  OPENSHELL_VERSION=v0.1.8 sh "$openshell_installer"
-  rm -f "$openshell_installer"
-  trap - EXIT
+  openshell_dir="$LAUN_TOOLS_DIR/openshell/0.1.8/bin"
+  [ ! -e "$openshell_dir/openshell" ] || { echo "Inspect the existing OpenShell tool cache before retrying: $openshell_dir" >&2; exit 1; }
+  bash "$REPO_DIR/deploy/openshell/install-cli.sh" "$openshell_dir"
+  export PATH="$openshell_dir:$PATH"
 fi
-if [ -z "${LAUN_TAG:-}" ]; then bun install --frozen-lockfile; fi
 if [ ! -f .env ]; then
   echo "==> Creating private .env with fresh controller and bridge credentials"
   bun deploy/prepare-env.ts
   echo "    Fill in credentials, allowlist, host OpenShell identity and PI_CONTROLLER_AUTH_DIR."
 fi
+SERVICE_IMAGE="$(bun -e 'import {readEnvValue} from "./apps/laun/src/compose-profile.ts";console.log(process.env.LAUN_SERVICE_IMAGE??readEnvValue(await Bun.file(".env").text(),"LAUN_SERVICE_IMAGE")??"");')"
+PULL_ONLY=false
+if [ -n "${LAUN_TAG:-}" ] || [ -n "$SERVICE_IMAGE" ]; then PULL_ONLY=true; fi
+if [ "$PULL_ONLY" = false ]; then bun install --frozen-lockfile --ignore-scripts; fi
 source "$REPO_DIR/deploy/compose-profile.sh"
 laun_compose_profile "$REPO_DIR/.env" "$REPO_DIR/deploy/docker-compose.yml" true
 COMPOSE=(docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env)
 "${COMPOSE[@]}" config --quiet
-if [ -n "${LAUN_TAG:-}" ]; then
+if [ "$PULL_ONLY" = true ]; then
   "${COMPOSE[@]}" pull
-  "${COMPOSE[@]}" up -d
+  "${COMPOSE[@]}" up -d --no-build
 else
   bun run build
   bun run test

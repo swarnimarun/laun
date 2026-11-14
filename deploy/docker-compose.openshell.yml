@@ -10,6 +10,8 @@ services:
       OPENSHELL_BIN: /usr/local/bin/openshell
       OPENSHELL_SANDBOX_IMAGE: ${OPENSHELL_SANDBOX_IMAGE:-ghcr.io/swarnimarun/laun-pi-agent:${LAUN_TAG:-latest}}
       OPENSHELL_V2_POLICY: ${OPENSHELL_V2_POLICY:-}
+      OPENSHELL_CPU_LIMIT: ${OPENSHELL_CPU_LIMIT:-2}
+      OPENSHELL_MEMORY_MIB: ${OPENSHELL_MEMORY_MIB:-1024}
       OPENSHELL_GATEWAY_ENDPOINT: ${OPENSHELL_SDK_GATEWAY:-https://host.openshell.internal:17670}
       OPENSHELL_GATEWAY_INSECURE: "false"
       PI_AUTH_FILE: /controller-auth/auth.json
@@ -38,7 +40,7 @@ services:
       EXECUTOR_MODE: ${EXECUTOR_MODE:-rpc}
       OPENSHELL_SANDBOX_IMAGE: ${OPENSHELL_SANDBOX_IMAGE:-ghcr.io/swarnimarun/laun-pi-agent:${LAUN_TAG:-latest}}
       OPENSHELL_POLICY: ${OPENSHELL_POLICY:-/openshell/policy.yaml}
-      OPENSHELL_PROVIDER: ${OPENSHELL_PROVIDER:?set OPENSHELL_PROVIDER to a provisioned model provider}
+      OPENSHELL_PROVIDER: ${OPENSHELL_PROVIDER:-}
       OPENSHELL_APPROVAL_MODE: ${OPENSHELL_APPROVAL_MODE:-manual}
       OPENSHELL_SANDBOX_MAX_IDLE_MS: ${OPENSHELL_SANDBOX_MAX_IDLE_MS:-604800000}
       OPENSHELL_SDK_GATEWAY: ${OPENSHELL_SDK_GATEWAY:-https://host.openshell.internal:17670}

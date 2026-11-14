@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Laun OpenShell bring-up + verification probe (runs on the VPS).
+# Legacy executor/provider bring-up + verification probe (runs on the VPS).
+# V2 uses controller inference and a no-egress tool sandbox. This helper does
+# not qualify that v2 policy, cgroup limits, durable harness or cleanup path;
+# see deploy/remote-setup.md and packages/runtime/test/openshell-live.ts.
 #
 # Idempotent and safe to re-run. Proves the sandbox boundary works instead of
 # claiming it: applies our rendered restrictive policy to a fresh sandbox and

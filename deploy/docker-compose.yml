@@ -3,14 +3,21 @@
 # tag the same reference, so service config never changes between them.
 # See docs/releases.md.
 x-laun-image: &laun-image
-  image: ${LAUN_IMAGE:-ghcr.io/swarnimarun/laun}:${LAUN_TAG:-latest}
+  image: ${LAUN_SERVICE_IMAGE:-${LAUN_IMAGE:-ghcr.io/swarnimarun/laun}:${LAUN_TAG:-latest}}
   build:
     context: ..
     dockerfile: deploy/Dockerfile
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+  stop_grace_period: 30s
 
 services:
   executor:
     <<: *laun-image
+    profiles: ["legacy"]
     command: ["bun", "apps/executor/src/index.ts"]
     ports:
       # Host probes only; gateway traffic uses the compose network.
@@ -31,7 +38,7 @@ services:
       # sandbox/transport settings when isolation is explicitly enabled.
       OPENSHELL_ENABLED: ${OPENSHELL_ENABLED:-false}
     volumes:
-      - laun-data:/data
+      - ${LAUN_DATA_DIR:-laun-data}:/data
       # pi's config + credentials. Two traps avoided deliberately:
       #  * the source must be the INVOKING USER's home — compose is started under
       #    sudo by deploy/bootstrap.sh, where HOME=/root would silently bind an
@@ -71,8 +78,10 @@ services:
       LAUN_TRUSTED_LOCAL: ${LAUN_TRUSTED_LOCAL:-false}
       LAUN_LEGACY_API: ${LAUN_LEGACY_API:-false}
       LAUN_DEMO: ${LAUN_DEMO:-false}
+      MODEL: ${MODEL:-opencode-go/muse-spark-1.3-contributor}
       LAUN_LOCAL_CAPACITY: ${LAUN_LOCAL_CAPACITY:-2}
       MAX_FAMILY_TOKENS: ${MAX_FAMILY_TOKENS:-100000}
+      LAUN_MIN_FREE_DISK_MIB: ${LAUN_MIN_FREE_DISK_MIB:-512}
       LAUN_MCP_ALLOW_LOOPBACK: ${LAUN_MCP_ALLOW_LOOPBACK:-false}
       LAUN_TELEGRAM_BOT_ID: ${LAUN_TELEGRAM_BOT_ID:-}
       TELEGRAM_ALLOWLIST_IDS: ${TELEGRAM_ALLOWLIST_IDS:-}
@@ -85,10 +94,15 @@ services:
       AUTO_RESUME_MAX_AGE_MS: ${AUTO_RESUME_MAX_AGE_MS:-86400000}
       RUN_STALL_MS: ${RUN_STALL_MS:-2700000}
     volumes:
-      - laun-data:/data
-    depends_on:
-      executor:
-        condition: service_started
+      - ${LAUN_DATA_DIR:-laun-data}:/data
+      # Controller-side inference also serves remote yards without local tools.
+      # Keep this dedicated directory outside every sandbox/workspace.
+      - type: bind
+        source: ${PI_CONTROLLER_AUTH_DIR:-${HOME}/.pi/agent}
+        target: /controller-auth
+        read_only: false
+        bind:
+          create_host_path: false
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "bun", "-e", "fetch('http://localhost:8080/health').then(r=>{if(!r.ok)process.exit(1)})"]
@@ -104,7 +118,7 @@ services:
       # Intentionally `:-`, not `:?`: a missing token must be a clean exit,
       # not a compose error, and `on-failure` below must not restart exit 0.
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
-      TELEGRAM_ALLOWLIST_IDS: ${TELEGRAM_ALLOWLIST_IDS:?set TELEGRAM_ALLOWLIST_IDS in .env}
+      TELEGRAM_ALLOWLIST_IDS: ${TELEGRAM_ALLOWLIST_IDS:-}
       TELEGRAM_ALLOWLIST_CHAT_IDS: ${TELEGRAM_ALLOWLIST_CHAT_IDS:-}
       LAUN_CONTROL_V2: ${LAUN_CONTROL_V2:-true}
       LAUN_TELEGRAM_BRIDGE_TOKEN: ${LAUN_TELEGRAM_BRIDGE_TOKEN:-}
