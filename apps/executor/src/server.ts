@@ -26,6 +26,7 @@ import {
 } from "./recovery.js";
 import { DEFAULT_NOTIFY_GRANT_POLL_MS, DEFAULT_NOTIFY_GRANT_WINDOW_MS } from "./notify.js";
 import { RpcManager } from "./rpc.js";
+import { repositoryEnvironment } from "./environment.js";
 
 interface JsonActive {
   controller: AbortController;
@@ -114,6 +115,7 @@ export function checkoutRepo(workdir: string, src: string): void {
   const r = spawnSync("git", ["clone", "--depth", "1", "--", src, workdir], {
     encoding: "utf8",
     timeout: REPO_CLONE_TIMEOUT_MS,
+    env: repositoryEnvironment(),
   });
   if (r.error) {
     throw fail(500, `failed to checkout repo: ${(r.error as Error).message}`);

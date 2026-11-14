@@ -1464,13 +1464,13 @@ describe("json recovery (stub pi binaries)", () => {
   function writeArgvLog(dir: string): void {
     writeFileSync(join(dir, "argv.log"), "");
     writeFileSync(join(dir, "pids.log"), "");
-    process.env["LAUN_ARGV"] = join(dir, "argv.log");
-    process.env["LAUN_PIDS"] = join(dir, "pids.log");
+    process.env["TEST_PI_ARGV"] = join(dir, "argv.log");
+    process.env["TEST_PI_PIDS"] = join(dir, "pids.log");
   }
 
   function clearArgvLog(): void {
-    delete process.env["LAUN_ARGV"];
-    delete process.env["LAUN_PIDS"];
+    delete process.env["TEST_PI_ARGV"];
+    delete process.env["TEST_PI_PIDS"];
   }
 
   function argvLines(dir: string): string[] {
@@ -1496,8 +1496,8 @@ describe("json recovery (stub pi binaries)", () => {
     writeFileSync(
       p,
       "#!/bin/sh\n" +
-        'echo "$*" >> "${LAUN_ARGV:-/dev/null}"\n' +
-        'echo "$$" >> "${LAUN_PIDS:-/dev/null}"\n' +
+        'echo "$*" >> "${TEST_PI_ARGV:-/dev/null}"\n' +
+        'echo "$$" >> "${TEST_PI_PIDS:-/dev/null}"\n' +
         'case "$*" in\n' +
         "  *transport*)\n" +
         '    echo \'{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"resumed"}}\';\n' +
@@ -1590,8 +1590,8 @@ describe("json recovery (stub pi binaries)", () => {
     writeFileSync(
       stub,
       "#!/bin/sh\n" +
-        'echo "$*" >> "${LAUN_ARGV:-/dev/null}"\n' +
-        'echo "$$" >> "${LAUN_PIDS:-/dev/null}"\n' +
+        'echo "$*" >> "${TEST_PI_ARGV:-/dev/null}"\n' +
+        'echo "$$" >> "${TEST_PI_PIDS:-/dev/null}"\n' +
         'echo \'{"type":"error","message":"always broken"}\';\n' +
         "exit 1\n",
     );
@@ -1631,7 +1631,7 @@ describe("json recovery (stub pi binaries)", () => {
     const dir = mkdtempSync(join(tmpdir(), "laun-rec-json-off-"));
     writeArgvLog(dir);
     const stub = join(dir, "fail.sh");
-    writeFileSync(stub, "#!/bin/sh\n" + 'echo "$*" >> "${LAUN_ARGV:-/dev/null}"\n' + "exit 1\n");
+    writeFileSync(stub, "#!/bin/sh\n" + 'echo "$*" >> "${TEST_PI_ARGV:-/dev/null}"\n' + "exit 1\n");
     chmodSync(stub, 0o755);
     const handler = jsonRecoveryHandler(dir, stub, { recoveryAttempts: 0 });
     try {
@@ -1653,7 +1653,7 @@ describe("json recovery (stub pi binaries)", () => {
     writeFileSync(
       stub,
       "#!/bin/sh\n" +
-        'echo "$*" >> "${LAUN_ARGV:-/dev/null}"\n' +
+        'echo "$*" >> "${TEST_PI_ARGV:-/dev/null}"\n' +
         'echo \'{"type":"agent_settled"}\';\n' +
         'echo \'{"type":"error","message":"late failure"}\';\n' +
         "exit 0\n",
@@ -1682,7 +1682,7 @@ describe("json recovery (stub pi binaries)", () => {
     writeFileSync(
       stub,
       "#!/bin/sh\n" +
-        'echo "$*" >> "${LAUN_ARGV:-/dev/null}"\n' +
+        'echo "$*" >> "${TEST_PI_ARGV:-/dev/null}"\n' +
         'echo \'{"type":"error","message":"first broken"}\';\n' +
         "exit 1\n",
     );

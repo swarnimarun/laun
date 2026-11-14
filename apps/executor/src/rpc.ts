@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { agentEnvironment } from "./environment.js";
 import { randomUUID } from "node:crypto";
 import type { AgentEvent } from "@laun/protocol";
 import {
@@ -795,13 +796,14 @@ export class RpcManager {
     if (sandboxName) {
       child = this.opts.sandboxRunner!.spawnInteractive(sandboxName, piArgv, {
         cwd: workdir,
+        // Trusted transport configuration, not sandbox agent environment.
         env: process.env,
         sandboxWorkdir: sandboxWorkdir ?? SANDBOX_WORKDIR,
       });
     } else {
       const argv = [...this.opts.openshellPrefix, ...piArgv];
       const [cmd, ...args] = argv;
-      child = spawn(cmd!, args, { cwd: workdir, env: process.env, stdio: ["pipe", "pipe", "pipe"] });
+      child = spawn(cmd!, args, { cwd: workdir, env: agentEnvironment(), stdio: ["pipe", "pipe", "pipe"] });
     }
     const session: SessionState = {
       sessionId,

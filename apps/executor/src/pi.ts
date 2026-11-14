@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { AgentEvent } from "@laun/protocol";
+import { agentEnvironment } from "./environment.js";
 import { sandboxNameForSession, type SandboxReaper, type SandboxRunner } from "./sandbox.js";
 
 /** Cap on forwarded tool output — protects gateway memory and Telegram limits. */
@@ -474,7 +475,7 @@ export async function runPiStreaming(opts: PiRunOptions): Promise<PiRunResult> {
       ? spawnSandboxChild()
       : spawn(cmd!, args, {
           cwd: opts.workdir,
-          env: process.env,
+          env: agentEnvironment(),
           // stdin MUST be /dev/null: spawn defaults it to an open pipe nobody ever
           // closes, and pi waits for EOF on a piped stdin — so every run hung forever
           // with no output. Confirmed against pi 1.0.2 in the executor image.
@@ -490,6 +491,8 @@ export async function runPiStreaming(opts: PiRunOptions): Promise<PiRunResult> {
       try {
         return opts.sandboxRunner!.spawnInteractive(sandboxName!, [opts.piBin, ...buildPiArgs(opts)], {
           cwd: opts.workdir,
+          // This environment belongs to the trusted CLI transport; OpenShell
+          // uses it for gateway authentication, not as the sandbox process env.
           env: process.env,
           stdin: "ignore",
           sandboxWorkdir: opts.sandboxWorkdir,
