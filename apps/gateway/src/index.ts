@@ -4,9 +4,11 @@ import { loadConfig } from "./config.js";
 import { createGateway } from "./server.js";
 import { SessionStore } from "./store.js";
 import { STREAMING_SERVE_OPTIONS } from "./serve.js";
+import { createControl } from "./control.js";
 
 const cfg = loadConfig();
 const gw = createGateway(cfg, new SessionStore(cfg.dataDir));
+const control = createControl(cfg);
 
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -29,7 +31,11 @@ const CONTENT_TYPES: Record<string, string> = {
  */
 function serveStatic(pathname: string): Response | null {
   const rel =
-    pathname === "/" || pathname === "/ui" || pathname === "/ui/"
+    pathname === "/" || pathname === "/app" || pathname === "/app/"
+      ? "v2/index.html"
+      : pathname.startsWith("/app/")
+        ? `v2/${pathname.slice("/app/".length)}`
+      : pathname === "/ui" || pathname === "/ui/"
       ? "index.html"
       : pathname.startsWith("/ui/")
         ? pathname.slice("/ui/".length)
@@ -53,15 +59,17 @@ function serveStatic(pathname: string): Response | null {
 
 Bun.serve({
   port: cfg.port,
+  hostname: process.env.GATEWAY_BIND ?? "127.0.0.1",
+  maxRequestBodySize: 2_097_152,
   ...STREAMING_SERVE_OPTIONS,
   async fetch(req) {
     const url = new URL(req.url);
     const path = url.pathname;
 
     if (path === "/health" && req.method === "GET") {
-      return Response.json({ ok: true, service: "gateway", executor: cfg.executorUrl });
+      return Response.json({ ok: true, service: "gateway", control: control.service.readiness() });
     }
-    if (req.method === "GET" && (path === "/" || path.startsWith("/ui/") || path === "/favicon.ico")) {
+    if (req.method === "GET" && (path === "/" || path === "/app" || path.startsWith("/app/") || path.startsWith("/ui/") || path === "/favicon.ico")) {
       const asset = serveStatic(path);
       if (asset) return asset;
       if (path === "/favicon.ico") return new Response(null, { status: 204 });
@@ -69,6 +77,9 @@ Bun.serve({
     }
 
     const id = gw.authenticate(req);
+    if (path.startsWith("/api/v2/")) {
+      return control.handle(req, id ? { id: id.kind === "service" ? "service" : `key_${id.keyId}`, admin: id.kind === "service" } : null);
+    }
     if (!id) return Response.json({ error: "unauthorized" }, { status: 401 });
     const serviceOnly = id.kind === "service";
 

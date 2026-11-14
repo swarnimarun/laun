@@ -5,12 +5,38 @@
   },
   "files": [],
   "references": [
-    { "path": "./packages/protocol" },
-    { "path": "./packages/policy" },
-    { "path": "./packages/acp" },
-    { "path": "./apps/executor" },
-    { "path": "./apps/gateway" },
-    { "path": "./apps/telegram-bridge" },
-    { "path": "./apps/laun" }
+    {
+      "path": "./packages/protocol"
+    },
+    {
+      "path": "./packages/policy"
+    },
+    {
+      "path": "./packages/acp"
+    },
+    {
+      "path": "./packages/broker"
+    },
+    {
+      "path": "./packages/control"
+    },
+    {
+      "path": "./packages/runtime"
+    },
+    {
+      "path": "./apps/executor"
+    },
+    {
+      "path": "./apps/gateway"
+    },
+    {
+      "path": "./apps/telegram-bridge"
+    },
+    {
+      "path": "./apps/laun"
+    },
+    {
+      "path": "./apps/worker"
+    }
   ]
 }

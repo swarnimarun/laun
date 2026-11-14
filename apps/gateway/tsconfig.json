@@ -4,8 +4,25 @@
     "outDir": "dist",
     "rootDir": "src",
     "composite": true,
-    "types": ["bun-types"]
+    "types": [
+      "bun-types"
+    ]
   },
-  "include": ["src"],
-  "references": [{ "path": "../../packages/protocol" }]
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../../packages/protocol"
+    },
+    {
+      "path": "../../packages/control"
+    },
+    {
+      "path": "../../packages/runtime"
+    },
+    {
+      "path": "../../packages/broker"
+    }
+  ]
 }

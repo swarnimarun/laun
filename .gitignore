@@ -11,3 +11,4 @@ events-*.jsonl
 
 # Vendored SDK ships its own compiled dist (the package has no other form).
 !vendor/openshell-sdk/dist/
+.laun-local/

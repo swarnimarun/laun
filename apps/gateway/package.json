@@ -11,6 +11,9 @@
     "start": "bun src/index.ts"
   },
   "dependencies": {
-    "@laun/protocol": "workspace:*"
+    "@laun/protocol": "workspace:*",
+    "@laun/control": "workspace:*",
+    "@laun/runtime": "workspace:*",
+    "@laun/broker": "workspace:*"
   }
 }
