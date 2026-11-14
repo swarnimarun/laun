@@ -10,6 +10,7 @@ import { requestAdvice } from "./adviser.js";
 import { claimHostCleanup,finishHostCleanup,heartbeatHostCleanup } from "./cleanup.js";
 import type {HostCleanupJob,RuntimeThreadCleanupResult} from "@laun/protocol";
 import { createRunInferenceClient } from "./inference.js";
+import {appendDurableRecord,loadDurableRecords} from "./durability.js";
 import { retainedFamilyTokens } from "./retention-guard.js";
 import type { RuntimeInferenceService } from "@laun/protocol";
 
@@ -220,6 +221,10 @@ export class ControlService {
       await recordPlacement(base,thread.placementId);
       const context=this.context(run);
       const result=await runtime.run({threadId:thread.id,runId:run.id,placementId:thread.placementId,prompt:run.prompt,instructions:run.instructions,model:run.model??mower.model,workspaceRoot:join(base,"work"),sessionDir:join(base,"session")},{
+        durability:runtime.durabilityAdapter?{
+          load:async(afterSequence,signal)=>{controller.signal.throwIfAborted();signal?.throwIfAborted();this.store.admissionGuard?.();return loadDurableRecords(this.store,this.store.get<WorkerRecord>("worker","local"),{runId:run.id,generation:run.generation,afterSequence});},
+          append:async(request,signal)=>{controller.signal.throwIfAborted();signal?.throwIfAborted();this.store.admissionGuard?.();return appendDurableRecord(this.store,this.store.get<WorkerRecord>("worker","local"),{...request,runId:run.id,generation:run.generation});},
+        }:undefined,
         inference:this.options.inference?createRunInferenceClient(this,{runId:run.id,generation:run.generation,workerId:"local"},controller.signal):undefined,
         emit:event=>{this.store.fence(run.id,"local",run.generation);if(event.sessionId!==thread.id||!isAgentEvent(event))throw new ControlError("invalid runtime event",502);
           if(event.type==="usage"&&this.store.db.query("SELECT 1 FROM inference_calls WHERE run_id=? AND generation=? LIMIT 1").get(run.id,run.generation))return;

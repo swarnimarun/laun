@@ -46,7 +46,7 @@ export interface PiRuntimeOptions {
   cleanupRoot?: string;
 }
 
-type Active = { controller: AbortController; conversation?: Conversation; harness?: Harness };
+type Active = { controller: AbortController; conversation?: Conversation; harness?: Harness; settled:Promise<void>; settle:()=>void };
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 const textOutput = (value: unknown) => [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value) ?? "" }];
@@ -110,7 +110,8 @@ export function createPiRuntime(options: PiRuntimeOptions = {}): AgentRuntime {
     async run(input, callbacks) {
       validateInput(input, callbacks.inference ? { ...options, authFile: undefined } : options);
       if (active.has(input.threadId) || cleaning.has(input.threadId)) throw new Error("thread already has an active runtime run or cleanup");
-      const state: Active = { controller: new AbortController() };
+      let settle!:()=>void;const settled=new Promise<void>(resolve=>{settle=resolve;});
+      const state: Active = { controller: new AbortController(),settled,settle };
       active.set(input.threadId, state);
       const ctx = withAbortSignal(state.controller.signal, BACKGROUND_CONTEXT);
       let release: (() => void) | undefined;
@@ -207,6 +208,7 @@ export function createPiRuntime(options: PiRuntimeOptions = {}): AgentRuntime {
         if (state.conversation && state.controller.signal.aborted) await state.conversation.abort(BACKGROUND_CONTEXT, { background: true }).catch(() => {});
         result = { status: error instanceof DurableStorageError ? "interrupted" : cancelled ? "cancelled" : "error", summary: message };
       } finally {
+        try {
         if (timer) clearTimeout(timer);
         await watch?.stop().catch(() => {});
         await state.harness?.close(BACKGROUND_CONTEXT).catch((error) => {
@@ -225,7 +227,7 @@ export function createPiRuntime(options: PiRuntimeOptions = {}): AgentRuntime {
         if (durable?.uncertain()) result = { status: "interrupted", summary: "Server-owned thread commit requires reconciliation before retry; no unacknowledged progress or tools were published" };
         release?.();
         releaseGuard?.();
-        active.delete(input.threadId);
+        } finally {active.delete(input.threadId);state.settle();}
       }
       if (result.status === "done") await emit({ type: "done", sessionId: input.threadId, summary: result.summary });
       else await emit({ type: "error", sessionId: input.threadId, message: result.summary ?? "runtime failed" });
@@ -238,7 +240,11 @@ export function createPiRuntime(options: PiRuntimeOptions = {}): AgentRuntime {
       await state.conversation?.abort(BACKGROUND_CONTEXT, { background: true });
     },
     async close() {
-      await Promise.all([...active.keys()].map((id) => runtime.cancel(id)));
+      const current=[...active.entries()];
+      // A storage-poisoned SDK session can reject abort. Its run still owns
+      // boundary shutdown and must settle before close returns.
+      await Promise.allSettled(current.map(([id])=>runtime.cancel(id)));
+      await Promise.allSettled(current.map(([,state])=>state.settled));
     },
     async cleanupThread(input) {
       if (!cleaner) return { verified: false, removedPaths: 0, removedSandboxes: 0, outstanding: ["Runtime has no configured immutable cleanup root"] };
