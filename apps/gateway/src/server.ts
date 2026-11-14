@@ -7,7 +7,7 @@ import type {
   SendMessageRequest,
   SessionRecord,
 } from "@laun/protocol";
-import { bearerToken, checkBearer, normalizeCreateSession } from "@laun/protocol";
+import { bearerToken, checkBearer, isAgentEvent, normalizeCreateSession } from "@laun/protocol";
 import type { GatewayConfig } from "./config.js";
 import {
   DEFAULT_AUTO_RESUME,
@@ -25,11 +25,25 @@ const MAX_EVENTS_PER_SESSION = 2000;
 
 interface SessionBus {
   events: AgentEvent[];
+  /** Absolute cursor of events[0]; eviction never resets client cursors. */
+  offset: number;
+  /** Lifetime usage, independent of the bounded display ring. */
+  totalTokens: number;
   subs: Set<(e: AgentEvent) => void>;
   pendingApprovals: Map<string, AgentEvent & { type: "approval_request" }>;
 }
 
 const safeFile = (id: string) => `events-${id.replace(/[^A-Za-z0-9_-]/g, "_")}.jsonl`;
+
+function countedTokens(e: AgentEvent): number {
+  if (e.type !== "usage") return 0;
+  const positive = (v: unknown): number => typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
+  return positive(e.totalTokens) || (positive(e.inputTokens) + positive(e.outputTokens));
+}
+
+function settledApproval(e: AgentEvent): string | undefined {
+  return e.type === "status" ? e.message?.match(/^approval (\S+) (?:approve|deny|denied)\b/)?.[1] : undefined;
+}
 
 /** Who is calling: an internal service, or a human/CLI/web client using an agent key. */
 export type GatewayIdentity =
@@ -61,7 +75,9 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
   if (cfg.bootstrapKey) {
     try {
       const rec = keys.importKey(cfg.bootstrapKey);
-      console.log(`[gateway] agent key ${rec.id} ready (${rec.label})`);
+      console.log(rec.revokedAt
+        ? `[gateway] bootstrap key ${rec.id} remains revoked; mint a new key to rotate`
+        : `[gateway] agent key ${rec.id} ready (${rec.label})`);
     } catch (e) {
       throw new Error(`LAUN_KEY invalid: ${(e as Error).message}`);
     }
@@ -70,41 +86,40 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
   const eventsFile = (id: string): string => join(cfg.dataDir, safeFile(id));
 
   /** Rebuild in-memory bus from the persisted JSONL log (survives restarts). */
-  function replay(id: string): Pick<SessionBus, "events" | "pendingApprovals"> {
+  function replay(id: string): Omit<SessionBus, "subs"> {
     const events: AgentEvent[] = [];
+    let count = 0;
+    let totalTokens = 0;
+    const pendingApprovals: SessionBus["pendingApprovals"] = new Map();
     try {
-      if (!existsSync(eventsFile(id))) return { events, pendingApprovals: new Map() };
+      if (!existsSync(eventsFile(id))) return { events, offset: 0, totalTokens, pendingApprovals };
       const lines = readFileSync(eventsFile(id), "utf8").split("\n").filter(Boolean);
-      for (const line of lines.slice(-MAX_EVENTS_PER_SESSION)) {
+      for (const line of lines) {
         try {
-          const e = JSON.parse(line) as AgentEvent;
-          if (e && typeof e === "object" && typeof e.type === "string") events.push(e);
+          const e: unknown = JSON.parse(line);
+          if (!isAgentEvent(e) || e.sessionId !== id) continue;
+          count++;
+          totalTokens += countedTokens(e);
+          events.push(e);
+          if (events.length > MAX_EVENTS_PER_SESSION) events.shift();
+          if (e.type === "approval_request") pendingApprovals.set(e.requestId, e);
+          const settled = settledApproval(e);
+          if (settled) pendingApprovals.delete(settled);
         } catch {
           // skip corrupt line
         }
       }
-    } catch {
-      return { events, pendingApprovals: new Map() };
+    } catch (error) {
+      throw new Error("cannot replay session events; restore access before resuming", { cause: error });
     }
-    const decided = new Set<string>();
-    for (const e of events) {
-      if (e.type === "status" && e.message) {
-        const m = e.message.match(/^approval (\S+) (approve|deny)/);
-        if (m) decided.add(m[1]);
-      }
-    }
-    const pendingApprovals = new Map<string, AgentEvent & { type: "approval_request" }>();
-    for (const e of events) {
-      if (e.type === "approval_request" && !decided.has(e.requestId)) pendingApprovals.set(e.requestId, e);
-    }
-    return { events, pendingApprovals };
+    return { events, offset: count - events.length, totalTokens, pendingApprovals };
   }
 
   const busFor = (id: string): SessionBus => {
     let b = buses.get(id);
     if (!b) {
       const restored = replay(id);
-      b = { events: restored.events, subs: new Set(), pendingApprovals: restored.pendingApprovals };
+      b = { ...restored, subs: new Set() };
       buses.set(id, b);
     }
     return b;
@@ -116,8 +131,13 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
     if (!sessions.get(sessionId)) return;
     const b = busFor(sessionId);
     b.events.push(e);
+    b.totalTokens += countedTokens(e);
     lastEventAt.set(sessionId, Date.now());
-    if (b.events.length > MAX_EVENTS_PER_SESSION) b.events.splice(0, b.events.length - MAX_EVENTS_PER_SESSION);
+    if (b.events.length > MAX_EVENTS_PER_SESSION) {
+      const removed = b.events.length - MAX_EVENTS_PER_SESSION;
+      b.events.splice(0, removed);
+      b.offset += removed;
+    }
     try {
       appendFileSync(eventsFile(sessionId), JSON.stringify(e) + "\n");
     } catch (err) {
@@ -127,6 +147,8 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
       b.pendingApprovals.set(e.requestId, e);
       sessions.setStatus(sessionId, "waiting_approval");
     }
+    const settled = settledApproval(e);
+    if (settled) b.pendingApprovals.delete(settled);
     // An error event is authoritative: never leave a failed run looking alive.
     if (e.type === "error") sessions.setStatus(sessionId, "error");
     if (e.type === "done") sessions.setStatus(sessionId, "done");
@@ -140,22 +162,9 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
     }
   }
 
-  /** Counted tokens for a session from its `usage` events (bus = source of truth). */
+  /** Lifetime usage includes events already evicted from the display ring. */
   function sessionTokens(sessionId: string): number {
-    let total = 0;
-    for (const e of busFor(sessionId).events) {
-      if (e.type !== "usage") continue;
-      const u = e as { inputTokens?: unknown; outputTokens?: unknown; totalTokens?: unknown };
-      if (typeof u.totalTokens === "number" && Number.isFinite(u.totalTokens) && u.totalTokens > 0) {
-        total += u.totalTokens;
-      } else {
-        for (const k of ["inputTokens", "outputTokens"] as const) {
-          const v = u[k];
-          if (typeof v === "number" && Number.isFinite(v) && v > 0) total += v;
-        }
-      }
-    }
-    return Math.floor(total);
+    return Math.floor(busFor(sessionId).totalTokens);
   }
 
   /**
@@ -198,9 +207,9 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
   ): Promise<void> {
     if (running.has(sessionId)) return;
     running.add(sessionId);
-    sessions.setStatus(sessionId, "running");
-    publish(sessionId, { type: "status", sessionId, status: "running" });
     try {
+      sessions.setStatus(sessionId, "running");
+      publish(sessionId, { type: "status", sessionId, status: "running" });
       for await (const e of streamExecutorRun(cfg.executorUrl, cfg.gatewayToken, {
         sessionId,
         prompt,
@@ -220,8 +229,14 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
       const rec = sessions.get(sessionId);
       if (rec && rec.status === "running") setStatus(sessionId, "done");
     } catch (e) {
-      publish(sessionId, { type: "error", sessionId, message: (e as Error).message });
-      setStatus(sessionId, "error");
+      try {
+        publish(sessionId, { type: "error", sessionId, message: (e as Error).message });
+        setStatus(sessionId, "error");
+      } catch (persistenceError) {
+        // Disk failures must not turn a detached run into an unhandled
+        // rejection or retain its process-local admission slot forever.
+        console.error(`[gateway] cannot persist failed run ${sessionId}: ${(persistenceError as Error).message}`);
+      }
     } finally {
       running.delete(sessionId);
       // Drain one queued follow-up, if any, as a fresh run. Chained via
@@ -232,33 +247,6 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
         pendingQueue.delete(sessionId);
         const rec = sessions.get(sessionId);
         if (rec) void runAgent(sessionId, next, rec.model, { repo: rec.repo, runtime: rec.runtime });
-      }
-    }
-  }
-
-  // Boot recovery: resume recently-interrupted runs instead of abandoning
-  // them. pi resumes from its session files, so the continuation just needs
-  // sending. Aged-out interruptions still go to error for human triage.
-  for (const rec of sessions.list()) {
-    if (rec.status === "running" || rec.status === "waiting_approval") {
-      const ageMs = Date.now() - Date.parse(rec.updatedAt);
-      if (autoResume && (autoResumeMaxAgeMs <= 0 || ageMs <= autoResumeMaxAgeMs)) {
-        publish(rec.id, {
-          type: "status",
-          sessionId: rec.id,
-          status: "running",
-          message: "gateway restarted during run — resuming where it left off",
-        });
-        void runAgent(rec.id, RESUME_PROMPT, rec.model, { repo: rec.repo, runtime: rec.runtime });
-      } else {
-        sessions.setStatus(rec.id, "error");
-        publish(rec.id, {
-          type: "error",
-          sessionId: rec.id,
-          message: autoResume
-            ? "gateway restarted during run — interruption too old to resume, send a new message to retry"
-            : "gateway restarted during run — send a new message to retry",
-        });
       }
     }
   }
@@ -311,6 +299,7 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
     busFor,
     publish,
     keys,
+    sessionTokens,
 
     /** Service token (internal) or a valid agent key (humans, CLI, web UI). */
     authenticate(req: Request): GatewayIdentity | null {
@@ -331,14 +320,18 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
       const rec = sessions.create({ goal: norm.goal, repo: norm.repo, model: norm.model, runtime: norm.runtime });
       busFor(rec.id);
       void runAgent(rec.id, norm.goal, norm.model, { repo: norm.repo, runtime: norm.runtime });
-      return rec;
+      return sessions.get(rec.id)!;
     },
 
     sendMessage(sessionId: string, input: SendMessageRequest): Promise<{ outcome: "started" | "steered" | "queued" }> {
       const rec = sessions.get(sessionId);
       if (!rec) throw Object.assign(new Error("session not found"), { status: 404 });
-      const text = (input.text ?? "").trim();
+      if (!input || typeof input !== "object" || typeof input.text !== "string") {
+        throw Object.assign(new Error("text is required and must be a string"), { status: 400 });
+      }
+      const text = input.text.trim();
       if (!text) throw Object.assign(new Error("text is required"), { status: 400 });
+      if (text.includes("\0")) throw Object.assign(new Error("text must not contain NUL"), { status: 400 });
       if (text.length > 8000) throw Object.assign(new Error("text too long (max 8000 chars)"), { status: 400 });
       const mode = (input as { mode?: unknown }).mode;
       if (mode !== undefined && mode !== "steer" && mode !== "queue") {
@@ -392,7 +385,7 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
           status: "running",
           message: "executor had no live run; started fresh",
         });
-        void runAgent(sessionId, text, rec.model);
+        void runAgent(sessionId, text, rec.model, { repo: rec.repo, runtime: rec.runtime });
         return { outcome: "started" as const };
       }
       throw Object.assign(
@@ -467,6 +460,9 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
           pendingQueue.delete(id);
         }
       }
+      // Commit deletion before disposing history. If the index cannot be
+      // written, the thread and its log remain available for recovery.
+      sessions.delete(id);
       running.delete(id);
       pendingQueue.delete(id);
       lastEventAt.delete(id);
@@ -476,7 +472,6 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
       } catch {
         // Already gone or never created; the record is the source of truth.
       }
-      sessions.delete(id);
     },
 
     pendingApprovals(sessionId: string) {
@@ -542,12 +537,39 @@ gateway/executor desync (record settled here, slot wedged there) once
       );
     },
 
-    log(sessionId: string, since: number): { events: AgentEvent[]; next: number } {
+    log(sessionId: string, since: number): { events: AgentEvent[]; next: number; oldest: number } {
       const b = busFor(sessionId);
       const from = Number.isInteger(since) && since >= 0 ? since : 0;
-      return { events: b.events.slice(from), next: b.events.length };
+      return { events: b.events.slice(Math.max(0, from - b.offset)), next: b.offset + b.events.length, oldest: b.offset };
     },
   };
+  // Boot recovery: resume recently-interrupted runs instead of abandoning
+  // them. pi resumes from its session files, so the continuation just needs
+  // sending. Aged-out interruptions still go to error for human triage.
+  for (const rec of sessions.list()) {
+    if (rec.status === "running" || rec.status === "waiting_approval") {
+      const ageMs = Date.now() - Date.parse(rec.updatedAt);
+      if (autoResume && (autoResumeMaxAgeMs <= 0 || ageMs <= autoResumeMaxAgeMs)) {
+        publish(rec.id, {
+          type: "status",
+          sessionId: rec.id,
+          status: "running",
+          message: "gateway restarted during run — resuming where it left off",
+        });
+        void runAgent(rec.id, RESUME_PROMPT, rec.model, { repo: rec.repo, runtime: rec.runtime });
+      } else {
+        sessions.setStatus(rec.id, "error");
+        publish(rec.id, {
+          type: "error",
+          sessionId: rec.id,
+          message: autoResume
+            ? "gateway restarted during run — interruption too old to resume, send a new message to retry"
+            : "gateway restarted during run — send a new message to retry",
+        });
+      }
+    }
+  }
+
   return api;
 }
 

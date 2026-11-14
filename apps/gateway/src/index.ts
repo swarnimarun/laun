@@ -143,7 +143,7 @@ Bun.serve({
             start(controller) {
               const enc = new TextEncoder();
               const send = (e: unknown) => controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
-              for (const e of bus.events.slice(since)) send(e);
+              for (const e of gw.log(sessionId, since).events) send(e);
               const sub = (e: unknown) => send(e);
               bus.subs.add(sub);
               const hb = setInterval(() => controller.enqueue(enc.encode(`: hb\n\n`)), 15_000);

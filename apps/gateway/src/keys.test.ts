@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAgentKey } from "@laun/protocol";
@@ -69,7 +69,7 @@ describe("AgentKeyStore", () => {
     expect(() => new AgentKeyStore(dir)).not.toThrow();
   });
 
-  test("revoke removes the key and persists", () => {
+  test("revoke disables the key and persists", () => {
     const dir = tmpDataDir();
     const s = new AgentKeyStore(dir);
     const { key, record } = s.add();
@@ -77,5 +77,69 @@ describe("AgentKeyStore", () => {
     expect(s.verify(key)).toBeNull();
     expect(s.revoke(record.id)).toBe(false);
     expect(new AgentKeyStore(dir).list()).toEqual([]);
+  });
+
+  test("revoked bootstrap identity cannot resurrect on import or after restart", () => {
+    const dir = tmpDataDir();
+    const initial = new AgentKeyStore(dir);
+    const { key, record } = initial.add("bootstrap");
+    initial.revoke(record.id);
+    const replacement = `laun_${record.id}_${"C".repeat(43)}`;
+    for (const store of [initial, new AgentKeyStore(dir)]) {
+      expect(store.importKey(key).revokedAt).toBeDefined();
+      expect(store.importKey(replacement).revokedAt).toBeDefined();
+      expect(store.verify(key)).toBeNull();
+      expect(store.verify(replacement)).toBeNull();
+      expect(store.list()).toEqual([]);
+    }
+    const restarted = new AgentKeyStore(dir);
+    expect(restarted.verify(key)).toBeNull();
+    const fresh = restarted.add("rotation with new identity");
+    expect(fresh.record.id).not.toBe(record.id);
+    expect(restarted.verify(fresh.key)?.id).toBe(fresh.record.id);
+  });
+
+  test("missing store is fresh; corrupt, malformed, duplicate or unreadable records stop startup", () => {
+    const dir = tmpDataDir();
+    const valid = new AgentKeyStore(dir);
+    valid.add();
+    const index = join(dir, "keys.json");
+    const rows = JSON.parse(readFileSync(index, "utf8")) as Record<string, unknown>[];
+    for (const raw of ["{", "null", "{}", "[1]", JSON.stringify([{ ...rows[0], hash: "invalid" }]),
+      JSON.stringify([{ ...rows[0], createdAt: "invalid" }]), JSON.stringify([{ ...rows[0], revokedAt: "invalid" }]),
+      JSON.stringify([{ ...rows[0], id: "../bad" }]), JSON.stringify([rows[0], rows[0]])]) {
+      writeFileSync(index, raw);
+      expect(() => new AgentKeyStore(dir)).toThrow(/key store/);
+      expect(readFileSync(index, "utf8")).toBe(raw);
+    }
+    const unreadable = tmpDataDir();
+    mkdirSync(join(unreadable, "keys.json"));
+    expect(() => new AgentKeyStore(unreadable)).toThrow("cannot read key store");
+    expect(new AgentKeyStore(tmpDataDir()).list()).toEqual([]);
+  });
+
+  test("failed persistence leaves add, replacement and revoke unapplied in memory", () => {
+    const dir = tmpDataDir();
+    const store = new AgentKeyStore(dir);
+    const { key, record } = store.add("existing");
+    const index = join(dir, "keys.json");
+    const backup = join(dir, "keys.backup.json");
+    renameSync(index, backup);
+    // Rename onto a directory fails deterministically even when tests run as root.
+    mkdirSync(index);
+    try {
+      expect(() => store.add("must not become active")).toThrow();
+      expect(store.list()).toEqual([record]);
+      const replacement = `laun_${record.id}_${"D".repeat(43)}`;
+      expect(() => store.importKey(replacement)).toThrow();
+      expect(store.verify(replacement)).toBeNull();
+      expect(store.verify(key)?.id).toBe(record.id);
+      expect(() => store.revoke(record.id)).toThrow();
+      expect(store.verify(key)?.id).toBe(record.id);
+    } finally {
+      rmdirSync(index);
+      renameSync(backup, index);
+    }
+    expect(new AgentKeyStore(dir).verify(key)?.id).toBe(record.id);
   });
 });

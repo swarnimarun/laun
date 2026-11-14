@@ -50,7 +50,7 @@ describe("session delete", () => {
     gw.publish(id, { type: "text", sessionId: id, delta: "hi" });
     await gw.deleteSession(id);
     expect(gw.sessions.get(id)).toBeUndefined();
-    expect(gw.log(id, 0)).toEqual({ events: [], next: 0 });
+    expect(gw.log(id, 0)).toEqual({ events: [], next: 0, oldest: 0 });
     expect(existsSync(join(dir, `events-${id}.jsonl`))).toBe(false);
     expect(stub.aborts).toHaveLength(0);
   });

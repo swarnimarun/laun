@@ -73,4 +73,17 @@ describe("gateway auth: service token vs agent key", () => {
   test("an invalid LAUN_KEY refuses to start", () => {
     expect(() => gwWithKeys("garbage")).toThrow("LAUN_KEY");
   });
+
+  test("restart with a stale bootstrap env key preserves revocation", () => {
+    const { keys, dir } = gwWithKeys();
+    const { key, record } = keys.add("bootstrap");
+    keys.revoke(record.id);
+    const restarted = createGateway(
+      { port: 8080, gatewayToken: "service-token", executorUrl: "http://localhost:9", dataDir: dir, bootstrapKey: key, publicDir: dir },
+      new SessionStore(dir), new AgentKeyStore(dir),
+    );
+    expect(restarted.authenticate(req(`Bearer ${key}`))).toBeNull();
+    expect(restarted.authenticate(req("Bearer service-token"))).toEqual({ kind: "service" });
+    expect(restarted.keys.list()).toEqual([]);
+  });
 });
