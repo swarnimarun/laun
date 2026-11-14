@@ -1,24 +1,29 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, constants, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { formatAgentKey, parseAgentKey } from "@laun/protocol";
+import type { PublicAgentKeyRecord } from "@laun/protocol";
+export type { PublicAgentKeyRecord } from "@laun/protocol";
 
 /**
  * A stored agent key. Only the sha256 of the secret half is kept — the
  * plaintext exists exactly twice: in the operator's .env and in whatever
  * client they pasted it into.
  */
-export interface AgentKeyRecord {
-  id: string;
+export interface AgentKeyRecord extends PublicAgentKeyRecord {
   /** sha256 hex of the secret half. Never the secret. */
   hash: string;
-  label: string;
-  createdAt: string;
-  /** Retained tombstone prevents stale bootstrap credentials being reimported. */
-  revokedAt?: string;
 }
 
-export type PublicAgentKeyRecord = Omit<AgentKeyRecord, "hash">;
+/** Human owners are opaque identifiers, never service/worker/Telegram roles. */
+export function isKeyPrincipalId(value: unknown): value is string {
+  return typeof value === "string" && /^(?:user_[0-9a-f]{32}|key_[0-9a-f]{8,32})$/.test(value);
+}
+
+export class KeyStoreUnavailableError extends Error {
+  readonly status = 503;
+  constructor() { super("key store unavailable after an uncertain durable write; restart and inspect persisted credentials before recovery"); }
+}
 
 function newKeyId(): string {
   return randomBytes(4).toString("hex");
@@ -35,8 +40,9 @@ function hashSecret(secret: string): string {
 function validRecord(value: unknown): value is AgentKeyRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  return Object.keys(record).every((key) => ["id", "hash", "label", "createdAt", "revokedAt"].includes(key)) &&
+  return Object.keys(record).every((key) => ["id", "principalId", "hash", "label", "createdAt", "revokedAt"].includes(key)) &&
     typeof record.id === "string" && /^[0-9a-f]{8,32}$/.test(record.id) &&
+    (record.principalId === undefined || isKeyPrincipalId(record.principalId)) &&
     typeof record.hash === "string" && /^[0-9a-f]{64}$/.test(record.hash) &&
     typeof record.label === "string" && record.label.trim().length > 0 &&
     typeof record.createdAt === "string" && Number.isFinite(Date.parse(record.createdAt)) &&
@@ -47,8 +53,11 @@ function validRecord(value: unknown): value is AgentKeyRecord {
 export class AgentKeyStore {
   private keys = new Map<string, AgentKeyRecord>();
   private indexPath: string;
+  private unavailable = false;
+  private readonly sync: (fd: number) => void;
 
-  constructor(dataDir: string) {
+  constructor(dataDir: string, options: { sync?: (fd: number) => void } = {}) {
+    this.sync = options.sync ?? fsyncSync;
     mkdirSync(dataDir, { recursive: true });
     this.indexPath = join(dataDir, "keys.json");
     let raw: string;
@@ -64,7 +73,7 @@ export class AgentKeyStore {
     } catch (error) {
       throw new Error("invalid key store JSON; refusing to reset credentials", { cause: error });
     }
-    // Preserve the legacy array format; revokedAt is an additive field.
+    // Preserve the legacy array format and ownership; optional fields are additive.
     if (!Array.isArray(parsed) || !parsed.every(validRecord)) throw new Error("invalid key store records; refusing to reset credentials");
     for (const record of parsed) {
       if (this.keys.has(record.id)) throw new Error("duplicate key store identity; refusing to reset credentials");
@@ -73,25 +82,44 @@ export class AgentKeyStore {
   }
 
   private persist(next: Map<string, AgentKeyRecord>): void {
+    this.assertAvailable();
     const tmp = `${this.indexPath}.tmp-${randomBytes(8).toString("hex")}`;
+    let renamed = false;
     try {
-      writeFileSync(tmp, JSON.stringify([...next.values()], null, 2), { mode: 0o600, flag: "wx" });
+      const file = openSync(tmp, "wx", 0o600);
+      try { writeFileSync(file, JSON.stringify([...next.values()], null, 2)); this.sync(file); }
+      finally { closeSync(file); }
       renameSync(tmp, this.indexPath);
-      // A failed disk write/rename must never change live authentication state.
+      renamed = true;
+      const directory = openSync(dirname(this.indexPath), constants.O_RDONLY | constants.O_DIRECTORY);
+      try { this.sync(directory); } finally { closeSync(directory); }
       this.keys = next;
     } catch (error) {
       try { unlinkSync(tmp); } catch { /* no temp file, or cleanup unavailable */ }
+      // Rename may already be visible while its crash durability is unknown.
+      // Never keep accepting an older cached credential in that state.
+      if (renamed) { this.unavailable = true; this.keys.clear(); throw new KeyStoreUnavailableError(); }
       throw error;
     }
   }
 
-  /** Mint a key. The plaintext is returned once and never stored. */
-  add(label = "default"): { key: string; record: PublicAgentKeyRecord } {
+  private assertAvailable(): void { if (this.unavailable) throw new KeyStoreUnavailableError(); }
+
+  /**
+   * Mint a credential for a stable human owner. Only trusted installation
+   * administrators may supply an existing owner to rotate/share credentials.
+   * Omitting the owner creates a separate account; it never inherits another
+   * key's authority. The plaintext is returned once and never stored.
+   */
+  add(label = "default", principalId?: string): { key: string; record: PublicAgentKeyRecord } {
+    this.assertAvailable();
+    if (principalId !== undefined && !isKeyPrincipalId(principalId)) throw new Error("invalid key principalId");
     let id = newKeyId();
     while (this.keys.has(id)) id = newKeyId();
     const secret = newSecret();
     const record: AgentKeyRecord = {
       id,
+      principalId: principalId ?? `user_${randomBytes(16).toString("hex")}`,
       hash: hashSecret(secret),
       label: label.trim() || "default",
       createdAt: new Date().toISOString(),
@@ -110,6 +138,7 @@ export class AgentKeyStore {
    * malformed key (fail closed at boot instead of silently unusable auth).
    */
   importKey(raw: string, label = "bootstrap"): PublicAgentKeyRecord {
+    this.assertAvailable();
     const parsed = parseAgentKey(raw);
     if (!parsed) throw new Error("LAUN_KEY is not a valid agent key (expected laun_<id>_<secret>)");
     const hash = hashSecret(parsed.secret);
@@ -118,6 +147,7 @@ export class AgentKeyStore {
     if (existing && existing.hash === hash) return this.public(existing);
     const record: AgentKeyRecord = {
       id: parsed.id,
+      ...(existing?.principalId ? { principalId: existing.principalId } : {}),
       hash,
       label: existing?.label ?? (label.trim() || "bootstrap"),
       createdAt: existing?.createdAt ?? new Date().toISOString(),
@@ -133,6 +163,7 @@ export class AgentKeyStore {
    * malformed input. Comparison happens on hashes with timingSafeEqual.
    */
   verify(raw: string | null | undefined): PublicAgentKeyRecord | null {
+    this.assertAvailable();
     const parsed = parseAgentKey(raw);
     if (!parsed) return null;
     const record = this.keys.get(parsed.id);
@@ -143,7 +174,15 @@ export class AgentKeyStore {
     return timingSafeEqual(got, want) ? this.public(record) : null;
   }
 
+  /** Resolve only after verifying the credential; a key ID is not proof of identity. */
+  principalIdForKey(id: string): string | null {
+    this.assertAvailable();
+    const record = this.keys.get(id);
+    return record && !record.revokedAt ? record.principalId ?? `key_${record.id}` : null;
+  }
+
   list(): PublicAgentKeyRecord[] {
+    this.assertAvailable();
     return [...this.keys.values()]
       .filter((record) => !record.revokedAt)
       .map((k) => this.public(k))
@@ -151,6 +190,7 @@ export class AgentKeyStore {
   }
 
   revoke(id: string): boolean {
+    this.assertAvailable();
     const existing = this.keys.get(id);
     if (!existing || existing.revokedAt) return false;
     const next = new Map(this.keys);
