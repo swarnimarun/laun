@@ -78,7 +78,9 @@ export async function startBrowserFixture(repoRoot: string, options: {runtime?:A
             ? "app.js"
             : path === "/app/style.css"
               ? "style.css"
-              : null;
+              : /^\/app\/assets\/[a-z][a-z0-9-]*\.(?:webp|ttf|svg)$/.test(path)
+                ? path.slice("/app/".length)
+                : null;
       if (!file) return new Response("Not found", { status: 404 });
       return new Response(Bun.file(join(publicRoot, file)), {
         headers: {
@@ -87,7 +89,13 @@ export async function startBrowserFixture(repoRoot: string, options: {runtime?:A
             ? "text/html; charset=utf-8"
             : file.endsWith(".css")
               ? "text/css; charset=utf-8"
-              : "text/javascript; charset=utf-8",
+              : file.endsWith(".js")
+                ? "text/javascript; charset=utf-8"
+                : file.endsWith(".webp")
+                  ? "image/webp"
+                  : file.endsWith(".ttf")
+                    ? "font/ttf"
+                    : "image/svg+xml",
         },
       });
     },

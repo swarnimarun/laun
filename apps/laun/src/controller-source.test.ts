@@ -113,6 +113,22 @@ test("controller archive preserves exact Docker boundary/current JJ files and on
     await readFile(join(root, ".dockerignore"), "utf8"),
   );
 });
+test("controller source installs the public design assets byte-for-byte without admitting arbitrary binaries", async () => {
+  const root = await fixture();
+  const assets = "apps/gateway/public/v2/assets";
+  await mkdir(join(root, assets), { recursive: true });
+  const files = ["garden.webp", "dm-sans.ttf", "newsreader.ttf", "dm-sans-OFL.txt", "newsreader-OFL.txt"];
+  const bytes = new Uint8Array([0, 255, 128, 13, 10, 42]);
+  for (const file of [...files, "private.webp", "operator.ttf"])
+    await writeFile(join(root, assets, file), bytes);
+  const archive = await createControllerSourceArchive(root);
+  const destination = await target();
+  expect(archive.files.some(file => file.path.endsWith("private.webp"))).toBe(false);
+  expect(archive.files.some(file => file.path.endsWith("operator.ttf"))).toBe(false);
+  expect((await install(destination, archive)).code).toBe(0);
+  for (const file of files)
+    expect(new Uint8Array(await readFile(join(destination, assets, file)))).toEqual(bytes);
+});
 test("verified source installation is durable/no-clobber and identical reruns preserve existing private config", async () => {
   const root = await fixture(),
     archive = await createControllerSourceArchive(root),

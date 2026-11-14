@@ -68,6 +68,10 @@ need their own integration checks.
 
 ## Documentation demonstrations
 
+`bun run test:design` checks login, local fonts/artwork, workspace overflow and
+dialog bounds at 320, 390, 768, 1024 and 1440 pixels. It also captures the welcome
+screen. It uses the same disposable demo fixture and Chromium setup below.
+
 For a readable scripted story instead of regression-test markers:
 
 ```sh
@@ -77,7 +81,7 @@ CHROMIUM_PATH=/path/to/chromium bun apps/gateway/test/capture-demos.ts
 
 The first command serves a disposable interactive workspace and prints its
 private access-file path. The second starts its own fixture, uses the actual
-browser UI, and writes seven screenshots to `docs/images/` (override with
+browser UI, and writes eight screenshots to `docs/images/` (override with
 `LAUN_DEMO_SHOTS`). Both use the real controller and Pi Durable adapter with
 scripted model replies, and remove temporary state when they finish. They do
 not connect to an existing installation or any provider, Telegram bot, or VPS.

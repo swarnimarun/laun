@@ -21,6 +21,7 @@ const CONTENT_TYPES: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".png": "image/png",
   ".webp": "image/webp",
+  ".ttf": "font/ttf",
   ".ico": "image/x-icon",
   ".txt": "text/plain; charset=utf-8",
   ".map": "application/json; charset=utf-8",

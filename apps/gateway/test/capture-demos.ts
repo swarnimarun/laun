@@ -59,6 +59,8 @@ const addMower=async(name:string,purpose:string,profile:string)=>{
 };
 try {
   await page.goto(`${fixture.url}/app`,{waitUntil:"networkidle"});
+  await page.evaluate(() => document.fonts.ready);
+  await capture("welcome.png");
   await page.locator("#auth-key").fill(fixture.key);
   await page.locator("#login-form").evaluate((form:HTMLFormElement)=>form.requestSubmit());
   await page.locator("#workspace").waitFor({state:"visible"});
@@ -140,7 +142,7 @@ try {
   await page.locator("#composer").waitFor({state:"visible"});
   await capture("workspace-mobile.png");
   assert.deepEqual(errors,[],"no browser exceptions");
-  console.log(`Captured 7 documentation screenshots in ${output}. Scripted Pi model; no provider, Telegram, or VPS calls.`);
+  console.log(`Captured 8 documentation screenshots in ${output}. Scripted Pi model; no provider, Telegram, or VPS calls.`);
 } catch(error) {
   console.error((await page.locator("#modal-error").textContent().catch(()=>""))?.replaceAll(fixture.key,"[KEY]") || "Documentation capture stopped before the next screenshot.");
   await page.screenshot({path:"/tmp/laun-demo-capture-error.png"}).catch(()=>{});

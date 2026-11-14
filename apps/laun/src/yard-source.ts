@@ -43,6 +43,13 @@ export function allowedYardSource(
         "scripts/check-container-context.ts",
         "scripts/dev-app.ts",
       ].includes(path) ||
+      [
+        "apps/gateway/public/v2/assets/garden.webp",
+        "apps/gateway/public/v2/assets/dm-sans.ttf",
+        "apps/gateway/public/v2/assets/newsreader.ttf",
+        "apps/gateway/public/v2/assets/dm-sans-OFL.txt",
+        "apps/gateway/public/v2/assets/newsreader-OFL.txt",
+      ].includes(path) ||
       (directory && path === "scripts"))
   )
     return true;

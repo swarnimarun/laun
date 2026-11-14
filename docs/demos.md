@@ -13,7 +13,7 @@ Choose a demonstration:
 | --- | --- | --- |
 | `bun run dev:app --demo` | Start the normal local application and send a simple message | Kept in the selected local data directory |
 | `bun run demo:scenarios` | Walk through delegation, a real pending file action, and Gatekeeper advice | Disposable; removed when stopped |
-| `bun run demo:capture` | Recreate the seven screenshots on this page with actual Chromium | Disposable; only screenshot files remain |
+| `bun run demo:capture` | Recreate the eight screenshots on this page with actual Chromium | Disposable; only screenshot files remain |
 
 These walkthroughs select the explicit `faux/faux-1` scripted provider and make
 no paid model calls. Keep that model selected in the normal application: its
@@ -22,6 +22,10 @@ The rich scenario and capture fixtures do not use an existing Laun installation,
 provider credential file, Telegram account, or remote worker. Their execution
 mode is **trusted local**: the permission broker mediates tools, and OpenShell
 host containment is not enabled.
+
+The paper-and-ink redesign includes the [welcome screen](images/welcome.png),
+[setup wizard](images/setup.png), and every workflow below. Its
+[design plan, sources, and image prompts](design/frontend-rework.md) are kept with the source.
 
 ## A quick local conversation
 

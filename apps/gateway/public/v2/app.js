@@ -1107,7 +1107,7 @@ function renderSidebar() {
         "sidebar-empty",
         query
           ? "No threads match your search."
-          : "A fresh patch. Start a thread when you’re ready.",
+          : "No threads yet. Start a conversation when you’re ready.",
       ),
     );
   $("new-thread-button").disabled = state.server.mowers.length === 0;
@@ -1123,7 +1123,7 @@ function renderHeader() {
   $("thread-view").hidden = !thread;
   $("thread-title").textContent =
     thread?.title ||
-    (mower ? `A new patch for ${mower.name}.` : "Room to grow.");
+    (mower ? `A new thread for ${mower.name}.` : "Your work, gathered.");
   $("thread-breadcrumb").replaceChildren(
     document.createTextNode(mower?.name || "Your workspace"),
     element("span", "", "/"),
