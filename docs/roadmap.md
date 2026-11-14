@@ -1,8 +1,9 @@
-# Roadmap — what is not built yet
+# Historical v1 roadmap
 
 Historical v1 evidence follows, including conflicting deployment snapshots.
-For the 2026-11-14 source audit, independently reviewed architecture and actual
-implementation status, use [docs/design](design/README.md). Do not treat the
+For the implemented architecture, use [how Laun works](how-it-works.md); for
+qualification and limits, use [core status](core-status.md). The independently
+reviewed plan remains in [docs/design](design/README.md). Do not treat the
 old missing/done labels below as a current security or capability assessment.
 
 What laun is missing, in the order it should be built, with the evidence

@@ -1,4 +1,10 @@
-# Agent keys
+# Historical v1 agent keys
+
+This page describes the original session API and browser client. For current
+owner principals, key rotation and client authentication, use
+[the CLI guide](../docs/cli.md#connect-and-identify) and
+[how Laun works](../docs/how-it-works.md#identity-and-permission-decisions).
+Its storage and rotation examples are not v2 operating instructions.
 
 An **agent key** is the credential you use to talk to a laun gateway as a
 person: from the CLI, from the browser UI, or from any script. It is separate

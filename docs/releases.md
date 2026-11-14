@@ -1,8 +1,11 @@
 # Releases
 
-Status: implemented; first release target `v0.1.0`.
+The tagged artifact pipeline exists. V2 release qualification is tracked in
+[core status](core-status.md); a published image or liveness check alone does
+not establish production readiness.
 
-Pushing a `vX.Y.Z` tag is the only release trigger. It publishes, in one run:
+Pushing a `vX.Y.Z` tag, or explicitly rerunning an existing tag through
+`workflow_dispatch`, starts the release pipeline. It publishes, in one run:
 
 | Artifact | Coordinates |
 | --- | --- |
@@ -11,8 +14,9 @@ Pushing a `vX.Y.Z` tag is the only release trigger. It publishes, in one run:
 | CLI binaries | GitHub Release assets: linux/darwin `amd64`+`arm64`, windows `amd64`, plus `checksums.txt` |
 | Changelog | GitHub Release notes, auto-generated from commits since the previous tag |
 
-No release artifact is produced anywhere else. `deploy/docker-compose.yml` consumes the same
-image names, so a released box and a source checkout run the same bytes.
+Publication occurs through this workflow; local qualification artifacts remain
+unpublished. `deploy/docker-compose.yml` consumes the same image names. Record
+the actual image digest to preserve exact bytes across deployments.
 
 ## Version source of truth
 
@@ -24,24 +28,22 @@ reports the tag it was built from.
 
 ## Why one service image
 
-The three services already share everything that is expensive to build: the
-same Bun runtime, the same `apps/` + `packages/` source tree, the same lockfile.
-They only differed in the executor's extra tooling (Node, pi, ripgrep, fd,
-OpenShell) and in the default `CMD`. Building three near-identical images was
-duplicated work and three package surfaces to keep in sync.
+The gateway, Telegram bridge and optional legacy executor use the same pinned
+Bun runtime, application packages and lockfile. A comprehensive service image
+keeps that build shared; Compose selects each service's entrypoint. The v2
+gateway embeds its runtime and the legacy executor is disabled by default.
 
-The comprehensive image bakes in the executor tooling unconditionally and each
-compose service selects its entrypoint with `command:`. Costs: every service
-carries the agent tooling (~2 GB uncompressed) and a gateway compromise has the
-same content as an executor compromise. For a single-VPS deployment where all
-three run on the same host and share a data volume, neither is a boundary that
-exists today.
+Image contents and runtime authority are separate. The controller owns its data
+and model credentials; the bridge has a separate encrypted queue volume. Neither
+mount enters the isolated tool guest. The controller is trusted code, so its
+compromise is outside the protection provided by agent tool permissions.
+See [how it works](how-it-works.md) for the actual trust boundaries.
 
 Two images stay separate:
 
-* `laun-pi-agent` is a different base (`node:24-bookworm-slim`), a different
-  user (`node`), and a different layout (writable `/workspace`,
-  `PI_CODING_AGENT_DIR=/tmp/pi-agent`). It is what OpenShell launches *inside*
+* `laun-pi-agent` uses the pinned Bun 1.4.4 base, an unprivileged
+  `bun` user, and a writable `/workspace`.
+  It is what OpenShell launches *inside*
   sandboxes; merging it into the service image would give sandboxes the whole
   control plane.
 * Per-service slim images can come back later by adding a build arg and one
@@ -63,16 +65,46 @@ Jobs in `.github/workflows/release.yml`:
 
 | Job | Runs on | What it does |
 | --- | --- | --- |
-| `verify` | ubuntu-latest | Derives `X.Y.Z` from the tag, validates shape, checks `package.json`, computes image prefix / prerelease / floating minor |
-| `images` | `ubuntu-latest` + `ubuntu-24.04-arm` | Matrix: each image × each arch. Native builds (no QEMU), pushes `X.Y.Z-amd64` / `X.Y.Z-arm64` with GHA layer cache |
-| `merge` | ubuntu-latest | `docker buildx imagetools create` joins both per-arch manifests into `X.Y.Z`, the floating `X.Y` tag, and `latest` (stable releases only) |
-| `smoke` | ubuntu-latest | Pulls the merged amd64 image, runs `pi --version`, boots the gateway and the executor, waits for both `/health` endpoints |
-| `cli` | ubuntu-latest | `bun build --compile` for `bun-linux-x64`, `bun-linux-arm64`, `bun-darwin-x64`, `bun-darwin-arm64`, `bun-windows-x64`; smoke-checks the linux/amd64 binary with `--version`; packages tar.gz/zip and uploads |
-| `release` | ubuntu-latest | Downloads binaries, writes `checksums.txt`, creates (or re-runs) the GitHub Release with `--generate-notes` |
+| `verify` | ubuntu-24.04 | Validates the tag/version, pins Bun1.4.4, installs frozen dependencies without lifecycle scripts, runs build/full source/browser checks, proves synthetic Docker context exclusions, then builds and qualifies the unpublished service candidate |
+| `images` | `ubuntu-24.04` + `ubuntu-24.04-arm` | Matrix: each image × each arch. Native builds (no QEMU), pushes `X.Y.Z-amd64` / `X.Y.Z-arm64` with GHA layer cache |
+| `merge` | ubuntu-24.04 | `docker buildx imagetools create` joins both per-arch manifests into `X.Y.Z`, the floating `X.Y` tag, and `latest` (stable releases only) |
+| `smoke` | ubuntu-24.04 | Pulls the merged amd64 image and repeats the authenticated packaged v2 durability/restart qualifier; no legacy executor or production provider credentials are required |
+| `cli` | ubuntu-24.04 | `bun build --compile` for `bun-linux-x64`, `bun-linux-arm64`, `bun-darwin-x64`, `bun-darwin-arm64`, `bun-windows-x64`; smoke-checks the linux/amd64 binary with `--version`; packages tar.gz/zip and uploads |
+| `release` | ubuntu-24.04 | Downloads binaries, writes `checksums.txt`, creates (or re-runs) the GitHub Release with `--generate-notes` |
+
+Source and browser checks finish before image publication. Both source and
+release CI use the workspace-pinned Playwright1.56.1 Chromium installer through
+Bun. The synthetic context proof uses actual Docker matching with synthetic
+private sentinels, including credential/state filenames, while retaining code
+such as `auth.ts` and required vendor files.
+
+`scripts/qualify-packaged-control.ts` uses unique labelled disposable containers
+and a private data volume. It binds the gateway inside the container explicitly
+and publishes only a loopback port. With the explicit faux provider and trusted
+local fixture mode, it verifies bad-key rejection, independent owner isolation,
+actual Pi Durable execution, central inference receipts and Pi ledger commits,
+same-volume process restart, stable input deduplication, and both old/new
+conversation markers in the restored archive. Synthetic controller credentials
+must not appear in events or thread archives. Cleanup removes only resources
+with the qualifier's exact label. This proof makes no production model,
+OpenShell confinement, external VPS or live Telegram claim. Those deployment
+boundaries require their separate qualification.
+
+Run the same unpublished packaged proof locally with an explicit image:
+
+```sh
+LAUN_SMOKE_IMAGE=localhost/laun-controller:qualified bun scripts/qualify-packaged-control.ts
+```
+
+`LAUN_SMOKE_ENGINE_ARGV` accepts a JSON engine argv for an already-provisioned
+Podman test engine. `LAUN_SMOKE_HOST_NETWORK=true` is available only for local
+engines that cannot publish a port; that fixture binds its unique port to
+127.0.0.1. The GitHub Docker job uses container networking and a loopback port
+mapping instead.
 
 Image tag policy:
 
-* `X.Y.Z` — immutable, what deployments should pin
+* `X.Y.Z` — versioned selection; record and pin the resolved image digest for exact bytes
 * `X.Y` — floating minor, for `0.1.x` style updates
 * `latest` — stable releases only; prerelease tags (`v0.2.0-rc.1`) skip it
 * `X.Y.Z-{amd64,arm64}` — per-arch intermediates pushed by `images` and
@@ -80,29 +112,33 @@ Image tag policy:
 
 ## Deploying a release
 
-`deploy/docker-compose.yml` supports both source builds and released images.
-The released path is:
+Use the [controller/yard install guide](../deploy/remote-setup.md), with a
+private environment file containing real host paths, reviewed image references
+and protected credentials. Select a concrete `LAUN_TAG` or a complete
+`LAUN_SERVICE_IMAGE` reference, preferably `repository@sha256:digest`. The sandbox
+uses its own complete `OPENSHELL_SANDBOX_IMAGE` reference on the compute engine.
 
-```bash
-cp deploy/.env.example .env          # fill GATEWAY_TOKEN etc.
-echo "LAUN_TAG=0.1.0" >> .env        # pin the release
-docker compose -f deploy/docker-compose.yml --env-file .env pull
-docker compose -f deploy/docker-compose.yml --env-file .env up -d
-```
+The installers select the required isolation overlay and validate configuration.
+For pulled service images, they run the disposable no-network, read-only v2
+contract before starting the application with production data. A bare Compose
+pull/up command omits those installer checks. Source setup instead transfers or
+checks an explicit source manifest/revision, installs frozen dependencies,
+typechecks and qualifies the actual v2 API before startup.
 
-Source builds are unchanged (`up -d --build`); compose tags the local build
-with the same `LAUN_TAG` name, so both paths use identical service config.
+`LAUN_IMAGE` selects a repository with `LAUN_TAG`; `LAUN_SERVICE_IMAGE` selects a
+complete service image reference. Version tags can be overwritten by an
+explicit workflow rerun, so a version string alone is not a byte-level rollback
+record. The sandbox is created by OpenShell, not a Compose sandbox profile.
 
-* `LAUN_IMAGE` overrides the whole image reference (forks, mirrors), default
-  `ghcr.io/swarnimarun/laun`.
-* GHCR packages start **private** for personal accounts. Either make both
-  packages public once (Package settings → visibility) or log the box in:
-  `docker login ghcr.io -u <user> -p <PAT with read:packages>`.
-* The sandbox image is only needed when `OPENSHELL_ENABLED=true`; fetch it with
-  `docker compose --profile sandbox pull`.
-* **Rollback:** set `LAUN_TAG` to the previous version, `pull`, `up -d`. The
-  `laun-data` volume is never touched by an image change; session files survive
-  patch releases.
+Private GHCR packages require an operator login. Supply the registry token
+through Docker's `--password-stdin` flow or an existing credential helper.
+Credentials belong outside agent workspaces and repository source.
+
+For upgrades and rollback, follow [the cold upgrade runbook](operations-upgrade.md).
+Preserve an offline backup and the exact prior artifact references. Older
+gateways may ignore revoked-key tombstones or lose owner mappings; do not point
+an arbitrary old binary at live v2 state. Runtime history also needs its
+matching checkpoint/runtime compatibility set.
 
 ## Cutting 0.1.0
 

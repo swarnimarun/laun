@@ -1,4 +1,10 @@
-# Development
+# Historical v1 development notes
+
+This document records the original executor/session architecture and its old
+validation snapshot. For the current app, use [local development](docs/local-development.md),
+[how it works](docs/how-it-works.md), and [demos](docs/demos.md).
+Current tests use real Pi Durable with scripted providers; the counts and
+stub-only claims below describe the earlier baseline.
 
 How to build, test, and run laun locally. Every command below has been run
 on this checkout; counts and timings are measured, not aspirational.
@@ -77,10 +83,8 @@ overwrites existing values), and **does not** start Docker. Pass
 `--env-file <path>` to write somewhere else (note the file must be named `.env`
 if you want the next step to pick it up).
 
-**Bun loads `.env` from the working directory automatically** — verified:
-`bun -e 'console.log(process.env.GATEWAY_TOKEN)'` prints the file's value with
-no export. So once the file exists, the commands below need no environment
-prefixing at all.
+**Bun loads `.env` from the working directory automatically.** Values do not
+need to be exported or printed to verify loading.
 
 ### 2. Start the processes
 

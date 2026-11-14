@@ -2,7 +2,19 @@
 
 Laun's v2 backup contains a consistent SQLite snapshot and the human key index. It preserves mowers, threads, events, permission profile revisions, task queues, server checkpoint archives, connector configuration and delivery records. Connector credentials remain references such as `MCP_EXAMPLE_TOKEN`; their values are not exported from the controller environment.
 
-This is a control-plane backup, not a whole VPS image. It does not copy `.env`, provider authentication, TLS/private keys, OpenShell configuration or images, live sandbox files, worker journals, or Telegram's separate encrypted admission queue. A server checkpoint contains the latest captured Pi session and workspace for that thread, with any omitted generated files recorded in the checkpoint. Uncheckpointed changes on a live or lost worker are outside this archive. Transcripts and checkpoint files are private user data and can contain values a user or agent wrote into them; protect the entire backup accordingly.
+The SQLite snapshot also includes Pi conversation commits already acknowledged
+into the controller's durable ledger, including mid-run state that has not yet
+reached a final checkpoint. A server checkpoint additionally contains the latest
+captured Pi session and workspace, with omitted generated files recorded in its
+manifest.
+
+This is a control-plane backup, not a whole VPS image. It excludes `.env`, provider
+authentication, TLS/private keys, OpenShell configuration/images, live sandbox
+files, worker journals and Telegram's separate encrypted admission queue.
+Workspace or guest filesystem changes made after the latest captured checkpoint
+are outside the archive; centrally acknowledged Pi conversation state is inside.
+Transcripts and checkpoint files are private user data and can contain values a
+user or agent wrote into them, so protect the entire backup.
 
 ## Create a backup
 

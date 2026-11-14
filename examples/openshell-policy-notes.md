@@ -1,4 +1,11 @@
-# OpenShell policy notes
+# Historical v1 OpenShell policy notes
+
+This page records the original executor's templates and exploratory commands.
+It is not the v2 setup procedure. For the supported policy, actual OpenShell
+commands and qualified deployment path, use [permission boundaries](../docs/permissions-boundaries.md),
+[remote setup](../deploy/remote-setup.md) and [the Telegram v2 guide](../apps/telegram-bridge/V2.md).
+The v2 guest has no direct network egress; external tools use the controller's
+reviewed MCP broker.
 
 `packages/policy/templates/` ships two starting points:
 
