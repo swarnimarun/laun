@@ -43,6 +43,13 @@ if(a[1]==='list'){
 }
 const index=guests.findIndex(g=>g.name===a[2]);
 if(a[1]==='get'){
+ if(index>=0&&guests[index].phase==='Deleting'){
+  if(mode==='delete-get-slow')await Bun.sleep(2000);
+  if(mode==='delete-get-auth'){console.error('PermissionDenied');process.exit(1);}
+  if(mode==='delete-get-malformed'){console.log('{}');process.exit(0);}
+  if(['delete-delayed','delete-index-delayed'].includes(mode)){guests[index].polls=(guests[index].polls||0)+1;if(guests[index].polls>=3){guests.splice(index,1);save();console.error(${JSON.stringify("Error:   × code: 'Some requested entity was not found', message: \"sandbox not found\"")});process.exit(1);}save();}
+  if(['delete-index-delayed','delete-index-collision'].includes(mode)){console.error(${JSON.stringify("Error:   × code: 'Some requested entity was not found', message: \"sandbox config not found\"")});process.exit(1);}
+ }
  if(mode==='get-auth'){console.error('Unauthenticated: sandbox not found');process.exit(1);}
  if(mode==='nested-notfound'){console.error('Error:   × status: Unknown, message: "driver failed: code: NotFound"');process.exit(1);}
  if(mode==='nested-human-notfound'){console.error(${JSON.stringify("Error:   × code: 'Unknown error', message: \"driver failed: code: 'Some requested entity was not found'\"")});process.exit(1);}
@@ -59,6 +66,7 @@ if(a[1]==='stop'){
 }
 if(a[1]==='delete'){
  if(mode==='delete-auth'){console.error('PermissionDenied');process.exit(1);}
+ if(['delete-delayed','delete-index-delayed','delete-get-auth','delete-get-malformed','delete-collision','delete-index-collision','delete-get-slow'].includes(mode)){guests[index].phase='Deleting';if(['delete-collision','delete-index-collision'].includes(mode))guests[index].labels['laun.thread-id']='other';save();process.exit(0);}
  if(mode!=='delete-pending'){guests=guests.filter(g=>g.name!==a[2]);save();}process.exit(0);
 }
 console.error('forbidden command');process.exit(72);
@@ -163,6 +171,34 @@ describe("explicit managed runtime cleanup", () => {
   test("equivalent label map ordering across CLI processes does not alter managed identity", async () => {
     const f = fixture(), cli = fake(f.base, [guest()], "reorder-labels"); tree(f.root, "fern");
     expect(await createThreadCleaner({ cleanupRoot: f.root, openshell: cli }).cleanup(request())).toEqual({ verified: true, removedPaths: 1, removedSandboxes: 1, outstanding: [] });
+  });
+
+  test("accepted asynchronous deletion polls only reads until strict lookup and enumeration confirm absence", async () => {
+    for (const mode of ["delete-delayed", "delete-index-delayed"]) {
+    const f = fixture(), cli = fake(f.base, [guest()], mode); tree(f.root, "fern");
+    expect(await createThreadCleaner({ cleanupRoot: f.root, openshell: cli }).cleanup(request())).toEqual({ verified: true, removedPaths: 1, removedSandboxes: 1, outstanding: [] });
+    const calls = cli.commands(), at = calls.findIndex(args => args[1] === "delete");
+    expect(calls.filter(args => args[1] === "delete")).toHaveLength(1); expect(calls.slice(at + 1).every(args => ["get", "list"].includes(args[1]!))).toBe(true); expect(calls.slice(at + 1).filter(args => args[1] === "get").length).toBeGreaterThanOrEqual(3);
+    }
+  });
+  test("auth, malformed state and identity collisions after accepted delete never claim completion or retry deletion", async () => {
+    for (const mode of ["delete-get-auth", "delete-get-malformed", "delete-collision", "delete-index-collision"]) {
+      const f = fixture(), cli = fake(f.base, [guest()], mode), current = tree(f.root, "fern");
+      const result = await createThreadCleaner({ cleanupRoot: f.root, openshell: cli }).cleanup(request());
+      expect(result.verified).toBe(false); expect(result.removedSandboxes).toBe(0); expect(existsSync(current)).toBe(true); expect(cli.commands().filter(args => args[1] === "delete")).toHaveLength(1);
+    }
+  });
+  test("lease cancellation during post-delete verification stops reads and never starts local deletion", async () => {
+    const f = fixture(), cli = fake(f.base, [guest()], "delete-get-slow"), current = tree(f.root, "fern"), controller = new AbortController();
+    const pending = createThreadCleaner({ cleanupRoot: f.root, openshell: cli }).cleanup(request({ signal: controller.signal }));
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      const calls = cli.commands(), index = calls.findIndex(args => args[1] === "delete");
+      if (index >= 0 && calls.slice(index + 1).some(args => args[1] === "get")) break;
+      if (Date.now() >= deadline) { controller.abort(); await pending; throw new Error("fixture never reached post-delete read"); }
+      await Bun.sleep(10);
+    }
+    controller.abort(); const result = await pending; expect(result.verified).toBe(false); expect(result.removedSandboxes).toBe(0); expect(existsSync(current)).toBe(true); expect(cli.commands().filter(args => args[1] === "delete")).toHaveLength(1);
   });
 
   test("transport/auth failures, pending stop/deletion, and post-stop identity changes never claim success", async () => {

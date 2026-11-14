@@ -155,9 +155,13 @@ export function createThreadCleaner(options: ThreadCleanerOptions) {
 async function cleanupSandboxes(input: RuntimeThreadCleanupInput, transport: Required<Transport>): Promise<{ removed: number; outstanding: string[] }> {
   const outstanding: string[] = []; let removed = 0;
   const workspace = transport.env.OPENSHELL_WORKSPACE || "default";
-  const call = async (args: string[]): Promise<CommandResult> => {
+  const deadline = Date.now() + 120_000;
+  const call = async (args: string[], until = deadline): Promise<CommandResult> => {
     input.signal?.throwIfAborted();
-    return executeProcess([transport.bin, "sandbox", ...args], { env: transport.env, signal: input.signal, timeoutMs: 15_000, maxBytes: 1024 * 1024 });
+    const remaining = Math.min(deadline, until) - Date.now();
+    if (remaining <= 0) throw new Error("Sandbox cleanup verification deadline reached; reconciliation is required");
+    const result = await executeProcess([transport.bin, "sandbox", ...args], { env: transport.env, signal: input.signal, timeoutMs: Math.min(15_000, remaining), maxBytes: 1024 * 1024 });
+    input.signal?.throwIfAborted(); return result;
   };
   const absent = (value: CommandResult) => {
     if (value.truncated || value.exitCode === 0 || /unauthenticated|permission denied|unauthorized|transport|connection/i.test(value.stderr)) return false;
@@ -188,10 +192,10 @@ async function cleanupSandboxes(input: RuntimeThreadCleanupInput, transport: Req
   };
   try {
     const names = new Set([undefined, ...input.placementIds].map(placement => managedSandboxName(input.threadId, placement)));
-    const enumerate = async (filtered: boolean): Promise<Record<string, unknown>[]> => {
+    const enumerate = async (filtered: boolean, until = deadline): Promise<Record<string, unknown>[]> => {
       const selected: Record<string, unknown>[] = [], seenTokens = new Set<string>(); let token = "", total = 0;
       for (;;) {
-        const page = parse(await call(["list", "--all-workspaces", ...(filtered ? ["--selector", `laun.thread-id=${input.threadId}`] : []), "--page-size", "100", ...(token ? ["--page-token", token] : []), "-o", "json"]));
+        const page = parse(await call(["list", "--all-workspaces", ...(filtered ? ["--selector", `laun.thread-id=${input.threadId}`] : []), "--page-size", "100", ...(token ? ["--page-token", token] : []), "-o", "json"], until));
         if (!Array.isArray(page.sandboxes) || (page.next_page_token !== undefined && typeof page.next_page_token !== "string")) throw new Error("Unsupported OpenShell sandbox enumeration; guests preserved");
         for (const raw of page.sandboxes) {
           if (++total > MAX_GUESTS) throw new Error("Sandbox enumeration exceeds bounded cleanup limit");
@@ -229,7 +233,25 @@ async function cleanupSandboxes(input: RuntimeThreadCleanupInput, transport: Req
       if (settled.phase !== "Stopped") throw new Error("Sandbox has not reached verified stopped state; deletion was not attempted");
       input.signal?.throwIfAborted();
       const deleted = await call(["delete", name]); if (deleted.exitCode !== 0 || deleted.truncated) throw new Error("Sandbox deletion outcome is ambiguous; reconciliation is required");
-      if (!absent(await call(["get", name, "-o", "json"]))) throw new Error("Sandbox deletion is not yet authoritative; reconciliation is required");
+      // OpenShell can acknowledge deletion while its driver/metadata record
+      // is still Deleting. Repeat READS only; never repeat destructive delete.
+      const verifyUntil = Math.min(deadline, Date.now() + 5_000);
+      const pending = (value: Record<string, unknown>) => {
+        validate(value, name);
+        if (identity(value) !== expected || !["Stopped", "Deleting"].includes(String(value.phase))) throw new Error("Sandbox identity or stopped boundary changed during deletion; preserved for reconciliation");
+      };
+      for (;;) {
+        const response = await call(["get", name, "-o", "json"], verifyUntil);
+        if (absent(response)) {
+          const remaining = (await enumerate(false, verifyUntil)).filter(value => value.name === name);
+          if (!remaining.length) break;
+          for (const value of remaining) pending(value);
+        } else pending(parse(response));
+        input.signal?.throwIfAborted();
+        if (Date.now() >= verifyUntil) throw new Error("Sandbox deletion is not yet authoritative; reconciliation is required");
+        await new Promise(resolve => setTimeout(resolve, Math.min(100, verifyUntil - Date.now())));
+        input.signal?.throwIfAborted();
+      }
       deletedCount++;
     }
     // A concurrently created epoch cannot silently escape this operation.
