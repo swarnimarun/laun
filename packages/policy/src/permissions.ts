@@ -8,7 +8,7 @@ const EFFECTS = new Set(["allow", "deny", "ask"]);
 const text = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(v);
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const digest = (v: unknown) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
-const ACTION_KEYS = ["id", "principalId", "mowerId", "threadId", "runId", "workspaceId", "operation", "resource", "argumentsDigest"] as const;
+const ACTION_KEYS = ["id", "principalId", "mowerId", "threadId", "runId", "generation", "workspaceId", "operation", "resource", "argumentsDigest"] as const;
 
 export function isPermissionProfile(value: unknown): value is PermissionProfile {
   if (!object(value) || !text(value.id) || !Number.isSafeInteger(value.version) || (value.version as number) < 1 ||
@@ -18,7 +18,7 @@ export function isPermissionProfile(value: unknown): value is PermissionProfile 
 
 export function isPermissionAction(value: unknown): value is PermissionAction {
   return object(value) && ["id", "principalId", "mowerId", "threadId", "runId", "workspaceId", "resource"].every((k) => text(value[k])) &&
-    OPERATIONS.has(value.operation as PermissionOperation) && digest(value.argumentsDigest);
+    (value.generation===undefined||(Number.isSafeInteger(value.generation)&&Number(value.generation)>0))&&OPERATIONS.has(value.operation as PermissionOperation) && digest(value.argumentsDigest);
 }
 
 function effectiveRule(profile: PermissionProfile, operation: PermissionOperation, resource: string): PermissionEffect | undefined {

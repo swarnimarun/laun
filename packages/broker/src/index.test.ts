@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { BrokerConnection, BrokerContext, PermissionAction, PermissionProfile } from "@laun/protocol";
-import { argumentsDigest, canonicalJson, createToolBroker, headerValue, isPublicAddress, parameterHeaders, pinEndpoint, proposePermissionChange, toolDigest } from "./index.js";
+import { argumentsDigest, canonicalJson, catalogStorageIdentity, createToolBroker, headerValue, isPublicAddress, parameterHeaders, pinEndpoint, proposePermissionChange, toolDigest } from "./index.js";
 import { postPinned } from "./network.js";
 
 const servers: Array<{ stop(force?: boolean): void }> = [];
@@ -39,6 +39,7 @@ function setup(connection: BrokerConnection, extra: Partial<Parameters<typeof cr
   const broker = createToolBroker({
     allowLoopback: true,
     loadConnection: (id) => records.get(id), saveConnection: (value) => { records.set(value.id, value); },
+    saveCatalog: (expected, catalog) => { const latest=records.get(expected.id); if (!latest||catalogStorageIdentity(latest)!==catalogStorageIdentity(expected)) throw new Error("connector changed before catalog commit"); const updated={...latest,...catalog};records.set(updated.id,updated);return updated; },
     authorize: async (_context, operation, resource, args) => { authorizations.push({ operation, resource, args }); },
     ...extra,
   });

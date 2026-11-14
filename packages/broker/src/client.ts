@@ -105,8 +105,21 @@ export class McpHttpClient {
   readonly protocol: McpProtocolVersion;
   private sessionId: string | undefined;
   constructor(private endpoint: PinnedEndpoint, connection: BrokerConnection,
-    private secret: string | undefined, private limits: { timeoutMs: number; maxBytes: number }) {
+    private secret: string | undefined, private limits: { timeoutMs: number; maxBytes: number },
+    private controls: { signal?: AbortSignal; beforeRequest?(): void | Promise<void> } = {}) {
     this.protocol = connection.protocolVersion ?? "2026-07-28";
+  }
+
+  private signal(other?: AbortSignal): AbortSignal | undefined {
+    return other && this.controls.signal ? AbortSignal.any([other, this.controls.signal]) : other ?? this.controls.signal;
+  }
+  private async check(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted(); await this.controls.beforeRequest?.(); signal?.throwIfAborted();
+  }
+  private async request(body: string | undefined, headers: Record<string, string>, signal?: AbortSignal, method?: "DELETE") {
+    const abort = this.signal(signal); await this.check(abort);
+    const result = await postPinned(this.endpoint, body, headers, { ...this.limits, signal: abort, ...(method ? { method, timeoutMs: Math.min(this.limits.timeoutMs, 2_000) } : {}) });
+    await this.check(abort); return result;
   }
 
   private headers(method?: string, toolName?: string): Record<string, string> {
@@ -118,12 +131,13 @@ export class McpHttpClient {
     };
   }
 
-  async initialize(): Promise<void> {
+  async initialize(signal?: AbortSignal): Promise<void> {
+    await this.check(this.signal(signal));
     if (this.protocol === "2026-07-28") return;
     const id = randomUUID();
-    const reply = await postPinned(this.endpoint, canonicalJson({ jsonrpc: "2.0", id, method: "initialize", params: {
+    const reply = await this.request(canonicalJson({ jsonrpc: "2.0", id, method: "initialize", params: {
       protocolVersion: this.protocol, capabilities: {}, clientInfo: { name: "laun", version: "0.1.0" },
-    } }), this.headers(), this.limits);
+    } }), this.headers(), signal);
     if (reply.status < 200 || reply.status >= 300) throw new Error(`connector initialization HTTP ${reply.status}`);
     const result = responseResult(reply.body, reply.contentType, id);
     if (!isRecord(result) || result.protocolVersion !== this.protocol) throw new Error("connector protocol version mismatch; choose a supported explicit version");
@@ -131,26 +145,26 @@ export class McpHttpClient {
       if (!/^[\x21-\x7e]{1,256}$/.test(reply.sessionId)) throw new Error("connector returned an invalid session ID");
       this.sessionId = reply.sessionId;
     }
-    const notification = await postPinned(this.endpoint, canonicalJson({ jsonrpc: "2.0", method: "notifications/initialized" }), this.headers(), this.limits);
+    const notification = await this.request(canonicalJson({ jsonrpc: "2.0", method: "notifications/initialized" }), this.headers(), signal);
     if (notification.status !== 202 && notification.status !== 204) throw new Error("connector refused initialization notification");
   }
 
-  async call(method: "tools/list" | "tools/call", params: Record<string, unknown>, schema?: Record<string, unknown>): Promise<unknown> {
+  async call(method: "tools/list" | "tools/call", params: Record<string, unknown>, schema?: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
     const id = randomUUID();
     const modern = this.protocol === "2026-07-28";
     const args = canonicalJson({ jsonrpc: "2.0", id, method, params: { ...params, ...(modern ? { _meta: META } : {}) } }, 262_144);
     const headers = this.headers(method, typeof params.name === "string" ? params.name : undefined);
     if (modern && method === "tools/call" && schema && isRecord(params.arguments)) Object.assign(headers, parameterHeaders(schema, params.arguments));
-    const reply = await postPinned(this.endpoint, args, headers, this.limits);
+    const reply = await this.request(args, headers, signal);
     if (reply.status < 200 || reply.status >= 300) throw new Error(`connector HTTP ${reply.status}; operation was not retried`);
     return responseResult(reply.body, reply.contentType, id);
   }
 
-  async close(): Promise<void> {
+  async close(signal?: AbortSignal): Promise<void> {
     if (!this.sessionId) return;
     const headers = this.headers();
     this.sessionId = undefined;
     // End only our own negotiated legacy session. Failure never retries a tool.
-    await postPinned(this.endpoint, undefined, headers, { ...this.limits, timeoutMs: Math.min(this.limits.timeoutMs, 2_000), method: "DELETE" }).catch(() => {});
+    await this.request(undefined, headers, signal, "DELETE").catch(() => {});
   }
 }

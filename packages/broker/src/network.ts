@@ -32,17 +32,23 @@ export function isPublicAddress(address: string): boolean {
 }
 
 /** Resolve once and pin the actual socket lookup; checking DNS then fetch is unsafe. */
-export async function pinEndpoint(raw: string, loopbackAllowed: boolean): Promise<PinnedEndpoint> {
+export async function pinEndpoint(raw: string, loopbackAllowed: boolean, signal?: AbortSignal): Promise<PinnedEndpoint> {
+  signal?.throwIfAborted();
   let url: URL;
   try { url = new URL(raw); } catch { throw new Error("connector endpoint must be a valid URL"); }
   if (url.username || url.password || url.hash) throw new Error("connector endpoint must not contain credentials or a fragment");
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("connector endpoint must use HTTPS");
   const host = url.hostname.replace(/^\[|\]$/g, "");
   const literal = isIP(host);
-  const addresses = literal ? [{ address: host, family: literal }] : await Promise.race([
-    lookup(host, { all: true, verbatim: true }),
-    new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error("connector DNS timeout")), 5_000); timer.unref(); }),
-  ]);
+  const addresses = literal ? [{ address: host, family: literal }] : await new Promise<Array<{ address: string; family: number }>>((resolve, reject) => {
+    const aborted = () => finish(new Error("connector DNS cancelled"));
+    const timer = setTimeout(() => finish(new Error("connector DNS timeout")), 5_000); timer.unref();
+    const finish = (error?: Error, value?: Array<{ address: string; family: number }>) => { clearTimeout(timer); signal?.removeEventListener("abort", aborted); if (error) reject(error); else resolve(value!); };
+    signal?.addEventListener("abort", aborted, { once: true });
+    lookup(host, { all: true, verbatim: true }).then((value) => finish(undefined, value), (error) => finish(error));
+    if (signal?.aborted) aborted();
+  });
+  signal?.throwIfAborted();
   if (addresses.length === 0 || addresses.length > 64) throw new Error("connector endpoint has no usable address");
   const local = loopbackAllowed && addresses.every((item) => isLoopback(item.address));
   if (!local && addresses.some((item) => !isPublicAddress(item.address))) throw new Error("connector endpoint resolves to a private or reserved address");
@@ -53,14 +59,16 @@ export async function pinEndpoint(raw: string, loopbackAllowed: boolean): Promis
 /** No redirect following; the original TLS hostname remains intact with pinned DNS. */
 export async function postPinned(
   endpoint: PinnedEndpoint, body: string | undefined, headers: Record<string, string>,
-  options: { timeoutMs: number; maxBytes: number; method?: "POST" | "DELETE" },
+  options: { timeoutMs: number; maxBytes: number; method?: "POST" | "DELETE"; signal?: AbortSignal },
 ): Promise<HttpReply> {
+  options.signal?.throwIfAborted();
   return await new Promise<HttpReply>((resolve, reject) => {
     let settled = false;
     const finish = (error?: Error, result?: HttpReply) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", aborted);
       if (error) reject(error); else resolve(result!);
     };
     const request = (endpoint.url.protocol === "https:" ? httpsRequest : httpRequest)(endpoint.url, {
@@ -83,6 +91,7 @@ export async function postPinned(
       let bytes = 0;
       let output = "";
       response.on("data", (chunk: Buffer) => {
+        if (settled) return;
         try {
           bytes += chunk.byteLength;
           if (bytes > options.maxBytes) throw new Error("connector response byte limit exceeded");
@@ -104,7 +113,10 @@ export async function postPinned(
     });
     const timer = setTimeout(() => { finish(new Error("connector deadline exceeded; outcome may be unknown")); request.destroy(); }, options.timeoutMs);
     timer.unref();
+    const aborted = () => { finish(new Error("connector request cancelled; outcome may be unknown")); request.destroy(); };
+    options.signal?.addEventListener("abort", aborted, { once: true });
     request.on("error", () => finish(new Error("connector transport failed; outcome may be unknown")));
+    if (options.signal?.aborted) { aborted(); return; }
     if (body) request.write(body);
     request.end();
   });
