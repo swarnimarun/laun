@@ -13,6 +13,8 @@
   "dependencies": {
     "@laun/protocol": "workspace:*",
     "@laun/policy": "workspace:*",
-    "@laun/broker": "workspace:*"
-  }
+    "@laun/broker": "workspace:*",
+    "@laun/storage": "workspace:*"
+  },
+  "devDependencies": { "@laun/runtime": "workspace:*", "@earendil-works/pi-ai": "1.5.2" }
 }

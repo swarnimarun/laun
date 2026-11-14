@@ -20,6 +20,12 @@
     },
     {
       "path": "../broker"
+    },
+    {
+      "path": "../storage"
+    },
+    {
+      "path": "../runtime"
     }
   ]
 }
