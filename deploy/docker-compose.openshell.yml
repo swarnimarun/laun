@@ -2,6 +2,36 @@
 # Required host configuration and certificates are checked before startup by
 # setup/install. No host username or private key is baked into this file.
 services:
+  gateway:
+    environment:
+      OPENSHELL_ENABLED: "true"
+      LAUN_TRUSTED_LOCAL: "false"
+      LAUN_DEMO: "false"
+      OPENSHELL_BIN: /usr/local/bin/openshell
+      OPENSHELL_SANDBOX_IMAGE: ${OPENSHELL_SANDBOX_IMAGE:-ghcr.io/swarnimarun/laun-pi-agent:${LAUN_TAG:-latest}}
+      OPENSHELL_V2_POLICY: ${OPENSHELL_V2_POLICY:-}
+      OPENSHELL_GATEWAY_ENDPOINT: ${OPENSHELL_SDK_GATEWAY:-https://host.openshell.internal:17670}
+      OPENSHELL_GATEWAY_INSECURE: "false"
+      PI_AUTH_FILE: /controller-auth/auth.json
+    extra_hosts:
+      - "host.openshell.internal:host-gateway"
+    volumes:
+      # The model client is trusted controller code. Tools execute in a separate
+      # sandbox and never receive this directory or its provider credentials.
+      # Writable directory supports atomic OAuth refresh; no operator home or
+      # executable Pi project/extension configuration is loaded by v2.
+      - type: bind
+        source: ${PI_CONTROLLER_AUTH_DIR:?set PI_CONTROLLER_AUTH_DIR to a dedicated host directory containing auth.json}
+        target: /controller-auth
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${OPENSHELL_CONFIG_DIR:?set OPENSHELL_CONFIG_DIR}/gateways/${OPENSHELL_GATEWAY_NAME:-openshell}/mtls
+        target: /root/.config/openshell/gateways/${OPENSHELL_GATEWAY_CONFIG_ID:-https___host.openshell.internal_17670}/mtls
+        read_only: true
+        bind:
+          create_host_path: false
   executor:
     environment:
       OPENSHELL_ENABLED: "true"

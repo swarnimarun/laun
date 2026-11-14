@@ -313,3 +313,53 @@ The setup output contains the agent key. A CI log, a shared terminal, or a
 shell history file that captured it is a credential leak: revoke that key id
 and mint a replacement. Keep the remote env file at `0600`, and terminate TLS
 in front of the gateway before exposing it to the internet.
+
+### V2 controller and model credentials
+
+The isolated overlay configures both the gateway's mower runtime and the
+legacy executor. It keeps `LAUN_TRUSTED_LOCAL=false` and `LAUN_DEMO=false` in
+production. The gateway listens on the compose network at `0.0.0.0:8080` while
+the host port remains published only on `127.0.0.1`. Gateway tools execute in
+per-thread OpenShell sandboxes; provider/model requests run in the trusted
+controller, never in a tool environment.
+
+Set `PI_CONTROLLER_AUTH_DIR` to a dedicated absolute directory **on the VPS**
+containing the controller's `auth.json`. Use a dedicated Pi provider login or
+an appropriate controller credential store, rather than sharing an actively
+refreshed OAuth file with another process. The directory is mounted writable
+only at `/controller-auth` in the gateway so OAuth refresh can replace the
+file atomically. It is not mounted into tools/sandboxes. The legacy executor's
+existing `PI_CONFIG_DIR` and OpenShell provider remain separate for v1
+compatibility. The v2 model picker reports which catalog providers are
+configured; choose one of those full `provider/model-id` values.
+
+Both Dockerfiles now pin Bun **1.4.4** and Pi coding-agent **1.5.2**, with a
+Bun launcher for Pi's upstream Node-shebang bin. The application image carries
+only the portable OpenShell **v0.1.8** client with architecture-specific official
+SHA-256 checks. The host gateway remains a separate provisioned service.
+`deploy/install.sh` installs a fresh host gateway through the upstream
+**v0.1.8** installer with `OPENSHELL_VERSION=v0.1.8`; it does not silently
+upgrade existing gateway state. Qualify CLI/gateway/SDK compatibility and back
+up durable work before upgrading an existing installation.
+
+V2 generates an egress-denied hard-requirement filesystem policy unless an
+operator supplies `OPENSHELL_V2_POLICY` as a mounted path inside the gateway.
+It requires an allowed workspace write, an actual denied write to normally
+world-writable `/var/tmp`, and an unprivileged sandbox UID before dispatch.
+Missing certificates, image, boundary enforcement or model credentials must be
+resolved before unattended work. A passing compose config parse is not a live
+container or enforcement test. For local NixOS/WSL source development, use
+[the local development guide](../docs/local-development.md). The complete Pi
+sandbox image has passed the committed live qualifier locally, including
+cancellation and a 6 MiB fresh-guest checkpoint restore. Re-run it against the
+actual production engine and certificates before treating that VPS as qualified.
+
+`deploy/install.sh` creates a new private `.env` with fresh human, controller,
+bridge and encrypted-inbox credentials through `deploy/prepare-env.ts`; it
+never overwrites an existing file or rotates a queued bridge's encryption key.
+Supply `LAUN_TELEGRAM_BOT_ID` as the numeric prefix of the Telegram token, plus
+the user allowlist. Groups also require `TELEGRAM_ALLOWLIST_CHAT_IDS`.
+The bridge receives its dedicated credential in both legacy/v2 credential
+fields, rather than the global controller token, and persists encrypted
+admission in a separate `laun-bridge-data` volume. Keep its stable
+`BRIDGE_INBOX_KEY` together with that queue's backup.

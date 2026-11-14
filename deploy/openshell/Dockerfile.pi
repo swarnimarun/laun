@@ -1,37 +1,18 @@
-# Pi image for OpenShell sandboxes.
-#
-# Follows OpenShell's own Pi tutorial
-# (https://docs.nvidia.com/openshell/latest/tutorials/run-pi-with-openrouter):
-#   - Node 24 + npm, because pi's package requires node >= 22.19
-#   - fd and ripgrep installed up front: inside a sandbox pi cannot download
-#     them on first use, which is exactly what the policy is there to prevent
-#   - a writable /workspace as the agent's workdir, owned by the unprivileged
-#     `node` user
-#   - PI_CODING_AGENT_DIR under /tmp, one of the few places a restrictive
-#     policy lets pi write
-#
-# Build (on the gateway host, where the images are resolved):
-#   docker build -t pi-agent:local -f deploy/openshell/Dockerfile.pi .
-#
-# `laun`'s OpenShell bring-up (deploy/openshell/install-and-verify.sh)
-# expects this tag; override with PI_IMAGE=<ref> if you push it elsewhere.
-FROM node:24-bookworm-slim
-
-ARG PI_VERSION=latest
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-       bash ca-certificates fd-find git ripgrep \
+# Unprivileged, Bun-only image for v1 Pi and v2 mediated tool execution.
+FROM docker.io/oven/bun:1.4.4@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d
+USER root
+ARG PI_VERSION=1.5.2
+ENV BUN_INSTALL=/opt/pi
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash ca-certificates fd-find git openssh-client ripgrep \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
-
-RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}"
-
-# Prove the install actually landed: a silent failure here produced an executor
-# image with no agent in it at all, once already.
-RUN command -v pi >/dev/null && pi --version
-
-RUN mkdir -p /workspace && chown node:node /workspace
-USER node
+RUN bun add --global --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+    && rm -f /usr/local/bin/pi \
+    && printf '%s\n' '#!/bin/sh' 'exec bun /opt/pi/install/global/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js "$@"' > /usr/local/bin/pi \
+    && chmod 755 /usr/local/bin/pi \
+    && pi --version
+RUN mkdir -p /workspace && chown bun:bun /workspace
+USER bun
 WORKDIR /workspace
 ENV PI_CODING_AGENT_DIR=/tmp/pi-agent

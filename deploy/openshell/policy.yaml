@@ -32,6 +32,8 @@ filesystem_policy:
     - /lib
     - /bin
     - /etc
+    # Exact-pinned Pi is installed with Bun into this immutable image path.
+    - /opt/pi
   read_write:
     - "/workspace"
     - /tmp
@@ -57,10 +59,10 @@ network_policies:
         enforcement: enforce
         access: read-write
     binaries:
-      # Pi runs on Node. ASSUMED: exact node path is image-dependent; confirm
-      # with `openshell logs` / advisor output (`openshell rule get <sandbox>`)
-      # for the pinned pi image and trim this list. Extra entries that match
-      # nothing are harmless.
+      # Pi's checked-in image launcher runs its pinned bundle with Bun. Keep
+      # Node entries for previously provisioned compatible operator images.
+      - path: /usr/local/bin/bun
+      - path: /usr/bin/bun
       - path: /usr/local/bin/node
       - path: /usr/bin/node
 

@@ -20,6 +20,7 @@ filesystem_policy:
     - /lib
     - /bin
     - /etc
+    - /opt/pi
   read_write:
     - "${WORKDIR}"
     - /tmp
@@ -39,7 +40,9 @@ network_policies:
         enforcement: enforce
         access: read-write
     binaries:
-      # ASSUMED: confirm the node path for the pinned pi image.
+      # The pinned Pi image uses Bun; retain Node for compatible operator images.
+      - path: /usr/local/bin/bun
+      - path: /usr/bin/bun
       - path: /usr/local/bin/node
       - path: /usr/bin/node
 

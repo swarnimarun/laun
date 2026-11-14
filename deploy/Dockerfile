@@ -1,39 +1,31 @@
-# One comprehensive image for every laun service (Bun runs TS directly — no build step).
-# Gateway, executor, and telegram-bridge all run from this image; compose selects the
-# entrypoint with `command:` (see deploy/docker-compose.yml). The executor's agent
-# tooling (Node, pi, ripgrep, fd, OpenShell) is baked in unconditionally so the image
-# is usable in any of those roles without separate variants.
-# Usage (from repo root):
-#   docker build -f deploy/Dockerfile -t laun .
-FROM oven/bun:1.4 AS base
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates git && rm -rf /var/lib/apt/lists/*
+# Bun runs the TypeScript services and the exact-pinned Pi CLI directly.
+FROM docker.io/oven/bun:1.4.4@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS base
+USER root
+ARG PI_VERSION=1.5.2
+ENV BUN_INSTALL=/opt/pi
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash curl ca-certificates git openssh-client ripgrep fd-find tar \
+    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+    && rm -rf /var/lib/apt/lists/*
 
-# Node 24 + pi: pi.dev's installer refuses to run without Node >= 22.19 and a TTY —
-# exactly what a Docker build lacks — so install pi from npm instead and FAIL the
-# build if it is missing. The previous `|| echo WARNING` shipped an image with no
-# agent in it at all. ripgrep + fd ship too, so pi never has to fetch them at
-# runtime (blocked inside a sandbox).
-RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
-    apt-get install -y --no-install-recommends nodejs ripgrep fd-find && \
-    ln -sf /usr/bin/fdfind /usr/local/bin/fd && \
-    npm install -g --ignore-scripts @earendil-works/pi-coding-agent && \
-    command -v pi >/dev/null && pi --version && \
-    rm -rf /var/lib/apt/lists/*
+# Pi's package bin has a Node shebang; this explicit launcher chooses Bun.
+RUN bun add --global --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+    && rm -f /usr/local/bin/pi \
+    && printf '%s\n' '#!/bin/sh' 'exec bun /opt/pi/install/global/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js "$@"' > /usr/local/bin/pi \
+    && chmod 755 /usr/local/bin/pi \
+    && pi --version
 
-# OpenShell is best-effort at build time (needs Linux + container runtime on the host to be useful).
-# If this step fails, services still run with OPENSHELL_ENABLED=false.
-RUN curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh || echo "openshell install skipped"
+# The container is an OpenShell client; its host runs the separately provisioned
+# gateway. Install the exact portable CLI with release-published asset digests.
+COPY deploy/openshell/install-cli.sh /usr/local/lib/laun/install-openshell-cli.sh
+RUN sh /usr/local/lib/laun/install-openshell-cli.sh /usr/local/bin
 
 WORKDIR /app
 COPY package.json bun.lock ./
 COPY packages ./packages
 COPY apps ./apps
 COPY vendor ./vendor
-# Rendered OpenShell policy (no secrets — hosts and paths only). The executor
-# reads it via OPENSHELL_POLICY when sandboxing is enabled.
 COPY deploy/openshell/policy.yaml /openshell/policy.yaml
-RUN bun install --frozen-lockfile
-
+RUN bun install --frozen-lockfile --ignore-scripts
 ENV NODE_ENV=production
-# Default entrypoint is the gateway; compose overrides this per service.
 CMD ["bun", "apps/gateway/src/index.ts"]

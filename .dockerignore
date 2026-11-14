@@ -1,9 +1,12 @@
 .git
 .jj
 node_modules
+**/node_modules
+**/*.tsbuildinfo
 dist
 data
 .env
 .env.local
+.env.*
 *.log
 .DS_Store

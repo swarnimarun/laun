@@ -139,9 +139,9 @@ chmod 600 "$ENV_FILE"
 # --- build ----------------------------------------------------------------------
 if [ -x "$REMOTE_DIR/node_modules/.bin/tsc" ] || command -v bun >/dev/null 2>&1; then
   log "installing dependencies"
-  (cd "$REMOTE_DIR" && bun install --frozen-lockfile) || warn "bun install of dependencies failed — continuing"
+  (cd "$REMOTE_DIR" && bun install --frozen-lockfile) || die "locked dependency installation failed"
   log "typechecking"
-  (cd "$REMOTE_DIR" && bun run build) || warn "bun run build failed — continuing"
+  (cd "$REMOTE_DIR" && bun run build) || die "typecheck failed; refusing to deploy an invalid build"
 fi
 
 # --- start ----------------------------------------------------------------------

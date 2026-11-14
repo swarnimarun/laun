@@ -57,12 +57,28 @@ services:
       - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
     environment:
       GATEWAY_PORT: 8080
+      # Listen on the compose network; host publishing remains loopback-only.
+      GATEWAY_BIND: 0.0.0.0
       GATEWAY_TOKEN: ${GATEWAY_TOKEN:?set GATEWAY_TOKEN in .env}
       # Human-facing key for the CLI and browser UI. The gateway hashes it on
       # boot; it never reaches session files or logs.
       LAUN_KEY: ${LAUN_KEY:-}
       EXECUTOR_URL: http://executor:8081
       DATA_DIR: /data
+      # V2 execution is an explicit trust choice. Production overlay enables
+      # OpenShell; source/local developers may opt into trusted host tools.
+      OPENSHELL_ENABLED: ${OPENSHELL_ENABLED:-false}
+      LAUN_TRUSTED_LOCAL: ${LAUN_TRUSTED_LOCAL:-false}
+      LAUN_LEGACY_API: ${LAUN_LEGACY_API:-false}
+      LAUN_DEMO: ${LAUN_DEMO:-false}
+      LAUN_LOCAL_CAPACITY: ${LAUN_LOCAL_CAPACITY:-2}
+      MAX_FAMILY_TOKENS: ${MAX_FAMILY_TOKENS:-100000}
+      LAUN_MCP_ALLOW_LOOPBACK: ${LAUN_MCP_ALLOW_LOOPBACK:-false}
+      LAUN_TELEGRAM_BOT_ID: ${LAUN_TELEGRAM_BOT_ID:-}
+      TELEGRAM_ALLOWLIST_IDS: ${TELEGRAM_ALLOWLIST_IDS:-}
+      TELEGRAM_ALLOWLIST_CHAT_IDS: ${TELEGRAM_ALLOWLIST_CHAT_IDS:-}
+      LAUN_TELEGRAM_BRIDGE_TOKEN: ${LAUN_TELEGRAM_BRIDGE_TOKEN:-}
+      PI_AUTH_FILE: /controller-auth/auth.json
       MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-4}
       MAX_SESSION_TOKENS: ${MAX_SESSION_TOKENS:-0}
       AUTO_RESUME: ${AUTO_RESUME:-true}
@@ -89,13 +105,22 @@ services:
       # not a compose error, and `on-failure` below must not restart exit 0.
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_ALLOWLIST_IDS: ${TELEGRAM_ALLOWLIST_IDS:?set TELEGRAM_ALLOWLIST_IDS in .env}
+      TELEGRAM_ALLOWLIST_CHAT_IDS: ${TELEGRAM_ALLOWLIST_CHAT_IDS:-}
+      LAUN_CONTROL_V2: ${LAUN_CONTROL_V2:-true}
+      LAUN_TELEGRAM_BRIDGE_TOKEN: ${LAUN_TELEGRAM_BRIDGE_TOKEN:-}
+      BRIDGE_INBOX_KEY: ${BRIDGE_INBOX_KEY:-}
+      BRIDGE_DATA_DIR: /bridge-data
       GATEWAY_URL: http://gateway:8080
-      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?set GATEWAY_TOKEN in .env}
+      GATEWAY_TOKEN: ${LAUN_TELEGRAM_BRIDGE_TOKEN:-${GATEWAY_TOKEN:?set GATEWAY_TOKEN in .env}}
       MODEL: ${MODEL:-opencode-go/muse-spark-1.3-contributor}
       BRIDGE_POLL_MS: ${BRIDGE_POLL_MS:-2000}
     depends_on:
       gateway:
         condition: service_started
+    volumes:
+      # Encrypted connector inbox/outbox and routing offsets must never enter
+      # executor workspaces or the gateway's agent-readable data volume.
+      - laun-bridge-data:/bridge-data
     # Restart on crashes, but NOT on a clean exit 0 (disabled-by-default).
     # `unless-stopped` would restart-loop a deliberately-disabled bridge.
     restart: on-failure
@@ -132,5 +157,6 @@ services:
 
 volumes:
   laun-data:
+  laun-bridge-data:
   caddy-data:
   caddy-config:

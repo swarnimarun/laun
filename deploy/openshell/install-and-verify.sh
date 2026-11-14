@@ -56,6 +56,8 @@
 # else prints the summary first (OS_PROBE=fail) and exits non-zero.
 set -euo pipefail
 
+OPENSHELL_VERSION="${OPENSHELL_VERSION:-v0.1.8}"
+
 OS_SANDBOX="${OS_SANDBOX:-laun-probe}"
 OS_PROVIDER="${OS_PROVIDER:-laun-model}"
 # MODEL_PROVIDER is an alias override for the instance name (spec roadmaps
@@ -65,7 +67,7 @@ MODEL_PROVIDER_TYPE="${MODEL_PROVIDER_TYPE:-laun-model}"
 if [ -n "${MODEL_PROVIDER:-}" ]; then OS_PROVIDER="$MODEL_PROVIDER"; fi
 # Scoped auto-approval mode (roadmap P0 #3a). The VALUE travels here; the
 # enforcement is the flag at sandbox create + the `rule get` audit later.
-OS_APPROVAL_MODE="${OS_APPROVAL_MODE:-auto}"
+OS_APPROVAL_MODE="${OS_APPROVAL_MODE:-manual}"
 OS_GRANTED="unknown"
 EFFECTIVE_APPROVAL="none"
 PI_IMAGE="${PI_IMAGE:-pi-agent:local}"
@@ -114,7 +116,7 @@ if [ "$DRY_RUN" = 1 ]; then
   cat <<EOF
 ==> DRY-RUN plan (no changes will be made):
   1. check for 'openshell' on PATH; if missing, install via
-     curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
+     curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.8/install.sh | sh
      (OPENSHELL_VERSION=${OPENSHELL_VERSION:-<latest>})
   2. verify the gateway: 'openshell status' (fallback: 'openshell gateway status')
   3. render deploy/openshell/provider-model.yaml with MODEL_HOST=${MODEL_HOST:-<UNSET - will refuse to run>}
@@ -206,10 +208,10 @@ else
   fi
   say "installing OpenShell..."
   if [ -n "${OPENSHELL_VERSION:-}" ]; then
-    curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | OPENSHELL_VERSION="$OPENSHELL_VERSION" sh \
+    curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.8/install.sh | OPENSHELL_VERSION="$OPENSHELL_VERSION" sh \
       || fail "OpenShell install failed (pinned OPENSHELL_VERSION=$OPENSHELL_VERSION)"
   else
-    curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh \
+    curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.8/install.sh | sh \
       || fail "OpenShell install failed; see https://docs.nvidia.com/openshell/latest/about/installation"
   fi
   command -v openshell >/dev/null 2>&1 || fail "install finished but 'openshell' is not on PATH (try re-login for PATH/groups)"
@@ -220,9 +222,9 @@ STATUS_OUT=""
 if STATUS_OUT="$(openshell status 2>&1)"; then
   say "gateway reachable (openshell status ok)"
 else
-  warn "'openshell status' failed; trying 'openshell gateway status'"
-  STATUS_OUT="$(openshell gateway status 2>&1)" || fail "no OpenShell gateway reachable. Output: $STATUS_OUT"
-  say "gateway reachable (openshell gateway status ok)"
+  warn "'openshell status' failed; trying 'openshell gateway info'"
+  STATUS_OUT="$(openshell gateway info 2>&1)" || fail "no OpenShell gateway reachable. Output: $STATUS_OUT"
+  say "gateway reachable (openshell gateway info ok)"
 fi
 DETECTED_URL="$(printf '%s\n' "$STATUS_OUT" | grep -oE 'https?://[^[:space:]"\x27]+' | head -n 1 || true)"
 if [ -n "$DETECTED_URL" ]; then OS_GATEWAY="$DETECTED_URL"; fi
@@ -278,7 +280,7 @@ if openshell sandbox get "$OS_SANDBOX" >/dev/null 2>&1; then
   openshell sandbox delete "$OS_SANDBOX" >/dev/null 2>&1 || fail "cannot delete previous sandbox '$OS_SANDBOX'"
 fi
 say "creating sandbox '$OS_SANDBOX' from '$PI_IMAGE' with restrictive policy..."
-CREATE_ARGS=(sandbox create --name "$OS_SANDBOX" --from "$PI_IMAGE" --policy "$OS_POLICY")
+CREATE_ARGS=(sandbox create --name "$OS_SANDBOX" --from "$PI_IMAGE" --policy "$OS_POLICY" --detach --no-tty --no-auto-providers)
 if [ "$OS_PROVIDER" != "none" ]; then CREATE_ARGS+=(--provider "$OS_PROVIDER"); fi
 # Scoped auto-approval: network egress proposals may auto-approve while
 # filesystem/process proposals stay held (held = probe (b) still denies +
@@ -326,15 +328,26 @@ else
   fail "probe (a) FAILED: cannot write the allowed path $WORKDIR (policy too tight or workdir wrong)"
 fi
 
-say "probe (b): denied writes must each fail..."
+say "probe (b): unprivileged execution and denied writes must each hold..."
+PROBE_UID="$(openshell sandbox exec "$OS_SANDBOX" --no-login-shell --timeout 10 -- id -u)" || fail "cannot verify sandbox UID"
+[ "$PROBE_UID" != 0 ] || fail "sandbox must execute as an unprivileged user"
+openshell sandbox exec "$OS_SANDBOX" --no-login-shell --timeout 10 -- sh -c 'test -d /var/tmp && test "$(stat -c %a /var/tmp)" = 1777' \
+  || fail "normally world-writable /var/tmp is required for an authoritative denial probe"
 # Each denied path gets its OWN exec call: a compound `a && b` would exit
 # non-zero (read as "refused") when only ONE of the two is denied, hiding a
 # proven escape through the other. Fail if EITHER write succeeds.
-for DENIED_PATH in /etc/.openshell-probe-denied /root/.openshell-probe-denied; do
+for DENIED_PATH in /etc/.openshell-probe-denied /root/.openshell-probe-denied "/var/tmp/.openshell-probe-denied-$$"; do
+  DENIED_ERR="$(mktemp)"
   if openshell sandbox exec "$OS_SANDBOX" --no-login-shell --timeout 30 -- \
-    sh -c "touch $DENIED_PATH" 2>/dev/null; then
+    sh -c 'touch "$1"' laun-denial "$DENIED_PATH" 2>"$DENIED_ERR"; then
+    rm -f "$DENIED_ERR"
     fail "probe (b) FAILED: write to $DENIED_PATH SUCCEEDED -- filesystem policy is not enforced"
   else
+    if [[ "$DENIED_PATH" = /var/tmp/* ]] && ! grep -qi 'permission denied' "$DENIED_ERR"; then
+      rm -f "$DENIED_ERR"
+      fail "probe (b) FAILED: external write failed without an authoritative permission-denied result"
+    fi
+    rm -f "$DENIED_ERR"
     say "probe (b): write to $DENIED_PATH refused"
   fi
 done
@@ -421,7 +434,7 @@ if openshell rule get --help >/dev/null 2>&1; then
   RULE_PENDING="$(openshell rule get "$OS_SANDBOX" --status pending 2>/dev/null || true)"
 fi
 if [ "$RULE_CMD_OK" = 0 ]; then
-  if [ "$EFFECTIVE_APPROVAL" != "none" ] && [ "$EFFECTIVE_APPROVAL" != "unsupported" ]; then
+  if [ "$EFFECTIVE_APPROVAL" = "auto" ]; then
     fail "audit FAILED: approval mode '$EFFECTIVE_APPROVAL' is active but 'openshell rule get' is unavailable -- auto-approval must not be unaudited"
   fi
   warn "audit: 'openshell rule get' unavailable; nothing auto-approved (mode $EFFECTIVE_APPROVAL), continuing"

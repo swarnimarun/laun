@@ -12,7 +12,7 @@ const gatewayModule = new URL("../../../apps/gateway/src/config.ts", import.meta
 function expand(value: unknown, env: Record<string, string>): string {
   let text = String(value);
   for (let count = 0; count < 10 && text.includes("${"); count++) {
-    text = text.replace(/\$\{([A-Z_]+)(?:(:-|:\?)([^{}]*))?\}/g, (_, name: string, operator?: string, fallback = "") => {
+    text = text.replace(/\$\{([A-Z_][A-Z0-9_]*)(?:(:-|:\?)([^{}]*))?\}/g, (_, name: string, operator?: string, fallback = "") => {
       if (env[name]) return env[name];
       if (operator === ":?") throw new Error(`missing required ${name}`);
       return fallback;
@@ -64,5 +64,47 @@ describe("deployment profile config smoke", () => {
       ...env, MAX_CONCURRENT_RUNS: "2", MAX_SESSION_TOKENS: "12345", AUTO_RESUME: "false", AUTO_RESUME_MAX_AGE_MS: "60000", RUN_STALL_MS: "90000",
     }));
     expect(config).toMatchObject({ maxConcurrentRuns: 2, maxSessionTokens: 12345, autoResume: false, autoResumeMaxAgeMs: 60000, stallMs: 90000 });
+  });
+
+  test("v2 controller receives explicit execution settings and container-network binding", () => {
+    const local = environment(base.services.gateway.environment, env);
+    expect(local.GATEWAY_BIND).toBe("0.0.0.0");
+    expect(local.OPENSHELL_ENABLED).toBe("false");
+    expect(local.LAUN_TRUSTED_LOCAL).toBe("false");
+    expect(local.LAUN_DEMO).toBe("false");
+    expect(local.PI_AUTH_FILE).toBe("/controller-auth/auth.json");
+    expect(local.LAUN_LOCAL_CAPACITY).toBe("2");
+    expect(local.MAX_FAMILY_TOKENS).toBe("100000");
+    const production = environment({ ...base.services.gateway.environment, ...overlay.services.gateway.environment }, env);
+    expect(production.OPENSHELL_ENABLED).toBe("true");
+    expect(production.LAUN_TRUSTED_LOCAL).toBe("false");
+    expect(production.LAUN_DEMO).toBe("false");
+    expect(production.OPENSHELL_GATEWAY_INSECURE).toBe("false");
+    expect(production.OPENSHELL_GATEWAY_ENDPOINT).toBe("https://host.openshell.internal:17670");
+  });
+
+  test("production credentials mount only into trusted gateway controller, with required explicit host path", () => {
+    const auth = overlay.services.gateway.volumes.find((mount: { target: string }) => mount.target === "/controller-auth");
+    expect(auth).toBeDefined();
+    expect(auth.read_only).toBe(false); // controller performs atomic OAuth refresh
+    expect(auth.bind.create_host_path).toBe(false);
+    expect(() => expand(auth.source, env)).toThrow("PI_CONTROLLER_AUTH_DIR");
+    expect(expand(auth.source, { ...env, PI_CONTROLLER_AUTH_DIR: "/srv/laun/controller-auth" })).toBe("/srv/laun/controller-auth");
+    expect(overlay.services.executor.volumes.some((mount: { target: string }) => mount.target === "/controller-auth")).toBe(false);
+    expect(base.services.gateway.volumes).toEqual(["laun-data:/data"]);
+  });
+
+  test("Telegram v2 routing gets a separate persistent encrypted delivery volume", () => {
+    const bridge = base.services["telegram-bridge"];
+    expect(bridge.volumes).toEqual(["laun-bridge-data:/bridge-data"]);
+    expect(bridge.environment.BRIDGE_DATA_DIR).toBe("/bridge-data");
+    expect(expand(bridge.environment.LAUN_CONTROL_V2, env)).toBe("true");
+    expect(bridge.environment.BRIDGE_INBOX_KEY).toContain("BRIDGE_INBOX_KEY");
+    expect(expand(bridge.environment.GATEWAY_TOKEN, { ...env, LAUN_TELEGRAM_BRIDGE_TOKEN: "connector-only" })).toBe("connector-only");
+    expect(expand(bridge.environment.GATEWAY_TOKEN, env)).toBe(env.GATEWAY_TOKEN);
+    expect(base.services.gateway.volumes).not.toContain("laun-bridge-data:/bridge-data");
+    expect(base.services.executor.volumes).not.toContain("laun-bridge-data:/bridge-data");
+    expect(base.services.gateway.environment.BRIDGE_INBOX_KEY).toBeUndefined();
+    expect(base.volumes["laun-bridge-data"]).toBeDefined();
   });
 });
