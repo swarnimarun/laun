@@ -13,5 +13,6 @@
   "dependencies": {
     "@laun/protocol": "workspace:*",
     "grammy": "^1.37.0"
-  }
+  },
+  "devDependencies": { "@laun/control": "workspace:*" }
 }

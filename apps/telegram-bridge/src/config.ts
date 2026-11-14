@@ -1,4 +1,5 @@
 import { parseAllowlist } from "@laun/protocol";
+import { resolve } from "node:path";
 
 export interface BridgeConfig {
   /** May be empty: an empty token means "disabled", handled in index.ts. */
@@ -8,6 +9,10 @@ export interface BridgeConfig {
   gatewayToken: string;
   defaultModel: string;
   pollMs: number;
+  controlV2?: boolean;
+  bridgeToken?: string;
+  dataDir?: string;
+  inboxKey?: string;
 }
 
 /** Documented placeholder from deploy/.env.example: never a real login. */
@@ -33,14 +38,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
   if (!Number.isInteger(pollMs) || pollMs < 500 || pollMs > 30_000) {
     throw new Error("BRIDGE_POLL_MS must be 500-30000");
   }
+  const v2 = env.LAUN_CONTROL_V2 ?? "false";
+  if (v2 !== "true" && v2 !== "false") throw new Error("LAUN_CONTROL_V2 must be true or false");
+  const inboxKey = env.BRIDGE_INBOX_KEY?.trim() || undefined;
+  const bridgeToken = env.LAUN_TELEGRAM_BRIDGE_TOKEN?.trim() || undefined;
+  if (inboxKey !== undefined && inboxKey.length < 32) throw new Error("BRIDGE_INBOX_KEY must have at least 32 characters");
   return {
     // Optional on purpose: a missing token is a clean disabled exit (see
     // index.ts), not a throw — otherwise the stack crash-loops on a fresh box.
     botToken: (env["TELEGRAM_BOT_TOKEN"] ?? "").trim(),
     allowlist: parseAllowlist(env["TELEGRAM_ALLOWLIST_IDS"]),
     gatewayUrl: (env["GATEWAY_URL"] ?? "http://localhost:8080").replace(/\/$/, ""),
-    gatewayToken: required(env, "GATEWAY_TOKEN"),
+    gatewayToken: env.GATEWAY_TOKEN?.trim() || (v2 === "true" && bridgeToken ? bridgeToken : required(env, "GATEWAY_TOKEN")),
     defaultModel: env["MODEL"] ?? "opencode-go/muse-spark-1.3-contributor",
     pollMs,
+    controlV2: v2 === "true",
+    bridgeToken,
+    dataDir: resolve(env.BRIDGE_DATA_DIR?.trim() || "./data/telegram"),
+    inboxKey,
   };
 }

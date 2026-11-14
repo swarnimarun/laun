@@ -3,6 +3,7 @@ import { isAllowlisted } from "@laun/protocol";
 import type { BridgeConfig } from "./config.js";
 import { GatewayClient } from "./client.js";
 import { decodeApproval, encodeApproval, renderChunks, sessionLine } from "./format.js";
+import { createV2Bot } from "./v2bot.js";
 
 const HELP = [
   "🧸 laun — your VPS agent",
@@ -20,6 +21,7 @@ const HELP = [
 const active = new Map<number, string>();
 
 export function createBot(cfg: BridgeConfig, client?: GatewayClient): Bot {
+  if (cfg.controlV2) return createV2Bot(cfg);
   const gw = client ?? new GatewayClient(cfg.gatewayUrl, cfg.gatewayToken);
   const bot = new Bot(cfg.botToken);
 
