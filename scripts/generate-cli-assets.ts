@@ -2,9 +2,14 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { CLI_ASSET_PATHS } from "./cli-asset-list.js";
 import { TELEGRAM_PLACEHOLDER_TOKEN } from "../apps/telegram-bridge/src/config.js";
+import { CONTROLLER_QUALIFICATION_SCRIPT } from "../apps/laun/src/controller-source.js";
 export async function generateCliAssets(
   root = resolve(import.meta.dir, ".."),
 ): Promise<string> {
+  await Bun.write(
+    resolve(root, "deploy/controller-contract.js"),
+    CONTROLLER_QUALIFICATION_SCRIPT + "\n",
+  );
   const files: Record<string, { content: string; sha256: string }> = {};
   for (const path of [...CLI_ASSET_PATHS].sort()) {
     const content = await Bun.file(resolve(root, path)).text();

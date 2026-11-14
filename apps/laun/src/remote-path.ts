@@ -124,7 +124,11 @@ done`;
 /** Publish exactly once. Re-runs can compare the same private config but cannot rotate it. */
 export function publishRemoteConfig(
   directory: string,
-  file: ".env" | "worker.env",
+  file:
+    | ".env"
+    | "worker.env"
+    | ".controller-source.json"
+    | ".laun-controller-contract.js",
 ): string {
   validateInstallDirectory(directory);
   return `set -euo pipefail

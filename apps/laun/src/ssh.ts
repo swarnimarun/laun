@@ -8,6 +8,12 @@ import {
   validateInstallDirectory,
 } from "./remote-path.js";
 import { shQuote } from "./shell-quote.js";
+import {
+  controllerSourceInstaller,
+  validateControllerSource,
+  CONTROLLER_QUALIFICATION_SCRIPT,
+} from "./controller-source.js";
+import type { YardSourceArchive } from "./yard-source.js";
 export { shQuote } from "./shell-quote.js";
 
 export interface CommandResult {
@@ -29,6 +35,8 @@ export interface RunOptions {
    */
   echo?: boolean;
   env?: Record<string, string>;
+  /** Bound a disposable qualification process; normal builds remain unbounded. */
+  timeoutMs?: number;
 }
 
 /** Read a stream to completion, optionally echoing each chunk as it arrives. */
@@ -69,6 +77,7 @@ export const bunRunner: CommandRunner = async (argv, opts = {}) => {
     stdout: stdio === "inherit" ? "inherit" : "pipe",
     stderr: stdio === "inherit" ? "inherit" : "pipe",
     env: opts.env ? { ...Bun.env, ...opts.env } : Bun.env,
+    ...(opts.timeoutMs === undefined ? {} : { timeout: opts.timeoutMs }),
   });
   const [stdout, stderr] = await Promise.all([
     stdio === "inherit"
@@ -119,6 +128,7 @@ export interface RemoteSetupOptions extends SshTargetSpec {
   runner?: CommandRunner;
   assets?: DeploymentFile[];
   releaseOnly?: boolean;
+  sourceArchive?: YardSourceArchive;
 }
 
 export interface RemoteSetupResult {
@@ -137,6 +147,20 @@ export async function runRemoteSetup(
 ): Promise<RemoteSetupResult> {
   const run = opts.runner ?? bunRunner;
   const dir = shQuote(validateInstallDirectory(opts.remoteDir));
+  if (opts.sourceArchive) {
+    validateControllerSource(opts.sourceArchive);
+    if (opts.repoUrl || opts.releaseOnly)
+      throw new Error(
+        "controller source archive cannot be combined with a repository or release-only install",
+      );
+  } else if (!opts.repoUrl && !opts.releaseOnly)
+    throw new Error(
+      "controller setup needs current source, an explicit pinned repository, or released deployment templates; no remote checkout is silently reused",
+    );
+  if (opts.repoUrl && !/^[a-f0-9]{40}$/.test(opts.revision ?? ""))
+    throw new Error(
+      "controller repository install requires an exact 40-hex revision",
+    );
 
   // Every remote step echoes: a silent multi-minute bootstrap reads as "stuck".
   const show = { echo: true } as const;
@@ -171,7 +195,22 @@ export async function runRemoteSetup(
       `ssh env write failed (${writeEnv.code}): ${writeEnv.stderr.trim()}`,
     );
 
-  for (const asset of opts.assets ?? []) {
+  const installer = opts.sourceArchive
+    ? controllerSourceInstaller(opts.remoteDir)
+    : undefined;
+  const transferAssets = [
+    ...(opts.assets ?? []),
+    ...(installer
+      ? [
+          {
+            path: "deploy/controller-source-installer.ts",
+            content: installer,
+            sha256: createHash("sha256").update(installer).digest("hex"),
+          },
+        ]
+      : []),
+  ];
+  for (const asset of transferAssets) {
     if (
       !/^(?:deploy\/.+|apps\/laun\/src\/compose-profile\.ts)$/.test(
         asset.path,
@@ -195,8 +234,35 @@ export async function runRemoteSetup(
         `verified deployment template transfer failed: ${asset.path}`,
       );
   }
+  if (opts.sourceArchive) {
+    const transferred = await run(
+      sshArgv(
+        opts,
+        `bash -c ${shQuote(publishRemoteConfig(opts.remoteDir, ".controller-source.json"))}`,
+      ),
+      { stdin: JSON.stringify(opts.sourceArchive), echo: false },
+    );
+    if (transferred.code !== 0)
+      throw new Error(
+        `controller source transfer failed (${transferred.code}); source and credentials were not overwritten`,
+      );
+  }
 
-  const bootstrapCmd = `${opts.noStart ? "LAUN_NO_START=true " : ""}${opts.releaseOnly ? "LAUN_RELEASE_ONLY=true " : ""}bash -s -- ${dir}${opts.repoUrl ? ` ${shQuote(opts.repoUrl)}${opts.revision ? ` ${shQuote(opts.revision)}` : ""}` : ""}`;
+  const bootstrapCmd = `${opts.noStart ? "LAUN_NO_START=true " : ""}${opts.releaseOnly ? "LAUN_RELEASE_ONLY=true " : ""}${opts.sourceArchive ? "LAUN_SOURCE_ARCHIVE=true " : ""}bash -s -- ${dir}${opts.repoUrl ? ` ${shQuote(opts.repoUrl)}${opts.revision ? ` ${shQuote(opts.revision)}` : ""}` : ""}`;
+  if (opts.repoUrl) {
+    const payload = CONTROLLER_QUALIFICATION_SCRIPT + "\n",
+      destination = shQuote(`${opts.remoteDir}/.laun-controller-contract.js`),
+      digest = createHash("sha256").update(payload).digest("hex");
+    const command = `${publishRemoteConfig(opts.remoteDir, ".laun-controller-contract.js")}\nprintf '%s  %s\\n' ${shQuote(digest)} ${destination} | sha256sum --check --status`;
+    const transferred = await run(
+      sshArgv(opts, `bash -c ${shQuote(command)}`),
+      { stdin: payload, echo: false },
+    );
+    if (transferred.code !== 0)
+      throw new Error(
+        "trusted controller qualification payload transfer failed",
+      );
+  }
   const boot = await run(sshArgv(opts, bootstrapCmd), {
     stdin: opts.bootstrapScript,
     echo: true,

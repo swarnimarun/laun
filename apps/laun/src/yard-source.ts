@@ -25,7 +25,27 @@ export interface YardSourceArchive {
 }
 const sha = (value: string | Uint8Array) =>
   createHash("sha256").update(value).digest("hex");
-export function allowedYardSource(path: string, directory = false): boolean {
+export function allowedYardSource(
+  path: string,
+  directory = false,
+  controller = false,
+): boolean {
+  if (
+    controller &&
+    (path === ".dockerignore" ||
+      path === "deploy/openshell/Dockerfile.pi" ||
+      [
+        "scripts/build-cli.ts",
+        "scripts/generate-cli-assets.ts",
+        "scripts/cli-asset-list.ts",
+        "scripts/qualify-packaged-control.ts",
+        "scripts/qualify-packaged-control.test.ts",
+        "scripts/check-container-context.ts",
+        "scripts/dev-app.ts",
+      ].includes(path) ||
+      (directory && path === "scripts"))
+  )
+    return true;
   // Self-contained so the receiver embeds exactly the same source policy.
   const rootFiles = new Set([
     "package.json",
@@ -58,6 +78,7 @@ export function allowedYardSource(path: string, directory = false): boolean {
     !path ||
     path.length > 4096 ||
     path.startsWith("/") ||
+    /[\x00-\x1f\x7f]/.test(path) ||
     path.includes("\\")
   )
     return false;
@@ -108,6 +129,7 @@ export function allowedYardSource(path: string, directory = false): boolean {
 /** Source-only bundle of this checkout, including unpublished JJ work and no dependency/data trees. */
 export async function createYardSourceArchive(
   root: string,
+  options: { controller?: boolean } = {},
 ): Promise<YardSourceArchive> {
   const files: YardSourceFile[] = [];
   let bytes = 0;
@@ -154,10 +176,12 @@ export async function createYardSourceArchive(
       stat = await lstat(full);
     if (
       stat.isSymbolicLink() &&
-      (allowedYardSource(path) || allowedYardSource(path, true))
+      (allowedYardSource(path, false, options.controller) ||
+        allowedYardSource(path, true, options.controller))
     )
       throw new UsageError(`source archive refuses symbolic link: ${path}`);
-    if (!allowedYardSource(path, stat.isDirectory())) return;
+    if (!allowedYardSource(path, stat.isDirectory(), options.controller))
+      return;
     if (stat.isDirectory()) {
       for (const entry of (await readdir(full)).sort())
         await visit(`${path}/${entry}`);
@@ -208,7 +232,12 @@ export async function createYardSourceArchive(
     });
   };
   for (const entry of (await readdir(root)).sort())
-    if (ROOT_FILES.has(entry) || ROOT_DIRS.has(entry)) await visit(entry);
+    if (
+      ROOT_FILES.has(entry) ||
+      ROOT_DIRS.has(entry) ||
+      (options.controller && [".dockerignore", "scripts"].includes(entry))
+    )
+      await visit(entry);
   for (const required of [
     "package.json",
     "bun.lock",

@@ -38,7 +38,10 @@ export class V2Delivery {
     if (!/^\d{1,20}$/.test(botId))
       throw new Error("invalid numeric Telegram bot identity");
     this.client =
-      options.client ?? new V2GatewayClient(cfg.gatewayUrl, token, botId);
+      options.client ??
+      new V2GatewayClient(cfg.gatewayUrl, token, botId, undefined, {
+        allowInsecureNetwork: cfg.allowInsecureNetwork === true,
+      });
     this.inbox = new TelegramInbox(
       join(resolve(cfg.dataDir ?? "./data/telegram"), "inbox.sqlite"),
       cfg.inboxKey ?? `${cfg.botToken}\0${token}`,

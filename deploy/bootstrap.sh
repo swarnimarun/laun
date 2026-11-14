@@ -19,7 +19,9 @@ REMOTE_DIR="${1:-}"
 REPO_URL="${2:-}"
 SOURCE_REVISION="${3:-}"
 RELEASE_ONLY="${LAUN_RELEASE_ONLY:-false}"
+SOURCE_ARCHIVE="${LAUN_SOURCE_ARCHIVE:-false}"
 [[ "$RELEASE_ONLY" = true || "$RELEASE_ONLY" = false ]] || { echo 'LAUN_RELEASE_ONLY must be true or false' >&2; exit 1; }
+[[ "$SOURCE_ARCHIVE" = true || "$SOURCE_ARCHIVE" = false ]] || { echo 'LAUN_SOURCE_ARCHIVE must be true or false' >&2; exit 1; }
 
 log() { printf '==> %s\n' "$*"; }
 warn() { printf '==> WARNING: %s\n' "$*" >&2; }
@@ -53,6 +55,9 @@ printf '%s\n' '{"version":1,"kind":"controller"}' | cmp -s - "$MARKER" || die "i
 ENV_FILE="$REMOTE_DIR/.env"
 [ ! -L "$ENV_FILE" ] && [ -f "$ENV_FILE" ] && [ "$(stat -c %u -- "$ENV_FILE")" = "$(id -u)" ] || die "configuration must be an installer-owned regular file; symlinks are refused"
 env_mode="$(stat -c %a -- "$ENV_FILE")"; (( (8#$env_mode & 0077) == 0 )) || die "configuration must be private before setup"
+if [ "$SOURCE_ARCHIVE" = false ] && [ "$RELEASE_ONLY" = false ]; then
+  [ -n "$REPO_URL" ] && [[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]] || die "choose the current-checkout source transfer or an explicit repository with exact revision; setup never silently reuses a remote checkout"
+fi
 
 # The checkout may overwrite .env, so keep the authoritative copy aside.
 ENV_BACKUP="$(mktemp)"
@@ -136,13 +141,20 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 # --- source tree ----------------------------------------------------------------
-if [ "$RELEASE_ONLY" = true ]; then
+if [ "$SOURCE_ARCHIVE" = true ]; then
+  [ "$RELEASE_ONLY" = false ] && [ -z "$REPO_URL" ] || die "source archive cannot be combined with another install mode"
+  [ -f "$REMOTE_DIR/deploy/install-bun.sh" ] && [ -f "$REMOTE_DIR/deploy/controller-source-installer.ts" ] && [ -f "$REMOTE_DIR/.controller-source.json" ] || die "verified controller source transfer is incomplete"
+  LAUN_BUN_BIN="$(bash "$REMOTE_DIR/deploy/install-bun.sh")" || die "pinned Bun provisioning failed before source verification"
+  export PATH="$(dirname "$LAUN_BUN_BIN"):$PATH"
+  bun "$REMOTE_DIR/deploy/controller-source-installer.ts" < "$REMOTE_DIR/.controller-source.json" || die "controller source manifest verification/install failed; existing files were preserved"
+  log "using the verified current-checkout controller source"
+elif [ "$RELEASE_ONLY" = true ]; then
   [ -f "$REMOTE_DIR/deploy/install-bun.sh" ] && [ -f "$REMOTE_DIR/deploy/docker-compose.yml" ] \
     || die "portable deployment templates are incomplete"
   log "using verified deployment templates from the released CLI (no checkout required)"
 elif [ -f "$REMOTE_DIR/package.json" ]; then
-  log "reusing existing checkout at $REMOTE_DIR"
-  log "source updates require the explicit upgrade workflow; setup does not pull floating revisions"
+  [ -d "$REMOTE_DIR/.git" ] && [ "$(git -C "$REMOTE_DIR" rev-parse HEAD)" = "$SOURCE_REVISION" ] && git -C "$REMOTE_DIR" diff --quiet HEAD -- || die "existing checkout differs from the explicitly reviewed revision; use the upgrade workflow"
+  log "verified existing checkout at the explicitly pinned revision"
 else
   [ -n "$REPO_URL" ] \
     || die "no checkout at $REMOTE_DIR and no repo url given: rsync the repo there, or re-run with --repo-url <git-url>"
@@ -170,7 +182,17 @@ fi
 [ -f "$REMOTE_DIR/deploy/install-bun.sh" ] || die "pinned Bun helper is missing from deployment artifacts"
 LAUN_BUN_BIN="$(bash "$REMOTE_DIR/deploy/install-bun.sh")" || die "pinned Bun provisioning failed"
 export PATH="$(dirname "$LAUN_BUN_BIN"):$PATH"
+read_install_value() {
+  bun -e 'import {pathToFileURL} from "node:url";const {readEnvValue}=await import(pathToFileURL(process.argv[1]).href);console.log(readEnvValue(await Bun.file(process.argv[2]).text(),process.argv[3])??"");' "$REMOTE_DIR/apps/laun/src/compose-profile.ts" "$ENV_FILE" "$1"
+}
 SERVICE_IMAGE="$(bun -e 'import {pathToFileURL} from "node:url";const {readEnvValue}=await import(pathToFileURL(process.argv[1]).href);console.log(process.env.LAUN_SERVICE_IMAGE??readEnvValue(await Bun.file(process.argv[2]).text(),"LAUN_SERVICE_IMAGE")??"");' "$REMOTE_DIR/apps/laun/src/compose-profile.ts" "$ENV_FILE")" || die "could not read service image configuration"
+INSTALL_IMAGE="${LAUN_IMAGE:-$(read_install_value LAUN_IMAGE)}"
+INSTALL_IMAGE="${INSTALL_IMAGE:-ghcr.io/swarnimarun/laun}"
+if [ -n "$REPO_URL" ]; then
+  CONTRACT_SCRIPT="$(cat "$REMOTE_DIR/.laun-controller-contract.js")" || die "trusted CLI controller qualification payload is missing; invoke source setup through the current CLI"
+else
+  CONTRACT_SCRIPT="$(cat "$REMOTE_DIR/deploy/controller-contract.js")" || die "trusted controller qualification payload is missing"
+fi
 PULL_ONLY="$RELEASE_ONLY"
 [ -z "$SERVICE_IMAGE" ] || PULL_ONLY=true
 
@@ -180,15 +202,18 @@ if [ "$PULL_ONLY" = false ]; then
   (cd "$REMOTE_DIR" && bun install --frozen-lockfile --ignore-scripts) || die "locked dependency installation failed"
   log "typechecking"
   (cd "$REMOTE_DIR" && bun run build) || die "typecheck failed; refusing to deploy an invalid build"
+  log "qualifying the source controller's owner, durable journal and inference API without model calls"
+  bun -e "$CONTRACT_SCRIPT" "$REMOTE_DIR" || die "source controller qualification failed; stack was not started"
 fi
-RELEASE_TAG="$(sed -n 's/^LAUN_TAG=\(.*\)$/\1/p' "$ENV_FILE" | tail -1 | tr -d "\"'[:space:]")"
+RELEASE_TAG="$(read_install_value LAUN_TAG)" || die "could not read release tag"
 if [ "$RELEASE_ONLY" = true ]; then
   [[ "$RELEASE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || die "portable setup requires a pinned release LAUN_TAG"
 fi
 
 # --- start ----------------------------------------------------------------------
-GATEWAY_PORT="$(sed -n 's/^GATEWAY_PORT=\([0-9]*\).*/\1/p' "$ENV_FILE" | tail -1)"
+GATEWAY_PORT="$(read_install_value GATEWAY_PORT)" || die "could not read gateway port"
 GATEWAY_PORT="${GATEWAY_PORT:-8080}"
+[[ "$GATEWAY_PORT" =~ ^[0-9]{1,5}$ ]] && (( 10#$GATEWAY_PORT >= 1 && 10#$GATEWAY_PORT <= 65535 )) || die "GATEWAY_PORT must be 1-65535"
 
 if [ "${LAUN_NO_START:-false}" = "true" ]; then
   log "LAUN_NO_START=true — leaving the stack stopped"
@@ -230,16 +255,20 @@ else
   laun_compose_profile "$ENV_FILE" "$REMOTE_DIR/deploy/docker-compose.yml" true \
     || die "compose profile preflight failed"
   log "validating deployment configuration"
-  (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" PI_CONTROLLER_AUTH_DIR="$PI_CONTROLLER_AUTH_DIR" docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env config --quiet) \
+  (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" PI_CONTROLLER_AUTH_DIR="$PI_CONTROLLER_AUTH_DIR" LAUN_IMAGE="$INSTALL_IMAGE" LAUN_TAG="$RELEASE_TAG" LAUN_SERVICE_IMAGE="$SERVICE_IMAGE" docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env config --quiet) \
     || die "docker compose configuration is invalid"
   if [ "$PULL_ONLY" = true ]; then
-    (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" PI_CONTROLLER_AUTH_DIR="$PI_CONTROLLER_AUTH_DIR" LAUN_TAG="$RELEASE_TAG" LAUN_SERVICE_IMAGE="$SERVICE_IMAGE" docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env pull) || die "pinned image pull failed"
-    (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" PI_CONTROLLER_AUTH_DIR="$PI_CONTROLLER_AUTH_DIR" LAUN_TAG="$RELEASE_TAG" LAUN_SERVICE_IMAGE="$SERVICE_IMAGE" docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env up -d --no-build) || die "released stack start failed"
+    (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" PI_CONTROLLER_AUTH_DIR="$PI_CONTROLLER_AUTH_DIR" LAUN_IMAGE="$INSTALL_IMAGE" LAUN_TAG="$RELEASE_TAG" LAUN_SERVICE_IMAGE="$SERVICE_IMAGE" docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env pull) || die "pinned image pull failed"
+    QUALIFY_IMAGE="${SERVICE_IMAGE:-$INSTALL_IMAGE:${RELEASE_TAG:-latest}}"
+    log "qualifying the pulled controller without production data, credentials or network"
+    $SUDO timeout 60 docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --memory 512m --cpus 1 --tmpfs /tmp:rw,nosuid,nodev,size=96m --env HOME=/tmp --env BUN_RUNTIME_TRANSPILER_CACHE_PATH=/tmp/bun-transpile --entrypoint bun "$QUALIFY_IMAGE" -e "$CONTRACT_SCRIPT" /app \
+      || die "pulled image lacks the required v2 owner/durable/inference contract; existing data was not mounted and stack was not started"
+    (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" PI_CONTROLLER_AUTH_DIR="$PI_CONTROLLER_AUTH_DIR" LAUN_IMAGE="$INSTALL_IMAGE" LAUN_TAG="$RELEASE_TAG" LAUN_SERVICE_IMAGE="$SERVICE_IMAGE" docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env up -d --no-build) || die "released stack start failed"
   else
-    (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" PI_CONTROLLER_AUTH_DIR="$PI_CONTROLLER_AUTH_DIR" docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env up -d --build) || die "source stack start failed"
+    (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" PI_CONTROLLER_AUTH_DIR="$PI_CONTROLLER_AUTH_DIR" LAUN_IMAGE="$INSTALL_IMAGE" LAUN_TAG="$RELEASE_TAG" LAUN_SERVICE_IMAGE="$SERVICE_IMAGE" docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env up -d --build) || die "source stack start failed"
   fi
   healthy=0
-  readiness_probe='import {pathToFileURL} from "node:url";const {readEnvValue}=await import(pathToFileURL(process.argv[1]).href);const key=readEnvValue(await Bun.file(process.argv[2]).text(),"LAUN_KEY");if(!key)process.exit(1);try{const headers={authorization:`Bearer ${key}`};const r=await fetch(`http://127.0.0.1:${process.argv[3]}/api/v2/me`,{headers,signal:AbortSignal.timeout(3000)});if(!r.ok)process.exit(1);const me=await r.json();if(typeof me.principalId!=="string"||!me.principalId)process.exit(1);}catch{process.exit(1);}'
+  readiness_probe='import {pathToFileURL} from "node:url";const {readEnvValue}=await import(pathToFileURL(process.argv[1]).href);const key=readEnvValue(await Bun.file(process.argv[2]).text(),"LAUN_KEY");if(!key)process.exit(1);try{const headers={authorization:`Bearer ${key}`};const r=await fetch(`http://127.0.0.1:${process.argv[3]}/api/v2/me`,{headers,signal:AbortSignal.timeout(3000)});if(!r.ok)process.exit(1);const me=await r.json();if(typeof me.principalId!=="string"||!me.principalId)process.exit(1);const state=await fetch(`http://127.0.0.1:${process.argv[3]}/api/v2/state`,{headers,signal:AbortSignal.timeout(3000)});if(!state.ok)process.exit(1);const value=await state.json();if(value.readiness?.durableJournal!==true||value.readiness?.inferenceRelay!==true)process.exit(1);}catch{process.exit(1);}'
   for _ in $(seq 1 20); do
     if bun -e "$readiness_probe" "$REMOTE_DIR/apps/laun/src/compose-profile.ts" "$ENV_FILE" "$GATEWAY_PORT" >/dev/null 2>&1; then
       healthy=1
@@ -255,8 +284,9 @@ else
 fi
 
 # --- summary (last line is the agent key) ---------------------------------------
-LAUN_KEY="$(sed -n 's/^LAUN_KEY=\(.*\)$/\1/p' "$ENV_FILE" | tail -1 | tr -d '[:space:]')"
+LAUN_KEY="$(read_install_value LAUN_KEY)" || die "could not read human access key"
 [ -n "$LAUN_KEY" ] || die "no LAUN_KEY in $ENV_FILE — run laun setup to generate one"
+[[ "$LAUN_KEY" =~ ^laun_[0-9a-f]{8,32}_[A-Za-z0-9_-]{20,128}$ ]] || die "LAUN_KEY is not a valid human access key"
 
 log "done"
 printf 'LAUN_DIR=%s\n' "$REMOTE_DIR"

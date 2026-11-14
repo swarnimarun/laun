@@ -51,6 +51,11 @@ COMPOSE=(docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env)
 "${COMPOSE[@]}" config --quiet
 if [ "$PULL_ONLY" = true ]; then
   "${COMPOSE[@]}" pull
+  CONTRACT_SCRIPT="$(cat "$REPO_DIR/deploy/controller-contract.js")"
+  QUALIFY_IMAGE="$(bun -e 'import {readEnvValue} from "./apps/laun/src/compose-profile.ts";const text=await Bun.file(".env").text();console.log(process.env.LAUN_SERVICE_IMAGE||readEnvValue(text,"LAUN_SERVICE_IMAGE")||`${process.env.LAUN_IMAGE||readEnvValue(text,"LAUN_IMAGE")||"ghcr.io/swarnimarun/laun"}:${process.env.LAUN_TAG||readEnvValue(text,"LAUN_TAG")||"latest"}`);')"
+  echo "==> Qualifying the pulled controller without production data, credentials or network"
+  timeout 60 docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 128 --memory 512m --cpus 1 --tmpfs /tmp:rw,nosuid,nodev,size=96m --env HOME=/tmp --env BUN_RUNTIME_TRANSPILER_CACHE_PATH=/tmp/bun-transpile --entrypoint bun "$QUALIFY_IMAGE" -e "$CONTRACT_SCRIPT" /app \
+    || { echo "Pulled image lacks the required v2 owner/durable/inference contract; existing data was not mounted and stack was not started" >&2; exit 1; }
   "${COMPOSE[@]}" up -d --no-build
 else
   bun run build

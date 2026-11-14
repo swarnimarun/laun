@@ -125,6 +125,8 @@ services:
       BRIDGE_INBOX_KEY: ${BRIDGE_INBOX_KEY:-}
       BRIDGE_DATA_DIR: /bridge-data
       GATEWAY_URL: http://gateway:8080
+      # Explicitly trust only this operator-managed private Compose network.
+      BRIDGE_ALLOW_INSECURE_NETWORK: "true"
       GATEWAY_TOKEN: ${LAUN_TELEGRAM_BRIDGE_TOKEN:-${GATEWAY_TOKEN:?set GATEWAY_TOKEN in .env}}
       MODEL: ${MODEL:-opencode-go/muse-spark-1.3-contributor}
       BRIDGE_POLL_MS: ${BRIDGE_POLL_MS:-2000}

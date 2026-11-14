@@ -3,7 +3,13 @@ import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAgentKey } from "@laun/protocol";
-import { UsageError, flagBool, flagString, parseArgs, requiredArg } from "./args.js";
+import {
+  UsageError,
+  flagBool,
+  flagString,
+  parseArgs,
+  requiredArg,
+} from "./args.js";
 import {
   isValidTargetName,
   listNamedTargets,
@@ -16,14 +22,32 @@ import {
 } from "./config.js";
 import { main, type Io } from "./index.js";
 import { ensureEnv, parseSshTarget, readEnvValue, upsertEnv } from "./setup.js";
-import { bunRunner, lastMatch, runRemoteSetup, shQuote, sshArgv, type CommandRunner } from "./ssh.js";
+import {
+  bunRunner,
+  lastMatch,
+  runRemoteSetup,
+  shQuote,
+  sshArgv,
+  type CommandRunner,
+} from "./ssh.js";
 
 describe("args", () => {
   test("parses values, booleans, equals form, and --", () => {
-    const { positionals, flags } = parseArgs(["--host", "1.2.3.4", "--json", "--port=9000", "goal text", "--", "--literal"], {
-      boolean: ["json"],
-      value: ["host", "port"],
-    });
+    const { positionals, flags } = parseArgs(
+      [
+        "--host",
+        "1.2.3.4",
+        "--json",
+        "--port=9000",
+        "goal text",
+        "--",
+        "--literal",
+      ],
+      {
+        boolean: ["json"],
+        value: ["host", "port"],
+      },
+    );
     expect(flagString(flags, "host")).toBe("1.2.3.4");
     expect(flagString(flags, "port")).toBe("9000");
     expect(flagBool(flags, "json")).toBe(true);
@@ -31,14 +55,22 @@ describe("args", () => {
   });
 
   test("short flags work for -i", () => {
-    const { flags } = parseArgs(["-i", "~/.ssh/id_ed25519", "host"], { value: ["i"] });
+    const { flags } = parseArgs(["-i", "~/.ssh/id_ed25519", "host"], {
+      value: ["i"],
+    });
     expect(flagString(flags, "i")).toBe("~/.ssh/id_ed25519");
   });
 
   test("unknown flags and missing values are hard errors", () => {
-    expect(() => parseArgs(["--nope"], { boolean: ["json"] })).toThrow(UsageError);
-    expect(() => parseArgs(["--host"], { value: ["host"] })).toThrow("requires a value");
-    expect(() => parseArgs(["--json=1"], { boolean: ["json"] })).toThrow("does not take a value");
+    expect(() => parseArgs(["--nope"], { boolean: ["json"] })).toThrow(
+      UsageError,
+    );
+    expect(() => parseArgs(["--host"], { value: ["host"] })).toThrow(
+      "requires a value",
+    );
+    expect(() => parseArgs(["--json=1"], { boolean: ["json"] })).toThrow(
+      "does not take a value",
+    );
     expect(() => requiredArg([], 0, "goal", "usage")).toThrow(UsageError);
   });
 });
@@ -46,7 +78,16 @@ describe("args", () => {
 describe("config", () => {
   test("saves 0600 in a 0700 dir and round-trips", () => {
     const home = mkdtempSync(join(tmpdir(), "laun-home-"));
-    const path = saveTarget({ host: "203.0.113.9", port: 8080, scheme: "http", key: "laun_aabbccdd_secretsecretsecretsecret", keyId: "aabbccdd" }, home);
+    const path = saveTarget(
+      {
+        host: "203.0.113.9",
+        port: 8080,
+        scheme: "http",
+        key: "laun_aabbccdd_secretsecretsecretsecret",
+        keyId: "aabbccdd",
+      },
+      home,
+    );
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(statSync(join(home, ".laun")).mode & 0o777).toBe(0o700);
     expect(loadTarget(home)?.host).toBe("203.0.113.9");
@@ -54,19 +95,41 @@ describe("config", () => {
 
   test("env overrides the saved target, and half a target is ignored", () => {
     const home = mkdtempSync(join(tmpdir(), "laun-home-"));
-    saveTarget({ host: "saved", port: 8080, scheme: "http", key: "laun_aabbccdd_secretsecretsecretsecret" }, home);
+    saveTarget(
+      {
+        host: "saved",
+        port: 8080,
+        scheme: "http",
+        key: "laun_aabbccdd_secretsecretsecretsecret",
+      },
+      home,
+    );
     expect(resolveTarget({} as NodeJS.ProcessEnv, home)?.host).toBe("saved");
-    expect(resolveTarget({ LAUN_KEY: "k" } as NodeJS.ProcessEnv, home)?.host).toBe("saved");
-    expect(resolveTarget({ LAUN_HOST: "envhost", LAUN_KEY: "laun_aabbccdd_secretsecretsecretsecret" } as NodeJS.ProcessEnv, home)?.host).toBe("envhost");
+    expect(
+      resolveTarget({ LAUN_KEY: "k" } as NodeJS.ProcessEnv, home)?.host,
+    ).toBe("saved");
+    expect(
+      resolveTarget(
+        {
+          LAUN_HOST: "envhost",
+          LAUN_KEY: "laun_aabbccdd_secretsecretsecretsecret",
+        } as NodeJS.ProcessEnv,
+        home,
+      )?.host,
+    ).toBe("envhost");
   });
 
   test("missing file yields null instead of throwing", () => {
-    expect(loadTarget(mkdtempSync(join(tmpdir(), "laun-home-"))) ).toBeNull();
+    expect(loadTarget(mkdtempSync(join(tmpdir(), "laun-home-")))).toBeNull();
   });
 
   test("targetUrl keeps IPv6 usable", () => {
-    expect(targetUrl({ host: "1.2.3.4", port: 8080, scheme: "http" })).toBe("http://1.2.3.4:8080");
-    expect(targetUrl({ host: "::1", port: 8080, scheme: "http" })).toBe("http://[::1]:8080");
+    expect(targetUrl({ host: "1.2.3.4", port: 8080, scheme: "http" })).toBe(
+      "http://1.2.3.4:8080",
+    );
+    expect(targetUrl({ host: "::1", port: 8080, scheme: "http" })).toBe(
+      "http://[::1]:8080",
+    );
   });
 });
 
@@ -78,7 +141,10 @@ describe("env generation", () => {
     const dir = mkdtempSync(join(tmpdir(), "laun-envseed-"));
     const envPath = join(dir, ".env");
     const examplePath = join(dir, "example.env");
-    writeFileSync(examplePath, "GATEWAY_TOKEN=change-me\nLAUN_KEY=\nEXECUTOR_MODE=rpc\nRUN_TIMEOUT_MS=1800000\n");
+    writeFileSync(
+      examplePath,
+      "GATEWAY_TOKEN=change-me\nLAUN_KEY=\nEXECUTOR_MODE=rpc\nRUN_TIMEOUT_MS=1800000\n",
+    );
     writeFileSync(envPath, "GATEWAY_TOKEN=mine-keep-me\nLAUN_KEY=\n");
 
     const first = ensureEnv(envPath, examplePath);
@@ -94,8 +160,12 @@ describe("env generation", () => {
   });
 
   test("fills placeholders and never clobbers a live secret", () => {
-    const example = "GATEWAY_TOKEN=change-me-to-a-long-random-string\nOTHER=1\n";
-    const first = ensureEnv(join(mkdtempSync(join(tmpdir(), "laun-env-")), ".env"), "");
+    const example =
+      "GATEWAY_TOKEN=change-me-to-a-long-random-string\nOTHER=1\n";
+    const first = ensureEnv(
+      join(mkdtempSync(join(tmpdir(), "laun-env-")), ".env"),
+      "",
+    );
     expect(first.token.length).toBeGreaterThan(20);
     expect(parseAgentKey(first.key)?.id).toBeDefined();
 
@@ -107,7 +177,9 @@ describe("env generation", () => {
     expect(created.created).toBe(true);
     expect(readEnvValue(created.content, "GATEWAY_TOKEN")).toBe(created.token);
     expect(readEnvValue(created.content, "OTHER")).toBe("1");
-    expect(parseAgentKey(readEnvValue(created.content, "LAUN_KEY")!)).not.toBeNull();
+    expect(
+      parseAgentKey(readEnvValue(created.content, "LAUN_KEY")!),
+    ).not.toBeNull();
 
     // re-running keeps the same gateway token and key
     const again = ensureEnv(envPath, examplePath);
@@ -116,7 +188,10 @@ describe("env generation", () => {
     expect(statSync(envPath).mode & 0o777).toBe(0o600);
 
     // an existing hand-written token is preserved verbatim
-    const custom = upsertEnv("GATEWAY_TOKEN=my-own-token\nLAUN_KEY=\n", { GATEWAY_TOKEN: "generated", LAUN_KEY: "laun_aabbccdd_x" });
+    const custom = upsertEnv("GATEWAY_TOKEN=my-own-token\nLAUN_KEY=\n", {
+      GATEWAY_TOKEN: "generated",
+      LAUN_KEY: "laun_aabbccdd_x",
+    });
     expect(readEnvValue(custom, "GATEWAY_TOKEN")).toBe("my-own-token");
     expect(readEnvValue(custom, "LAUN_KEY")).toBe("laun_aabbccdd_x");
   });
@@ -144,26 +219,43 @@ describe("ssh layer", () => {
     const calls: Array<{ argv: string[]; stdin?: string }> = [];
     const runner: CommandRunner = async (argv, opts) => {
       calls.push({ argv, stdin: opts?.stdin });
-      return { code: 0, stdout: "==> done\nLAUN_DIR=/opt/laun\nLAUN_PORT=8081\nLAUN_KEY=laun_aabbccdd_secretsecretsecretsecret\n", stderr: "" };
+      return {
+        code: 0,
+        stdout:
+          "==> done\nLAUN_DIR=/opt/laun\nLAUN_PORT=8081\nLAUN_KEY=laun_aabbccdd_secretsecretsecretsecret\n",
+        stderr: "",
+      };
     };
     const key = "laun_aabbccdd_secretsecretsecretsecret";
     const result = await runRemoteSetup({
       ...spec,
       remoteDir: "/opt/laun",
-      repoUrl: "git@github.com:me/laun.git",
+      repoUrl: "https://github.com/me/laun.git",
+      revision: "a".repeat(40),
       envContent: `GATEWAY_TOKEN=super-secret-token\nLAUN_KEY=${key}\n`,
       bootstrapScript: "#!/usr/bin/env bash\nset -euo pipefail\n",
       runner,
     });
 
     expect(result).toEqual({ key, port: 8081, dir: "/opt/laun" });
-    expect(calls).toHaveLength(3);
-    expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain("installation path has a symlink ancestor");
+    expect(calls).toHaveLength(4);
+    expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain(
+      "installation path has a symlink ancestor",
+    );
     // non-root users need the sudo fallback for paths such as /opt/...
-    expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain("sudo -n mkdir -m");
-    expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain("it will not be chowned");
-    expect(calls[1]!.argv[calls[1]!.argv.length - 1]).toContain("remote configuration differs");
-    expect(calls[2]!.argv[calls[2]!.argv.length - 1]).toBe("bash -s -- '/opt/laun' 'git@github.com:me/laun.git'");
+    expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain(
+      "sudo -n mkdir -m",
+    );
+    expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain(
+      "it will not be chowned",
+    );
+    expect(calls[1]!.argv[calls[1]!.argv.length - 1]).toContain(
+      "remote configuration differs",
+    );
+    expect(calls[2]!.argv.at(-1)).toContain("sha256sum --check --status");
+    expect(calls[3]!.argv[calls[3]!.argv.length - 1]).toBe(
+      `bash -s -- '/opt/laun' 'https://github.com/me/laun.git' '${"a".repeat(40)}'`,
+    );
     // the env travels on stdin, and no secret ever appears in argv
     expect(calls[1]!.stdin).toContain(key);
     for (const call of calls) {
@@ -177,17 +269,37 @@ describe("ssh layer", () => {
     const runner: CommandRunner = async () => {
       call++;
       // mkdir and env write succeed; the bootstrap itself fails without a key
-      return call < 3 ? { code: 0, stdout: "", stderr: "" } : { code: 1, stdout: "==> ERROR: boom", stderr: "nope" };
+      return call < 3
+        ? { code: 0, stdout: "", stderr: "" }
+        : { code: 1, stdout: "==> ERROR: boom", stderr: "nope" };
     };
     await expect(
-      runRemoteSetup({ ...spec, remoteDir: "/opt/laun-test", envContent: "x", bootstrapScript: "y", runner }),
+      runRemoteSetup({
+        ...spec,
+        remoteDir: "/opt/laun-test",
+        releaseOnly: true,
+        envContent: "x",
+        bootstrapScript: "y",
+        runner,
+      }),
     ).rejects.toThrow(/remote setup failed.*LAUN_KEY/s);
   });
 
   test("runRemoteSetup surfaces an ssh failure before bootstrapping", async () => {
-    const runner: CommandRunner = async () => ({ code: 255, stdout: "", stderr: "Permission denied" });
+    const runner: CommandRunner = async () => ({
+      code: 255,
+      stdout: "",
+      stderr: "Permission denied",
+    });
     await expect(
-      runRemoteSetup({ ...spec, remoteDir: "/opt/laun-test", envContent: "x", bootstrapScript: "y", runner }),
+      runRemoteSetup({
+        ...spec,
+        remoteDir: "/opt/laun-test",
+        releaseOnly: true,
+        envContent: "x",
+        bootstrapScript: "y",
+        runner,
+      }),
     ).rejects.toThrow(/ssh mkdir failed.*Permission denied/s);
   });
 
@@ -199,16 +311,23 @@ describe("ssh layer", () => {
     const origErr = process.stderr.write.bind(process.stderr);
     let seen = "";
     let r: Awaited<ReturnType<typeof bunRunner>> | null = null;
-    (process.stdout as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+    (process.stdout as unknown as { write: (s: string) => boolean }).write = (
+      s: string,
+    ) => {
       seen += s;
       return true;
     };
-    (process.stderr as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+    (process.stderr as unknown as { write: (s: string) => boolean }).write = (
+      s: string,
+    ) => {
       seen += s;
       return true;
     };
     try {
-      r = await bunRunner(["sh", "-c", "echo streamed-out; echo streamed-err >&2"], { echo: true });
+      r = await bunRunner(
+        ["sh", "-c", "echo streamed-out; echo streamed-err >&2"],
+        { echo: true },
+      );
     } finally {
       (process.stdout as unknown as { write: unknown }).write = origOut;
       (process.stderr as unknown as { write: unknown }).write = origErr;
@@ -222,7 +341,9 @@ describe("ssh layer", () => {
   test("without echo nothing is written to our own streams", async () => {
     const origOut = process.stdout.write.bind(process.stdout);
     let seen = "";
-    (process.stdout as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+    (process.stdout as unknown as { write: (s: string) => boolean }).write = (
+      s: string,
+    ) => {
       seen += s;
       return true;
     };
@@ -245,20 +366,44 @@ describe("ssh layer", () => {
 describe("parseSshTarget", () => {
   test("never produces root@ubuntu@host", () => {
     // the bug: a user embedded in the host got prefixed with the default user
-    expect(parseSshTarget("ubuntu@1.2.3.4")).toEqual({ user: "ubuntu", host: "1.2.3.4" });
-    expect(parseSshTarget("ubuntu@1.2.3.4", "root")).toEqual({ user: "root", host: "1.2.3.4" });
-    expect(parseSshTarget("root@1.2.3.4")).toEqual({ user: "root", host: "1.2.3.4" });
+    expect(parseSshTarget("ubuntu@1.2.3.4")).toEqual({
+      user: "ubuntu",
+      host: "1.2.3.4",
+    });
+    expect(parseSshTarget("ubuntu@1.2.3.4", "root")).toEqual({
+      user: "root",
+      host: "1.2.3.4",
+    });
+    expect(parseSshTarget("root@1.2.3.4")).toEqual({
+      user: "root",
+      host: "1.2.3.4",
+    });
   });
 
   test("a bare host falls back to the default user", () => {
-    expect(parseSshTarget("1.2.3.4")).toEqual({ user: "root", host: "1.2.3.4" });
-    expect(parseSshTarget("1.2.3.4", "ubuntu")).toEqual({ user: "ubuntu", host: "1.2.3.4" });
-    expect(parseSshTarget("1.2.3.4", undefined, "deploy")).toEqual({ user: "deploy", host: "1.2.3.4" });
+    expect(parseSshTarget("1.2.3.4")).toEqual({
+      user: "root",
+      host: "1.2.3.4",
+    });
+    expect(parseSshTarget("1.2.3.4", "ubuntu")).toEqual({
+      user: "ubuntu",
+      host: "1.2.3.4",
+    });
+    expect(parseSshTarget("1.2.3.4", undefined, "deploy")).toEqual({
+      user: "deploy",
+      host: "1.2.3.4",
+    });
   });
 
   test("the flag beats an embedded user, and IPv6 survives", () => {
-    expect(parseSshTarget("alice@srv.example", "bob")).toEqual({ user: "bob", host: "srv.example" });
-    expect(parseSshTarget("[2001:db8::1]", "ubuntu")).toEqual({ user: "ubuntu", host: "[2001:db8::1]" });
+    expect(parseSshTarget("alice@srv.example", "bob")).toEqual({
+      user: "bob",
+      host: "srv.example",
+    });
+    expect(parseSshTarget("[2001:db8::1]", "ubuntu")).toEqual({
+      user: "ubuntu",
+      host: "[2001:db8::1]",
+    });
   });
 
   test("an empty host is a usage error", () => {
@@ -281,7 +426,10 @@ describe("bootstrap contract", () => {
   });
 
   test("compose must not read HOME for the pi mount (sudo resolves it to /root)", () => {
-    const compose = readFileSync(join(repoRoot, "deploy", "docker-compose.yml"), "utf8");
+    const compose = readFileSync(
+      join(repoRoot, "deploy", "docker-compose.yml"),
+      "utf8",
+    );
     // regression: `${HOME}/.pi` bound /root/.pi when compose ran under sudo,
     // silently mounting an empty read-only dir and breaking pi entirely.
     expect(compose).not.toMatch(/- \$\{HOME\}\/\.pi/);
@@ -289,7 +437,10 @@ describe("bootstrap contract", () => {
     // pi must be able to create ~/.pi/agent, so the mount cannot be read-only
     expect(compose).not.toContain("/root/.pi:ro");
 
-    const bootstrap = readFileSync(join(repoRoot, "deploy", "bootstrap.sh"), "utf8");
+    const bootstrap = readFileSync(
+      join(repoRoot, "deploy", "bootstrap.sh"),
+      "utf8",
+    );
     // bootstrap resolves the invoking user's home and passes it through sudo
     expect(bootstrap).toContain("getent passwd");
     expect(bootstrap).toContain('env PI_CONFIG_DIR="$PI_CONFIG_DIR"');
@@ -309,35 +460,86 @@ describe("named targets", () => {
 
   test("save/load round-trips with the same 0600/0700 conventions as the default file", () => {
     const home = mkdtempSync(join(tmpdir(), "laun-targets-"));
-    const path = saveNamedTarget("vps1", { host: "203.0.113.9", port: 8080, scheme: "http", key: KEY, keyId: "aabbccdd" }, home);
+    const path = saveNamedTarget(
+      "vps1",
+      {
+        host: "203.0.113.9",
+        port: 8080,
+        scheme: "http",
+        key: KEY,
+        keyId: "aabbccdd",
+      },
+      home,
+    );
     expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(loadNamedTarget("vps1", home)).toEqual({ host: "203.0.113.9", port: 8080, scheme: "http", key: KEY, keyId: "aabbccdd" });
+    expect(loadNamedTarget("vps1", home)).toEqual({
+      host: "203.0.113.9",
+      port: 8080,
+      scheme: "http",
+      key: KEY,
+      keyId: "aabbccdd",
+    });
     expect(loadNamedTarget("missing", home)).toBeNull();
   });
 
   test("names are safe slugs — traversal and slashes rejected", () => {
     expect(isValidTargetName("vps1")).toBe(true);
     expect(isValidTargetName("my-host_2")).toBe(true);
-    for (const bad of ["", "..", "../x", "a/b", "a b", ".hidden", "x".repeat(65)]) {
+    for (const bad of [
+      "",
+      "..",
+      "../x",
+      "a/b",
+      "a b",
+      ".hidden",
+      "x".repeat(65),
+    ]) {
       expect(isValidTargetName(bad)).toBe(false);
     }
     const home = mkdtempSync(join(tmpdir(), "laun-targets-"));
-    expect(() => saveNamedTarget("../evil", { host: "h", port: 1, scheme: "http", key: KEY }, home)).toThrow();
+    expect(() =>
+      saveNamedTarget(
+        "../evil",
+        { host: "h", port: 1, scheme: "http", key: KEY },
+        home,
+      ),
+    ).toThrow();
   });
 
   test("list is sorted by name and skips corrupt files", () => {
     const home = mkdtempSync(join(tmpdir(), "laun-targets-"));
-    saveNamedTarget("b-host", { host: "b", port: 8080, scheme: "http", key: KEY }, home);
-    saveNamedTarget("a-host", { host: "a", port: 8080, scheme: "http", key: KEY }, home);
+    saveNamedTarget(
+      "b-host",
+      { host: "b", port: 8080, scheme: "http", key: KEY },
+      home,
+    );
+    saveNamedTarget(
+      "a-host",
+      { host: "a", port: 8080, scheme: "http", key: KEY },
+      home,
+    );
     writeFileSync(join(home, ".laun", "targets", "broken.json"), "not json{");
-    expect(listNamedTargets(home).map((t) => t.name)).toEqual(["a-host", "b-host"]);
-    expect(listNamedTargets(mkdtempSync(join(tmpdir(), "laun-targets-")))).toEqual([]);
+    expect(listNamedTargets(home).map((t) => t.name)).toEqual([
+      "a-host",
+      "b-host",
+    ]);
+    expect(
+      listNamedTargets(mkdtempSync(join(tmpdir(), "laun-targets-"))),
+    ).toEqual([]);
   });
 
   test("a named selection resolves; an absent flag keeps the current default", () => {
     const home = mkdtempSync(join(tmpdir(), "laun-targets-"));
-    saveNamedTarget("vps1", { host: "named-host", port: 8080, scheme: "http", key: KEY }, home);
-    const env = { HOME: home, LAUN_HOST: "env-host", LAUN_KEY: KEY } as NodeJS.ProcessEnv;
+    saveNamedTarget(
+      "vps1",
+      { host: "named-host", port: 8080, scheme: "http", key: KEY },
+      home,
+    );
+    const env = {
+      HOME: home,
+      LAUN_HOST: "env-host",
+      LAUN_KEY: KEY,
+    } as NodeJS.ProcessEnv;
     // Explicit --target wins over the env override.
     expect(resolveTarget(env, home, "vps1")?.host).toBe("named-host");
     // Without it, resolution is exactly what it always was (env here).
@@ -367,8 +569,14 @@ describe("target + watch + doctor commands", () => {
       port: 0,
       async fetch(req) {
         const url = new URL(req.url);
-        if (url.pathname === "/health") return Response.json({ ok: true, service: "gateway", executor: "http://x" });
-        if (url.pathname === "/sessions" && req.method === "GET") return Response.json({ sessions: [rec] });
+        if (url.pathname === "/health")
+          return Response.json({
+            ok: true,
+            service: "gateway",
+            executor: "http://x",
+          });
+        if (url.pathname === "/sessions" && req.method === "GET")
+          return Response.json({ sessions: [rec] });
         if (url.pathname === "/sessions" && req.method === "POST") {
           createdBodies.push(await req.text());
           return Response.json({ ...rec, id: "new1" });
@@ -376,17 +584,30 @@ describe("target + watch + doctor commands", () => {
         const sess = url.pathname.match(/^\/sessions\/([^/]+)$/);
         if (sess && req.method === "GET") {
           const id = sess[1]!;
-          if (id === "s1") return Response.json({ session: rec, pendingApprovals: [] });
-          if (id === "quiet") return Response.json({ session: { ...rec, id: "quiet" }, pendingApprovals: [] });
+          if (id === "s1")
+            return Response.json({ session: rec, pendingApprovals: [] });
+          if (id === "quiet")
+            return Response.json({
+              session: { ...rec, id: "quiet" },
+              pendingApprovals: [],
+            });
           return Response.json({ error: "unknown session" }, { status: 404 });
         }
         const logm = url.pathname.match(/^\/sessions\/([^/]+)\/log$/);
         if (logm) {
           const id = logm[1]!;
-          if (id !== "s1" && id !== "quiet") return Response.json({ error: "unknown session" }, { status: 404 });
+          if (id !== "s1" && id !== "quiet")
+            return Response.json({ error: "unknown session" }, { status: 404 });
           const since = Number(url.searchParams.get("since") ?? 0);
-          const events = id === "s1" ? [{ type: "done", sessionId: "s1", summary: "served" }] : [];
-          return Response.json({ sessionId: id, events, next: since + events.length });
+          const events =
+            id === "s1"
+              ? [{ type: "done", sessionId: "s1", summary: "served" }]
+              : [];
+          return Response.json({
+            sessionId: id,
+            events,
+            next: since + events.length,
+          });
         }
         return Response.json({ error: "not found" }, { status: 404 });
       },
@@ -398,16 +619,32 @@ describe("target + watch + doctor commands", () => {
     server.stop(true);
   });
 
-  function makeIo(): Io & { lines: string[]; errs: string[]; written: string[] } {
+  function makeIo(): Io & {
+    lines: string[];
+    errs: string[];
+    written: string[];
+  } {
     const lines: string[] = [];
     const errs: string[] = [];
     const written: string[] = [];
-    return { lines, errs, written, out: (l) => void lines.push(l), err: (l) => void errs.push(l), write: (t) => void written.push(t) };
+    return {
+      lines,
+      errs,
+      written,
+      out: (l) => void lines.push(l),
+      err: (l) => void errs.push(l),
+      write: (t) => void written.push(t),
+    };
   }
 
   function serverEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
     const u = new URL(base);
-    return { LAUN_HOST: u.hostname, LAUN_PORT: u.port, LAUN_KEY: KEY, ...extra } as NodeJS.ProcessEnv;
+    return {
+      LAUN_HOST: u.hostname,
+      LAUN_PORT: u.port,
+      LAUN_KEY: KEY,
+      ...extra,
+    } as NodeJS.ProcessEnv;
   }
 
   test("target add/ls round-trips; ls shows the id, never the key", async () => {
@@ -415,7 +652,23 @@ describe("target + watch + doctor commands", () => {
     const env = { HOME: home } as NodeJS.ProcessEnv;
     const u = new URL(base);
     let io = makeIo();
-    expect(await main(["target", "add", "n1", "--host", u.hostname, "--port", u.port, "--key", KEY], env, io)).toBe(0);
+    expect(
+      await main(
+        [
+          "target",
+          "add",
+          "n1",
+          "--host",
+          u.hostname,
+          "--port",
+          u.port,
+          "--key",
+          KEY,
+        ],
+        env,
+        io,
+      ),
+    ).toBe(0);
     expect(io.lines.join("\n")).toContain('saved target "n1"');
     io = makeIo();
     expect(await main(["target", "ls"], env, io)).toBe(0);
@@ -428,7 +681,9 @@ describe("target + watch + doctor commands", () => {
   });
 
   test("target add validates its inputs", async () => {
-    const env = { HOME: mkdtempSync(join(tmpdir(), "laun-targetcmd-")) } as NodeJS.ProcessEnv;
+    const env = {
+      HOME: mkdtempSync(join(tmpdir(), "laun-targetcmd-")),
+    } as NodeJS.ProcessEnv;
     for (const args of [
       ["target", "add", "n1", "--host", "h"],
       ["target", "add", "n1", "--key", KEY],
@@ -443,20 +698,56 @@ describe("target + watch + doctor commands", () => {
   test("--target selects the saved host; absent flag keeps the default (none here)", async () => {
     const home = mkdtempSync(join(tmpdir(), "laun-targetcmd-"));
     const u = new URL(base);
-    expect(await main(["target", "add", "n1", "--host", u.hostname, "--port", u.port, "--key", KEY], { HOME: home } as NodeJS.ProcessEnv, makeIo())).toBe(0);
+    expect(
+      await main(
+        [
+          "target",
+          "add",
+          "n1",
+          "--host",
+          u.hostname,
+          "--port",
+          u.port,
+          "--key",
+          KEY,
+        ],
+        { HOME: home } as NodeJS.ProcessEnv,
+        makeIo(),
+      ),
+    ).toBe(0);
     let io = makeIo();
-    expect(await main(["agent", "ls", "--target", "n1"], { HOME: home } as NodeJS.ProcessEnv, io)).toBe(0);
+    expect(
+      await main(
+        ["agent", "ls", "--target", "n1"],
+        { HOME: home } as NodeJS.ProcessEnv,
+        io,
+      ),
+    ).toBe(0);
     expect(io.lines.join("\n")).toContain("s1");
     io = makeIo();
-    expect(await main(["agent", "ls", "--target=n1"], { HOME: home } as NodeJS.ProcessEnv, io)).toBe(0);
+    expect(
+      await main(
+        ["agent", "ls", "--target=n1"],
+        { HOME: home } as NodeJS.ProcessEnv,
+        io,
+      ),
+    ).toBe(0);
     expect(io.lines.join("\n")).toContain("s1");
     // No flag, no default file, no env: the old \"not connected\" path, unchanged.
     io = makeIo();
-    expect(await main(["agent", "ls"], { HOME: home } as NodeJS.ProcessEnv, io)).toBe(2);
+    expect(
+      await main(["agent", "ls"], { HOME: home } as NodeJS.ProcessEnv, io),
+    ).toBe(2);
     expect(io.errs.join("\n")).toContain("agent auth");
     // Unknown name is a usage error naming the problem.
     io = makeIo();
-    expect(await main(["agent", "ls", "--target", "nope"], { HOME: home } as NodeJS.ProcessEnv, io)).toBe(2);
+    expect(
+      await main(
+        ["agent", "ls", "--target", "nope"],
+        { HOME: home } as NodeJS.ProcessEnv,
+        io,
+      ),
+    ).toBe(2);
     expect(io.errs.join("\n")).toContain('unknown target "nope"');
   });
 
@@ -466,20 +757,42 @@ describe("target + watch + doctor commands", () => {
     expect(await main(["agent", "watch", "s1"], env, io)).toBe(0);
     expect(io.lines).toEqual(["✅ done: served"]);
     io = makeIo();
-    expect(await main(["agent", "watch", "quiet", "--timeout", "20ms", "--poll-ms", "1"], env, io)).toBe(2);
+    expect(
+      await main(
+        ["agent", "watch", "quiet", "--timeout", "20ms", "--poll-ms", "1"],
+        env,
+        io,
+      ),
+    ).toBe(2);
     expect(io.errs.join("\n")).toMatch(/timed out/);
     io = makeIo();
     expect(await main(["agent", "watch", "nope"], env, io)).toBe(1);
     io = makeIo();
     expect(await main(["agent", "watch"], env, io)).toBe(2);
     io = makeIo();
-    expect(await main(["agent", "watch", "s1", "--timeout", "soon"], env, io)).toBe(2);
+    expect(
+      await main(["agent", "watch", "s1", "--timeout", "soon"], env, io),
+    ).toBe(2);
   });
 
   test("agent new forwards --repo and --runtime", async () => {
     const env = serverEnv();
     const io = makeIo();
-    expect(await main(["agent", "new", "do thing", "--repo", "https://example.com/r.git", "--runtime", "goose"], env, io)).toBe(0);
+    expect(
+      await main(
+        [
+          "agent",
+          "new",
+          "do thing",
+          "--repo",
+          "https://example.com/r.git",
+          "--runtime",
+          "goose",
+        ],
+        env,
+        io,
+      ),
+    ).toBe(0);
     expect(io.lines.join("\n")).toContain("new1");
     const body = JSON.parse(createdBodies[createdBodies.length - 1]!);
     expect(body.goal).toBe("do thing");
@@ -499,10 +812,23 @@ describe("target + watch + doctor commands", () => {
 
   test("doctor: no target, dead gateway, and bad usage exit 1, 1, 2", async () => {
     let io = makeIo();
-    expect(await main(["doctor"], { HOME: mkdtempSync(join(tmpdir(), "laun-doctor-")) } as NodeJS.ProcessEnv, io)).toBe(1);
+    expect(
+      await main(
+        ["doctor"],
+        {
+          HOME: mkdtempSync(join(tmpdir(), "laun-doctor-")),
+        } as NodeJS.ProcessEnv,
+        io,
+      ),
+    ).toBe(1);
     expect(io.lines.join("\n")).toContain("no target");
     io = makeIo();
-    const env = { HOME: mkdtempSync(join(tmpdir(), "laun-doctor-")), LAUN_HOST: "127.0.0.1", LAUN_PORT: "9", LAUN_KEY: KEY } as NodeJS.ProcessEnv;
+    const env = {
+      HOME: mkdtempSync(join(tmpdir(), "laun-doctor-")),
+      LAUN_HOST: "127.0.0.1",
+      LAUN_PORT: "9",
+      LAUN_KEY: KEY,
+    } as NodeJS.ProcessEnv;
     expect(await main(["doctor"], env, io)).toBe(1);
     expect(io.lines.join("\n")).toContain("unreachable");
     io = makeIo();
@@ -511,11 +837,22 @@ describe("target + watch + doctor commands", () => {
 });
 
 describe("lane-cli-drive help + status usage", () => {
-  function makeIo(): Io & { lines: string[]; errs: string[]; written: string[] } {
+  function makeIo(): Io & {
+    lines: string[];
+    errs: string[];
+    written: string[];
+  } {
     const lines: string[] = [];
     const errs: string[] = [];
     const written: string[] = [];
-    return { lines, errs, written, out: (l) => void lines.push(l), err: (l) => void errs.push(l), write: (t) => void written.push(t) };
+    return {
+      lines,
+      errs,
+      written,
+      out: (l) => void lines.push(l),
+      err: (l) => void errs.push(l),
+      write: (t) => void written.push(t),
+    };
   }
 
   test("help documents --steer/--queue and the status usage line", async () => {
@@ -542,13 +879,26 @@ describe("lane-cli-drive help + status usage", () => {
       port: 0,
       async fetch(req) {
         const url = new URL(req.url);
-        if (url.pathname === "/sessions/s9") return Response.json({ session: rec, pendingApprovals: [] });
+        if (url.pathname === "/sessions/s9")
+          return Response.json({ session: rec, pendingApprovals: [] });
         if (url.pathname === "/sessions/s9/log")
           return Response.json({
             sessionId: "s9",
             events: [
-              { type: "usage", sessionId: "s9", inputTokens: 3, outputTokens: 4, totalTokens: 7 },
-              { type: "usage", sessionId: "s9", inputTokens: 2, outputTokens: 1, totalTokens: 3 },
+              {
+                type: "usage",
+                sessionId: "s9",
+                inputTokens: 3,
+                outputTokens: 4,
+                totalTokens: 7,
+              },
+              {
+                type: "usage",
+                sessionId: "s9",
+                inputTokens: 2,
+                outputTokens: 1,
+                totalTokens: 3,
+              },
             ],
             next: 2,
           });
@@ -557,8 +907,18 @@ describe("lane-cli-drive help + status usage", () => {
           const body = (await req.json().catch(() => ({}))) as unknown;
           seenBodies.push(body);
           const mode = (body as { mode?: string }).mode;
-          if (mode === "steer") return Response.json({ accepted: true, sessionId: m[1], outcome: "steered" });
-          if (mode === "queue") return Response.json({ accepted: true, sessionId: m[1], outcome: "queued" });
+          if (mode === "steer")
+            return Response.json({
+              accepted: true,
+              sessionId: m[1],
+              outcome: "steered",
+            });
+          if (mode === "queue")
+            return Response.json({
+              accepted: true,
+              sessionId: m[1],
+              outcome: "queued",
+            });
           return Response.json({ accepted: true, sessionId: m[1] });
         }
         return Response.json({ error: "not found" }, { status: 404 });
@@ -566,14 +926,22 @@ describe("lane-cli-drive help + status usage", () => {
     });
     try {
       const u = new URL(`http://localhost:${server.port}`);
-      const env = { LAUN_HOST: u.hostname, LAUN_PORT: u.port, LAUN_KEY: "laun_aabbccdd_" + "x".repeat(30) } as NodeJS.ProcessEnv;
+      const env = {
+        LAUN_HOST: u.hostname,
+        LAUN_PORT: u.port,
+        LAUN_KEY: "laun_aabbccdd_" + "x".repeat(30),
+      } as NodeJS.ProcessEnv;
       let io = makeIo();
-      expect(await main(["agent", "say", "s9", "left", "--queue"], env, io)).toBe(0);
+      expect(
+        await main(["agent", "say", "s9", "left", "--queue"], env, io),
+      ).toBe(0);
       expect(seenBodies.at(-1)).toEqual({ text: "left", mode: "queue" });
       expect(io.lines.join("\n")).toContain("(replaces older)");
       io = makeIo();
       expect(await main(["agent", "status", "s9"], env, io)).toBe(0);
-      expect(io.lines[io.lines.length - 1]).toBe("📊 usage: in 5, out 5, total 10");
+      expect(io.lines[io.lines.length - 1]).toBe(
+        "📊 usage: in 5, out 5, total 10",
+      );
     } finally {
       server.stop(true);
     }

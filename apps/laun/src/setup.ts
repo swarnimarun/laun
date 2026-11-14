@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -14,6 +14,7 @@ import { UsageError } from "./args.js";
 import { bunRunner, runRemoteSetup, type CommandRunner } from "./ssh.js";
 import { readEnvValue, setupComposeFiles } from "./compose-profile.js";
 import { deploymentAssets, deploymentFiles } from "./assets.js";
+import { createControllerSourceArchive, CONTROLLER_QUALIFICATION_SCRIPT } from "./controller-source.js";
 export { readEnvValue, setupComposeFiles } from "./compose-profile.js";
 
 export function randomToken(): string {
@@ -241,6 +242,22 @@ export async function localSetup(
       );
       if (pulled.code !== 0)
         throw new Error(`docker compose pull failed with code ${pulled.code}`);
+      const image = serviceImage || `${process.env.LAUN_IMAGE || readEnvValue(env.content, "LAUN_IMAGE") || "ghcr.io/swarnimarun/laun"}:${dockerEnv.LAUN_TAG || process.env.LAUN_TAG || readEnvValue(env.content, "LAUN_TAG") || "latest"}`;
+      const name = `laun-contract-${randomUUID()}`;
+      let qualified = false;
+      try {
+        const result = await run([
+          "docker", "run", "--rm", "--name", name, "--network", "none", "--read-only",
+          "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "128",
+          "--memory", "512m", "--cpus", "1", "--tmpfs", "/tmp:rw,nosuid,nodev,size=96m",
+          "--env", "HOME=/tmp", "--env", "BUN_RUNTIME_TRANSPILER_CACHE_PATH=/tmp/bun-transpile",
+          "--entrypoint", "bun", image, "-e", CONTROLLER_QUALIFICATION_SCRIPT, "/app",
+        ], {stdio:"inherit", timeoutMs:60_000});
+        if (result.code !== 0) throw new Error("pulled image lacks the required v2 owner/durable/inference contract; existing data was not mounted and stack was not started");
+        qualified = true;
+      } finally {
+        if (!qualified) await run(["docker", "rm", "--force", name], {timeoutMs:10_000}).catch(() => {});
+      }
     }
     const res = await run(
       [
@@ -316,9 +333,56 @@ export interface RemoteSetupOptions {
 }
 
 export async function remoteSetup(opts: RemoteSetupOptions) {
+  if (
+    (opts.repoUrl === undefined) !== (opts.revision === undefined) ||
+    (opts.revision && !/^[a-f0-9]{40}$/.test(opts.revision))
+  )
+    throw new UsageError(
+      "controller source SSH requires an explicit repository and exact 40-hex revision together",
+    );
+  if (opts.repoUrl) {
+    let repository: URL;
+    try {
+      repository = new URL(opts.repoUrl);
+    } catch {
+      throw new UsageError(
+        "controller source repository must be credential-free HTTPS",
+      );
+    }
+    if (
+      repository.protocol !== "https:" ||
+      repository.username ||
+      repository.password ||
+      repository.search ||
+      repository.hash
+    )
+      throw new UsageError(
+        "controller source repository must be credential-free HTTPS",
+      );
+  }
   const envPath = resolve(opts.envFile);
   const assets = deploymentAssets(opts.checkoutRoot ?? repoRoot(), envPath),
     root = assets.root;
+  const sourceArchive =
+    !assets.bundled && !opts.repoUrl
+      ? await createControllerSourceArchive(root)
+      : undefined;
+  const publicFiles = sourceArchive
+    ? deploymentFiles().map((file) => {
+        const source = sourceArchive.files.find(
+          (entry) => entry.path === file.path,
+        );
+        if (!source)
+          throw new UsageError(
+            `controller source is missing public deployment template: ${file.path}`,
+          );
+        return {
+          path: source.path,
+          content: Buffer.from(source.content, "base64").toString("utf8"),
+          sha256: source.sha256,
+        };
+      })
+    : undefined;
   const env = ensureEnv(envPath, join(root, "deploy", ".env.example"), {
     openshellEnabled: true,
     ...(assets.bundled
@@ -342,7 +406,10 @@ export async function remoteSetup(opts: RemoteSetupOptions) {
     noStart: opts.noStart,
     envContent: env.content,
     bootstrapScript: readFileSync(bootstrapPath, "utf8"),
-    assets: assets.bundled && !opts.repoUrl ? deploymentFiles() : undefined,
+    assets:
+      publicFiles ??
+      (assets.bundled && !opts.repoUrl ? deploymentFiles() : undefined),
+    sourceArchive,
     releaseOnly: assets.bundled && !opts.repoUrl,
     runner: opts.runner ?? bunRunner,
   });

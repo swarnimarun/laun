@@ -13,23 +13,47 @@ export class V2GatewayError extends Error {
     super(message);
   }
 }
+export function telegramControllerUrl(
+  value: string,
+  allowInsecureNetwork = false,
+): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(
+      "invalid bridge controller URL; use credential-free HTTPS or local HTTP",
+    );
+  }
+  if (
+    url.username ||
+    url.password ||
+    url.hash ||
+    url.search ||
+    !["http:", "https:"].includes(url.protocol)
+  )
+    throw new Error(
+      "invalid bridge controller URL; credentials, query and fragments are not allowed",
+    );
+  if (
+    url.protocol === "http:" &&
+    !["localhost", "127.0.0.1", "[::1]", "::1"].includes(url.hostname) &&
+    allowInsecureNetwork !== true
+  )
+    throw new Error(
+      "remote bridge controllers require HTTPS; BRIDGE_ALLOW_INSECURE_NETWORK=true is an explicit trusted-network exception",
+    );
+  return url.href.replace(/\/$/, "");
+}
 export class V2GatewayClient {
   constructor(
     private base: string,
     private token: string,
     readonly botId: string,
     private fetcher: typeof fetch = fetch,
+    options: { allowInsecureNetwork?: boolean } = {},
   ) {
-    const url = new URL(base);
-    if (
-      url.username ||
-      url.password ||
-      url.hash ||
-      url.search ||
-      !["http:", "https:"].includes(url.protocol)
-    )
-      throw new Error("invalid bridge gateway URL");
-    this.base = url.href.replace(/\/$/, "");
+    this.base = telegramControllerUrl(base, options.allowInsecureNetwork);
   }
   private async request<T>(path: string, body: unknown): Promise<T> {
     const controller = new AbortController();

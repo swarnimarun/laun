@@ -100,6 +100,21 @@ test("source CLI respects a full service image override and never builds a diges
   expect(calls.at(-1)).toContain("--no-build");
   expect(calls.flat()).not.toContain("--build");
 });
+test("local pulled legacy images fail isolated qualification before mounting existing data", async () => {
+  const dir = await scratch(), env = join(dir,"install.env"), calls: string[][] = [];
+  const image=`registry.example/legacy@sha256:${"c".repeat(64)}`;
+  await writeFile(env,`OPENSHELL_ENABLED=false\nLAUN_SERVICE_IMAGE=${image}\n`);
+  await expect(localSetup({envFile:env,composeFile:join(repo,"deploy/docker-compose.yml"),host:"127.0.0.1",noStart:false,runner:async(argv,options)=>{
+    calls.push(argv);
+    if(argv[1]==="run") {expect(options?.timeoutMs).toBe(60_000);return{code:1,stdout:"",stderr:"old image"};}
+    return{code:0,stdout:"",stderr:""};
+  }})).rejects.toThrow("stack was not started");
+  const probe=calls.find(call=>call[1]==="run")!;
+  expect(probe).toContain(image);expect(probe).toContain("--read-only");expect(probe.slice(probe.indexOf("--network"),probe.indexOf("--network")+2)).toEqual(["--network","none"]);
+  expect(probe).not.toContain("--env-file");expect(probe).not.toContain("--volume");
+  expect(calls.some(call=>call.includes("up"))).toBe(false);
+  expect(calls.at(-1)?.slice(0,3)).toEqual(["docker","rm","--force"]);
+});
 test("existing writable asset cache is refused before template execution", async () => {
   if (typeof process.getuid !== "function") return;
   const dir = await scratch(),

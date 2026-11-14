@@ -2,6 +2,7 @@
 export const CLI_ASSET_PATHS = [
   "deploy/.env.example",
   "deploy/bootstrap.sh",
+  "deploy/controller-contract.js",
   "deploy/install-bun.sh",
   "deploy/compose-profile.sh",
   "deploy/docker-compose.yml",

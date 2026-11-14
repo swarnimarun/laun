@@ -10,6 +10,7 @@ import {
 import type { ThreadRecord } from "@laun/protocol";
 import type { BridgeConfig } from "./config.js";
 import { V2GatewayClient } from "./v2client.js";
+import { loadConfig } from "./config.js";
 import { V2Delivery, type TelegramSender } from "./v2delivery.js";
 const cleanups: Array<() => unknown | Promise<unknown>> = [];
 afterEach(async () => {
@@ -134,6 +135,67 @@ function bridge(
   cleanups.push(() => delivery.stop());
   return delivery;
 }
+test("v2 credentials require TLS outside loopback unless trusted network HTTP is explicitly configured", () => {
+  const environment = {
+    GATEWAY_TOKEN: "fixture-secret",
+    LAUN_CONTROL_V2: "true",
+  };
+  for (const url of [
+    "http://public.example:8080",
+    "http://10.0.0.2:8080",
+    "http://gateway:8080",
+  ]) {
+    expect(() => new V2GatewayClient(url, "secret", "123")).toThrow(
+      "require HTTPS",
+    );
+    expect(() => loadConfig({ ...environment, GATEWAY_URL: url })).toThrow(
+      "require HTTPS",
+    );
+    expect(
+      loadConfig({
+        ...environment,
+        GATEWAY_URL: url,
+        BRIDGE_ALLOW_INSECURE_NETWORK: "true",
+      }).allowInsecureNetwork,
+    ).toBe(true);
+    expect(
+      () =>
+        new V2GatewayClient(url, "secret", "123", undefined, {
+          allowInsecureNetwork: true,
+        }),
+    ).not.toThrow();
+  }
+  for (const url of [
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    "http://[::1]:8080",
+    "https://public.example",
+  ]) {
+    expect(() => new V2GatewayClient(url, "secret", "123")).not.toThrow();
+    expect(() =>
+      loadConfig({ ...environment, GATEWAY_URL: url }),
+    ).not.toThrow();
+  }
+  expect(() =>
+    loadConfig({ ...environment, BRIDGE_ALLOW_INSECURE_NETWORK: "yes" }),
+  ).toThrow("true or false");
+  expect(
+    () =>
+      new V2GatewayClient(
+        "https://user:secret@public.example",
+        "secret",
+        "123",
+        undefined,
+        { allowInsecureNetwork: true },
+      ),
+  ).toThrow("credentials");
+  expect(
+    loadConfig({
+      GATEWAY_TOKEN: "legacy-fixture",
+      GATEWAY_URL: "http://legacy.example",
+    }).controlV2,
+  ).toBe(false);
+});
 
 test("unlink during the throttle interval is revalidated immediately before send", async () => {
   const c = fixture();

@@ -141,7 +141,7 @@ test("real local SSH substitute exercises safe publication before a fake bootstr
   let bootstraps = 0;
   const runner: CommandRunner = async (argv, options) => {
     const command = argv.at(-1)!;
-    if (command.startsWith("bash -s")) {
+    if (command.includes("bash -s --")) {
       bootstraps++;
       return { code: 0, stdout: `LAUN_KEY=${key}\n`, stderr: "" };
     }
@@ -153,6 +153,7 @@ test("real local SSH substitute exercises safe publication before a fake bootstr
     remoteDir: directory,
     envContent: `LAUN_KEY=${key}\n`,
     bootstrapScript: "fixture",
+    releaseOnly: true,
     runner,
   };
   await runRemoteSetup(opts);
@@ -172,7 +173,7 @@ test("matching existing templates still reject group-writable executable content
   let bootstraps = 0;
   const runner: CommandRunner = async (argv, options) => {
     const command = argv.at(-1)!;
-    if (command.startsWith("bash -s")) {
+    if (command.includes("bash -s --")) {
       bootstraps++;
       return { code: 0, stdout: `LAUN_KEY=${key}\n`, stderr: "" };
     }
@@ -184,6 +185,7 @@ test("matching existing templates still reject group-writable executable content
     remoteDir: directory,
     envContent: `LAUN_KEY=${key}\n`,
     bootstrapScript: "fixture",
+    releaseOnly: true,
     runner,
     assets: [
       {
