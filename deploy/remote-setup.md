@@ -9,9 +9,9 @@ you can also run the steps by hand.
 - A VPS running Debian or Ubuntu.
 - SSH access with a private key, as `root` or as a user with passwordless
   `sudo`. The script runs `apt-get`, installs Docker, and starts containers.
-- Ports `8080` (gateway, API + browser UI) and `8081` (executor) reachable from
-  where you will connect from — or a reverse proxy / SSH tunnel in front of
-  them.
+- Gateway port `8080` is bound to host loopback. Use an SSH tunnel or TLS
+  reverse proxy for remote access. Executor port `8081` is loopback-only for
+  local diagnostics; gateway traffic uses the private compose network.
 - ~2 GB RAM. `docker compose --build` on a 512 MB box will usually fail; add
   swap or build the images elsewhere.
 - Either network access to the git remote for the repo, or a checkout already
@@ -22,6 +22,68 @@ you can also run the steps by hand.
 ```bash
 laun setup ssh -i ~/.ssh/id_ed25519 root@203.0.113.9
 ```
+
+### Developer and isolated VPS profiles
+
+Fresh `laun setup ssh` and `deploy/install.sh` configurations default to
+`OPENSHELL_ENABLED=true`. They refuse to start until the target OpenShell
+identity and provider are configured. Existing explicit values are preserved;
+set `OPENSHELL_ENABLED=false` only when deliberately choosing trusted host
+execution. Local `laun setup` defaults to false.
+
+The base `deploy/docker-compose.yml` is trusted local development:
+`OPENSHELL_ENABLED=false`, no OpenShell certificates or gateway route, and
+private application ports. It runs Pi on the executor host. It provides no
+isolation from that host's user files.
+
+For an isolated VPS, first provision OpenShell and the model provider on that
+host and verify the boundary with `deploy/openshell/install-and-verify.sh`.
+Then configure these **non-secret** values in the env file that setup sends:
+
+```dotenv
+OPENSHELL_ENABLED=true
+EXECUTOR_MODE=rpc
+OPENSHELL_CONFIG_DIR=/home/YOUR_USER/.config/openshell
+OPENSHELL_GATEWAY_NAME=openshell
+OPENSHELL_PROVIDER=laun-model
+OPENSHELL_SDK_GATEWAY=https://host.openshell.internal:17670
+OPENSHELL_GATEWAY_CONFIG_ID=https___host.openshell.internal_17670
+```
+
+`OPENSHELL_CONFIG_DIR` is a directory on the target host. Its
+`gateways/<name>/mtls` directory must contain nonempty, readable `ca.crt`,
+`tls.crt`, and `tls.key`. Setup chooses the OpenShell overlay when enabled,
+checks these files, and refuses an incomplete isolated configuration. It
+does not turn isolation off to get an installation running. Gateway reachability,
+certificate trust, provider availability, and actual policy enforcement still
+require a real sandbox probe; config validation alone cannot establish them.
+
+Setup accepts static dotenv values, including single/double quotes, comments,
+and `export NAME=value`. Isolation settings must be single-line literal
+values; variable interpolation is rejected so preflight and Compose cannot
+select different paths. The CLI and shell installer use the same Bun reader
+and HTTPS URL validation. Embedded endpoint credentials are rejected.
+
+The default hostname reaches the Docker host via `host-gateway`; the
+OpenShell gateway's certificate must include that hostname and its protected
+listener must be reachable from the executor container. For another HTTPS
+endpoint, also set the CLI identity directory `OPENSHELL_GATEWAY_CONFIG_ID`
+to the directory OpenShell derives from that endpoint. No insecure-TLS
+fallback is configured. The overlay mounts only mTLS material from the named
+host identity, read-only, without assuming an Ubuntu username.
+
+Both `laun setup`, `laun setup ssh`, and `deploy/install.sh` select this
+overlay. Manual isolated operations must include it every time:
+
+```bash
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.openshell.yml --env-file .env config --quiet
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.openshell.yml --env-file .env up -d
+```
+
+Manual local development uses only the base file with
+`OPENSHELL_ENABLED=false`. Accidentally enabling the base without the overlay
+leaves the executor without a sandbox image/transport configuration and it
+fails startup rather than running unsandboxed.
 
 Useful flags:
 

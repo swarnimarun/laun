@@ -1,0 +1,37 @@
+# Isolated VPS overlay: combine with docker-compose.yml, never run alone.
+# Required host configuration and certificates are checked before startup by
+# setup/install. No host username or private key is baked into this file.
+services:
+  executor:
+    environment:
+      OPENSHELL_ENABLED: "true"
+      EXECUTOR_MODE: ${EXECUTOR_MODE:-rpc}
+      OPENSHELL_SANDBOX_IMAGE: ${OPENSHELL_SANDBOX_IMAGE:-ghcr.io/swarnimarun/laun-pi-agent:${LAUN_TAG:-latest}}
+      OPENSHELL_POLICY: ${OPENSHELL_POLICY:-/openshell/policy.yaml}
+      OPENSHELL_PROVIDER: ${OPENSHELL_PROVIDER:?set OPENSHELL_PROVIDER to a provisioned model provider}
+      OPENSHELL_APPROVAL_MODE: ${OPENSHELL_APPROVAL_MODE:-manual}
+      OPENSHELL_SANDBOX_MAX_IDLE_MS: ${OPENSHELL_SANDBOX_MAX_IDLE_MS:-604800000}
+      OPENSHELL_SDK_GATEWAY: ${OPENSHELL_SDK_GATEWAY:-https://host.openshell.internal:17670}
+      OPENSHELL_GATEWAY_ENDPOINT: ${OPENSHELL_SDK_GATEWAY:-https://host.openshell.internal:17670}
+      OPENSHELL_SDK_INSECURE: "false"
+      OPENSHELL_GATEWAY_INSECURE: "false"
+      OPENSHELL_SDK_CLIENT_CERT_FILE: /openshell-mtls/tls.crt
+      OPENSHELL_SDK_CLIENT_KEY_FILE: /openshell-mtls/tls.key
+      OPENSHELL_SDK_CA_FILE: /openshell-mtls/ca.crt
+    extra_hosts:
+      - "host.openshell.internal:host-gateway"
+    volumes:
+      - type: bind
+        source: ${OPENSHELL_CONFIG_DIR:?set OPENSHELL_CONFIG_DIR to the host OpenShell config directory}/gateways/${OPENSHELL_GATEWAY_NAME:-openshell}/mtls
+        target: /openshell-mtls
+        read_only: true
+        bind:
+          create_host_path: false
+      # The current CLI indexes mTLS identity by its sanitized endpoint URL.
+      # For another endpoint set OPENSHELL_GATEWAY_CONFIG_ID accordingly.
+      - type: bind
+        source: ${OPENSHELL_CONFIG_DIR:?set OPENSHELL_CONFIG_DIR}/gateways/${OPENSHELL_GATEWAY_NAME:-openshell}/mtls
+        target: /root/.config/openshell/gateways/${OPENSHELL_GATEWAY_CONFIG_ID:-https___host.openshell.internal_17670}/mtls
+        read_only: true
+        bind:
+          create_host_path: false

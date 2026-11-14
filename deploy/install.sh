@@ -30,7 +30,7 @@ if ! need pi; then
 fi
 if ! need openshell; then
   echo "==> Installing OpenShell (best-effort)"
-  curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh || echo "OpenShell install failed — continuing with OPENSHELL_ENABLED=false"
+  curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh || echo "OpenShell install failed — isolated setup still requires a provisioned gateway identity"
 fi
 
 # LAUN_TAG set = deploy released images (no local build); unset = build from this checkout.
@@ -42,11 +42,16 @@ fi
 if [ ! -f .env ]; then
   echo "==> Creating .env from deploy/.env.example (EDIT IT NOW)"
   cp deploy/.env.example .env
+  # This is the VPS installer. Local `laun setup` keeps its own default off.
+  sed -i 's/^OPENSHELL_ENABLED=.*/OPENSHELL_ENABLED=true/' .env
   echo "    Fill in GATEWAY_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWLIST_IDS."
   echo "    Model auth comes from this host's pi login (~/.pi/agent/auth.json) — see examples/models.md."
 fi
 
-COMPOSE=(docker compose -f deploy/docker-compose.yml --env-file .env)
+source "$REPO_DIR/deploy/compose-profile.sh"
+laun_compose_profile "$REPO_DIR/.env" "$REPO_DIR/deploy/docker-compose.yml" true
+COMPOSE=(docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env)
+"${COMPOSE[@]}" config --quiet
 
 if [ -n "${LAUN_TAG:-}" ]; then
   echo "==> Pulling released images (LAUN_TAG=$LAUN_TAG)"
@@ -55,7 +60,7 @@ if [ -n "${LAUN_TAG:-}" ]; then
 else
   echo "==> Typecheck + tests"
   bun run build
-  bun test
+  bun run test
 
   echo "==> Building the image from this checkout"
   "${COMPOSE[@]}" up -d --build
@@ -67,6 +72,6 @@ if [ -n "${LAUN_TAG:-}" ]; then UPS='up -d'; fi
 echo ""
 echo "Done. Next:"
 echo "  1. Edit .env (tokens, allowlist, MODEL)"
-echo "  2. docker compose -f deploy/docker-compose.yml --env-file .env $UPS"
+echo "  2. ${COMPOSE[*]} $UPS"
 echo "  3. curl localhost:8080/health && curl localhost:8081/health"
 echo "  4. Message your Telegram bot: /new fix failing tests"

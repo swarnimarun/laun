@@ -2,15 +2,23 @@
 
 Self-hosted remote agent runner. Pi-first executor, OpenShell policy sandbox, Telegram bridge. One VPS, on 24/7.
 
+The [reviewed mower-harness plan](docs/design/README.md) covers durable threads,
+permissions, director delegation, MCP and multiple VPS hosts. The
+[implementation ledger](docs/design/implementation.md) separates working
+foundations from the remaining fleet and broker work.
+
 ```
 Telegram / CLI / browser -> gateway -> executor (pi via rpc) -> your repo/container
 ```
 
-Sandboxing (OpenShell) is built but disabled: the executor can already
-create per-session sandboxes and run one-shot commands inside them, but
-long-lived rpc needs the SDK transport and session files need a workdir
-mapping first — see `docs/roadmap.md` P0. `OPENSHELL_ENABLED` stays `false`
-until then.
+The base compose profile runs trusted local development with OpenShell off.
+Isolated VPS installs use `deploy/docker-compose.openshell.yml`, which enables
+OpenShell and mounts an explicitly configured host mTLS identity. Setup selects
+the overlay when `OPENSHELL_ENABLED=true` and refuses missing identity files.
+Fresh VPS setup defaults to true; local setup defaults to false. Existing
+explicit settings are preserved.
+See [deployment profiles](deploy/remote-setup.md#developer-and-isolated-vps-profiles)
+for gateway/provider provisioning and the required live enforcement probe.
 
 ## Quick start (one command)
 

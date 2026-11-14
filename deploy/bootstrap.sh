@@ -177,8 +177,15 @@ else
   fi
   chmod 600 "$ENV_FILE"
 
+  # The isolation overlay is mandatory when requested; no missing identity
+  # or invalid configuration may silently select the developer profile.
+  source "$REMOTE_DIR/deploy/compose-profile.sh"
+  laun_compose_profile "$ENV_FILE" "$REMOTE_DIR/deploy/docker-compose.yml" true \
+    || die "compose profile preflight failed"
   log "starting the stack (docker compose up -d --build)"
-  (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" docker compose -f deploy/docker-compose.yml --env-file .env up -d --build) \
+  (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env config --quiet) \
+    || die "docker compose configuration is invalid"
+  (cd "$REMOTE_DIR" && $SUDO env PI_CONFIG_DIR="$PI_CONFIG_DIR" docker compose "${LAUN_COMPOSE_FILES[@]}" --env-file .env up -d --build) \
     || die "docker compose up failed — inspect: cd $REMOTE_DIR && docker compose logs"
   healthy=0
   for _ in $(seq 1 20); do
@@ -191,7 +198,7 @@ else
   if [ "$healthy" = "1" ]; then
     log "gateway is healthy on port ${GATEWAY_PORT}"
   else
-    warn "gateway health check did not pass yet — check: cd $REMOTE_DIR && docker compose logs"
+    die "gateway health check did not pass — inspect the compose logs"
   fi
 fi
 

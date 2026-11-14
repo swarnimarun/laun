@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { formatAgentKey } from "@laun/protocol";
 import { UsageError } from "./args.js";
 import { bunRunner, runRemoteSetup, type CommandRunner } from "./ssh.js";
+import { readEnvValue, setupComposeFiles } from "./compose-profile.js";
+export { readEnvValue, setupComposeFiles } from "./compose-profile.js";
 
 export function randomToken(): string {
   return randomBytes(32).toString("base64url");
@@ -28,13 +30,13 @@ export function upsertEnv(content: string, updates: Record<string, string>): str
   const out: string[] = [];
   const handled = new Set<string>();
   for (const line of content.split("\n")) {
-    const m = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/);
     if (!m) {
       out.push(line);
       continue;
     }
     const name = m[1]!;
-    const current = m[2]!.trim();
+    const current = readEnvValue(line, name) ?? "";
     if (name in updates) {
       handled.add(name);
       if (isPlaceholder(current)) {
@@ -66,9 +68,12 @@ export interface EnvResult {
  * either one only when needed. Returns the values so the caller can print the
  * connection block.
  */
-export function ensureEnv(envPath: string, examplePath: string): EnvResult {
+export function ensureEnv(envPath: string, examplePath: string, defaults: { openshellEnabled?: boolean } = {}): EnvResult {
   const created = !existsSync(envPath);
-  const example = existsSync(examplePath) ? readFileSync(examplePath, "utf8") : "";
+  let example = existsSync(examplePath) ? readFileSync(examplePath, "utf8") : "";
+  if (defaults.openshellEnabled !== undefined) {
+    example = example.replace(/^OPENSHELL_ENABLED=.*$/m, `OPENSHELL_ENABLED=${defaults.openshellEnabled}`);
+  }
   const base = created
     ? example || "GATEWAY_TOKEN=\nLAUN_KEY=\n"
     : readFileSync(envPath, "utf8");
@@ -84,6 +89,7 @@ export function ensureEnv(envPath: string, examplePath: string): EnvResult {
   }
   updates["GATEWAY_TOKEN"] = randomToken();
   updates["LAUN_KEY"] = randomAgentKey();
+  if (defaults.openshellEnabled !== undefined) updates["OPENSHELL_ENABLED"] = String(defaults.openshellEnabled);
 
   const content = upsertEnv(base, updates);
   if (content !== base) writeFileSync(envPath, content, { mode: 0o600 });
@@ -91,12 +97,6 @@ export function ensureEnv(envPath: string, examplePath: string): EnvResult {
   const key = readEnvValue(content, "LAUN_KEY");
   if (!token || !key) throw new Error(`could not prepare ${envPath}: GATEWAY_TOKEN or LAUN_KEY missing`);
   return { path: envPath, created, content, token, key };
-}
-
-export function readEnvValue(content: string, name: string): string | null {
-  const m = content.match(new RegExp(`^${name}=(.*)$`, "m"));
-  const v = m?.[1]?.trim();
-  return v ? v : null;
 }
 
 /** Repo root, resolved from this file: apps/cli/src -> ../../.. */
@@ -137,7 +137,8 @@ export async function localSetup(opts: LocalSetupOptions): Promise<{ url: string
   const env = ensureEnv(envPath, join(root, "deploy", ".env.example"));
   if (!opts.noStart) {
     const compose = resolve(opts.composeFile);
-    const res = await run(["docker", "compose", "-f", compose, "--env-file", envPath, "up", "-d", "--build"], {
+    const files = setupComposeFiles(env.content, compose);
+    const res = await run(["docker", "compose", ...files, "--env-file", envPath, "up", "-d", "--build"], {
       stdio: "inherit",
     });
     if (res.code !== 0) throw new Error(`docker compose failed with code ${res.code}`);
@@ -189,7 +190,7 @@ export interface RemoteSetupOptions {
 export async function remoteSetup(opts: RemoteSetupOptions) {
   const root = repoRoot();
   const envPath = resolve(opts.envFile);
-  const env = ensureEnv(envPath, join(root, "deploy", ".env.example"));
+  const env = ensureEnv(envPath, join(root, "deploy", ".env.example"), { openshellEnabled: true });
   const bootstrapPath = join(root, "deploy", "bootstrap.sh");
   if (!existsSync(bootstrapPath)) {
     throw new Error(`missing ${bootstrapPath} — this checkout is incomplete, cannot bootstrap the remote host`);
