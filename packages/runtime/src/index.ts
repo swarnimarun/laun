@@ -14,6 +14,7 @@ import type { AgentEvent, AgentRuntime, PermissionOperation, RuntimeCallbacks, R
 import { FileCredentialStore } from "./credentials.js";
 import { LocalExecution, type RuntimeExecution } from "./execution.js";
 import { lockThread } from "./lock.js";
+import { createThreadCleaner } from "./cleanup.js";
 import { OpenShellExecution, type OpenShellExecutionOptions } from "./openshell.js";
 import { createPiInference, createRemoteInferenceModels } from "./inference.js";
 import { DURABILITY_ADAPTER, DurableStorageError, openServerBackedStorage, type ServerBackedStorage } from "./durability.js";
@@ -41,6 +42,8 @@ export interface PiRuntimeOptions {
   maxTurns?: number;
   timeoutMs?: number;
   instructions?: string;
+  /** Immutable supervisor state directory containing threads/<threadId>. */
+  cleanupRoot?: string;
 }
 
 type Active = { controller: AbortController; conversation?: Conversation; harness?: Harness };
@@ -81,6 +84,9 @@ function validateInput(input: RuntimeRunInput, options: PiRuntimeOptions): void 
 /** Pin to upstream Pi Durable 1.5.2; only trusted Laun registry code is installed. */
 export function createPiRuntime(options: PiRuntimeOptions = {}): AgentRuntime {
   const active = new Map<string, Active>();
+  const cleaning = new Set<string>();
+  const cleaner = options.cleanupRoot ? createThreadCleaner({ cleanupRoot: options.cleanupRoot,
+    openshell: options.openshellEnabled ? options.openshell ?? {} : undefined, unsupportedExecution: !!options.execution }) : undefined;
   const credentials = options.authFile ? new FileCredentialStore(options.authFile) : undefined;
   const models = (options.models as Models | undefined) ?? builtinModels({ credentials });
   let modelMetadata: { at: number; value: RuntimeModel[] } | undefined;
@@ -103,11 +109,12 @@ export function createPiRuntime(options: PiRuntimeOptions = {}): AgentRuntime {
     inference: createPiInference({ models, timeoutMs: options.timeoutMs }),
     async run(input, callbacks) {
       validateInput(input, callbacks.inference ? { ...options, authFile: undefined } : options);
-      if (active.has(input.threadId)) throw new Error("thread already has an active runtime run");
+      if (active.has(input.threadId) || cleaning.has(input.threadId)) throw new Error("thread already has an active runtime run or cleanup");
       const state: Active = { controller: new AbortController() };
       active.set(input.threadId, state);
       const ctx = withAbortSignal(state.controller.signal, BACKGROUND_CONTEXT);
       let release: (() => void) | undefined;
+      let releaseGuard: (() => void) | undefined;
       let execution: RuntimeExecution | undefined;
       let watch: Awaited<ReturnType<Conversation["watch"]>> | undefined;
       let timedOut = false;
@@ -124,6 +131,8 @@ export function createPiRuntime(options: PiRuntimeOptions = {}): AgentRuntime {
       const mediatedCallbacks = { ...callbacks, emit };
       timer = setTimeout(() => { timedOut = true; void Promise.resolve(runtime.cancel(input.threadId)).catch(() => {}); }, options.timeoutMs ?? 10 * 60_000);
       try {
+        releaseGuard = cleaner?.acquire(input.threadId);
+        cleaner?.prepareRun(input);
         await mkdir(input.sessionDir, { recursive: true, mode: 0o700 });
         release = lockThread(input.sessionDir);
         await checkRequestFingerprint(input);
@@ -215,6 +224,7 @@ export function createPiRuntime(options: PiRuntimeOptions = {}): AgentRuntime {
         if (remote?.uncertain()) result = { status: "interrupted", summary: "Controller inference outcome requires reconciliation before retry; no local provider fallback was used" };
         if (durable?.uncertain()) result = { status: "interrupted", summary: "Server-owned thread commit requires reconciliation before retry; no unacknowledged progress or tools were published" };
         release?.();
+        releaseGuard?.();
         active.delete(input.threadId);
       }
       if (result.status === "done") await emit({ type: "done", sessionId: input.threadId, summary: result.summary });
@@ -229,6 +239,12 @@ export function createPiRuntime(options: PiRuntimeOptions = {}): AgentRuntime {
     },
     async close() {
       await Promise.all([...active.keys()].map((id) => runtime.cancel(id)));
+    },
+    async cleanupThread(input) {
+      if (!cleaner) return { verified: false, removedPaths: 0, removedSandboxes: 0, outstanding: ["Runtime has no configured immutable cleanup root"] };
+      if (active.has(input.threadId) || cleaning.has(input.threadId)) return { verified: false, removedPaths: 0, removedSandboxes: 0, outstanding: ["Thread has active runtime work or cleanup"] };
+      cleaning.add(input.threadId);
+      try { return await cleaner.cleanup(input); } finally { cleaning.delete(input.threadId); }
     },
     async listModels() {
       if (modelMetadata && Date.now() - modelMetadata.at < 60_000) return modelMetadata.value.map((m) => ({ ...m }));

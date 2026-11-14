@@ -1,9 +1,10 @@
 import { access, mkdir, rm, writeFile } from "node:fs/promises";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { join, posix } from "node:path";
 import { executeProcess, MAX_FILE_BYTES, type CommandResult, type RuntimeExecution } from "./execution.js";
 import { captureWorkspace, materializeWorkspace, MAX_WORKSPACE_TRANSPORT_BYTES, replaceWorkspace } from "./workspace.js";
 import { prepareIsolatedPolicy } from "./isolated-policy.js";
+import { managedSandboxName } from "./sandbox-identity.js";
 import { resolveResourceLimits, resourceProbe, validateResourceCapabilities, validateRetainedResources, verifyResourceProbe, type OpenShellResourceLimits, type OpenShellResourceOptions } from "./resources.js";
 
 export interface OpenShellExecutionOptions extends OpenShellResourceOptions {
@@ -45,7 +46,7 @@ export class OpenShellExecution implements RuntimeExecution {
     this.limits = resolveResourceLimits(options);
     // OpenShell0.1.8 accepts at most19 DNS-label characters. Protocol thread
     // IDs may be64 characters, so use a stable64-bit digest within that limit.
-    this.name = `ln-${createHash("sha256").update(options.placementId ? `${options.threadId}:${options.placementId}` : options.threadId).digest("hex").slice(0, 16)}`;
+    this.name = managedSandboxName(options.threadId, options.placementId);
     this.bin = options.bin || "openshell";
     this.ready = this.initialize();
     void this.ready.catch(() => {});

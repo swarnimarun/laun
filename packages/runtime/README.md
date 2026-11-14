@@ -212,3 +212,35 @@ preempt a model request or an approval-blocked tool. A future capability needs
 durable controller command admission, run/generation binding, worker delivery
 and acknowledgement, cancellation semantics and multiple-input settlement;
 an SDK method alone does not provide that server-side contract.
+
+Explicit host cleanup is separate from controller history removal. Configure
+`cleanupRoot` once on the runtime factory; it must be a private supervisor-owned
+directory containing `threads/<threadId>/{session,work}`. Configured runs are
+confined to that layout. `cleanupThread` accepts only thread/placement IDs,
+stop confirmation and an optional cancellation signal. An absent root, custom
+execution backend, live writer, changed root identity, symlink, special file,
+unknown copy namespace or exhausted verification bound blocks completion.
+The runtime shares a supervisor guard with new runs, checks old session locks,
+and removes only the exact thread plus UUID-named restore/recovery copies.
+It checks cancellation between removals and fsyncs the containing directory.
+
+OpenShell cleanup never creates, starts or executes a guest. It enumerates
+bounded pages across visible workspaces, checks full thread/UUID placement and
+policy/resource identity labels against the managed name, and deletes only
+guests in the immutable configured workspace after a verified `Stopped` state.
+Foreign workspaces and unknown identities remain outstanding. Both list and
+direct lookup corroborate absence because CLI `get` also fetches policy and
+can fail independently. Authentication/transport failures and asynchronous
+deletion never count as successful absence. Enumeration is capped at1000
+visible guests; tree verification at50000 entries per copy and128 copies.
+The result is verified only when every check completes with no outstanding
+items. Controller approval/lease fencing must precede calling this method;
+an expired or lost acknowledgement requires reconciliation rather than an
+automatic retry. Unlabelled unknown guests, offline machines, bridge queues,
+original imports and external copies are outside this runtime's erase claim.
+
+Cleanup qualification currently uses dedicated temporary filesystem and fake
+CLI fixtures, including cancellation, active writers, epoch pagination,
+cross-workspace preservation, ambiguous statuses and unrelated-guest safety.
+The actual OpenShell0.1.8 binary's flags and pinned public JSON/lifecycle source
+were inspected; this does not claim a live VPS cleanup qualification.

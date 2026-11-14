@@ -8,6 +8,7 @@ import {
 } from "@earendil-works/pi-ai/providers/faux";
 import type { AgentRuntime } from "@laun/protocol";
 import { createPiRuntime } from "../src/index.js";
+import { LocalExecution, type RuntimeExecution } from "../src/execution.js";
 
 export function createBrowserFixtureRuntime(): AgentRuntime {
   const models = createModels();
@@ -78,5 +79,23 @@ export function createBrowserFixtureRuntime(): AgentRuntime {
     return fauxAssistantMessage(`Browser fixture answer: ${prompt}`);
   };
   faux.setResponses([response]);
-  return createPiRuntime({ models, trustedLocal: true, timeoutMs: 60_000 });
+  return createPiRuntime({
+    models,
+    trustedLocal: true,
+    timeoutMs: 60_000,
+    execution: async (input) => {
+      const execution: RuntimeExecution = new LocalExecution(
+        input.workspaceRoot,
+      );
+      // Real Pi completes and commits its conversation, then the simulated lost
+      // execution boundary cannot attest shutdown. No production behavior changes.
+      if (input.prompt === "UI_ABANDON_OLD")
+        execution.close = async () => {
+          throw new Error(
+            "Browser fixture cannot attest old boundary shutdown; reconcile explicitly",
+          );
+        };
+      return execution;
+    },
+  });
 }
