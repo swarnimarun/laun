@@ -11,6 +11,7 @@ export {
   validateBinaryObject,
   validateEndpointObject,
   validatePolicy,
+  validateIsolatedCommandPolicy,
 } from "./openshell.js";
 export {
   defaultProviderProfilePath,

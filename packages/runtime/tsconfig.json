@@ -2,5 +2,5 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "outDir": "dist", "rootDir": "src", "composite": true, "types": ["bun-types"] },
   "include": ["src"],
-  "references": [{ "path": "../protocol" }]
+  "references": [{ "path": "../protocol" }, { "path": "../policy" }]
 }

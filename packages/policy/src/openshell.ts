@@ -708,3 +708,27 @@ export function validatePolicy(yamlText: string): string[] {
 
   return problems;
 }
+
+/** Supported v2 generic commands cannot obtain unmediated network or host access. */
+export function validateIsolatedCommandPolicy(yamlText: string): string[] {
+  const problems = validatePolicy(yamlText); if (problems.length) return problems;
+  const policy = parseDocument(yamlText).toJSON() as Record<string, unknown>;
+  for (const key of ["network_policies", "network_middlewares"]) {
+    const value = policy[key]; if (!isObj(value) || Object.keys(value).length !== 0) problems.push(`v2 ${key} must be an explicit empty mapping; authorized network access uses the central MCP broker`);
+  }
+  const landlock = policy["landlock"];
+  if (!isObj(landlock) || landlock["compatibility"] !== "hard_requirement") problems.push("v2 requires landlock.compatibility hard_requirement");
+  const fs = policy["filesystem_policy"];
+  if (!isObj(fs) || fs["include_workdir"] !== false) problems.push("v2 requires filesystem_policy.include_workdir false");
+  if (isObj(fs)) {
+    const ceilings = { read_only: ["/usr", "/lib", "/bin", "/etc", "/opt/pi", "/proc", "/sys/fs/cgroup", "/dev/urandom", "/dev/random"], read_write: ["/workspace", "/tmp", "/dev/null"] };
+    for (const key of ["read_only", "read_write"] as const) {
+      const paths = fs[key];
+      if (!Array.isArray(paths)) { problems.push(`v2 filesystem_policy.${key} must be explicit`); continue; }
+      for (const path of paths) {
+        if (typeof path !== "string" || path.includes("\\") || path.split("/").some(part => part === "." || part === "..") || !ceilings[key].some(root => path === root || path.startsWith(`${root}/`))) problems.push(`v2 filesystem_policy.${key} exceeds the supported command ceiling`);
+      }
+    }
+  }
+  return problems;
+}

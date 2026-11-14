@@ -3,15 +3,18 @@ import { createHash, randomUUID } from "node:crypto";
 import { join, posix } from "node:path";
 import { executeProcess, MAX_FILE_BYTES, type CommandResult, type RuntimeExecution } from "./execution.js";
 import { captureWorkspace, materializeWorkspace, MAX_WORKSPACE_TRANSPORT_BYTES, replaceWorkspace } from "./workspace.js";
+import { prepareIsolatedPolicy } from "./isolated-policy.js";
+import { resolveResourceLimits, resourceProbe, validateResourceCapabilities, validateRetainedResources, verifyResourceProbe, type OpenShellResourceLimits, type OpenShellResourceOptions } from "./resources.js";
 
-export interface OpenShellExecutionOptions {
+export interface OpenShellExecutionOptions extends OpenShellResourceOptions {
   threadId: string;
+  placementId?: string;
   stateDir: string;
   /** Backend-owned host artifact mirror, archived by the controller. */
   workspaceRoot?: string;
   image: string;
   bin?: string;
-  /** Optional operator-reviewed host ceiling. Default policy denies all egress. */
+  /** Optional narrower supported host ceiling. All generic command egress is denied. */
   policyFile?: string;
   env?: NodeJS.ProcessEnv;
 }
@@ -19,6 +22,9 @@ export interface OpenShellExecutionOptions {
 const ROOT = "/workspace";
 const PATH = "/usr/local/bin:/usr/bin:/bin";
 const PATH_CHECK = 'p=$(realpath -m -- "$1") || exit 1; case "$p" in /workspace|/workspace/*) ;; *) echo "path escapes thread workspace" >&2; exit 1;; esac; ';
+// OpenShell label values are at most63 characters; base36 retains every bit
+// of SHA-256 while using at most50 label-safe alphanumeric characters.
+const labelDigest = (hex: string) => BigInt(`0x${hex}`).toString(36).padStart(50, "0");
 
 /** Whole tool commands execute inside OpenShell; no error path runs on the host. */
 export class OpenShellExecution implements RuntimeExecution {
@@ -29,17 +35,28 @@ export class OpenShellExecution implements RuntimeExecution {
   private readonly ready: Promise<void>;
   private stopped = false;
   private boundaryStarted = false;
+  private readonly limits: OpenShellResourceLimits;
+  private verified = false;
+  private preparing?: Promise<void>;
   constructor(private readonly options: OpenShellExecutionOptions) {
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(options.threadId)) throw new Error("invalid thread ID for sandbox");
+    if (options.placementId !== undefined && !/^[A-Za-z0-9_-]{1,64}$/.test(options.placementId)) throw new Error("invalid thread placement ID for sandbox");
     if (!options.image.trim()) throw new Error("OpenShell sandbox image is required");
+    this.limits = resolveResourceLimits(options);
     // OpenShell0.1.8 accepts at most19 DNS-label characters. Protocol thread
     // IDs may be64 characters, so use a stable64-bit digest within that limit.
-    this.name = `ln-${createHash("sha256").update(options.threadId).digest("hex").slice(0, 16)}`;
+    this.name = `ln-${createHash("sha256").update(options.placementId ? `${options.threadId}:${options.placementId}` : options.threadId).digest("hex").slice(0, 16)}`;
     this.bin = options.bin || "openshell";
     this.ready = this.initialize();
     void this.ready.catch(() => {});
   }
   async prepare(): Promise<void> {
+    if (this.preparing) return this.preparing;
+    const pending = this.verifyBoundary(); this.preparing = pending;
+    try { await pending; } finally { if (this.preparing === pending) this.preparing = undefined; }
+  }
+  private async verifyBoundary(): Promise<void> {
+    this.verified = false;
     await this.ready;
     const nonce = randomUUID();
     // An image starting is not evidence of enforcement. The negative target
@@ -56,9 +73,12 @@ if ( : > /var/tmp/.laun-denied-${nonce} ) 2>/tmp/.laun-probe-${nonce}; then
 fi
 grep -qi 'permission denied' /tmp/.laun-probe-${nonce} || { cat /tmp/.laun-probe-${nonce} >&2; exit 1; }
 rm -- /tmp/.laun-probe-${nonce}
+${resourceProbe(this.limits)}
 printf LAUN_BOUNDARY_OK`;
-    const result = await this.exec(["bash", "-c", probe], undefined, undefined, 30_000);
-    if (result.exitCode !== 0 || result.stdout.trim() !== "LAUN_BOUNDARY_OK") throw new Error(`OpenShell enforcement probe failed: ${result.stderr.slice(-1000)}`);
+    const result = await this.rawExec(["bash", "-c", probe], undefined, undefined, 30_000);
+    if (result.exitCode !== 0 || result.truncated) { await this.stopBoundary(); throw new Error(`OpenShell enforcement probe failed: ${result.stderr.slice(-1000)}`); }
+    try { verifyResourceProbe(result.stdout.trim(), this.limits); } catch (error) { await this.stopBoundary(); throw error; }
+    this.verified = true;
   }
   private async transport(args: string[], input?: string, signal?: AbortSignal, timeoutMs = 120_000, maxBytes?: number): Promise<CommandResult> {
     // This is a trusted supervisor process. Its OpenShell transport identity is
@@ -66,6 +86,13 @@ printf LAUN_BOUNDARY_OK`;
     return executeProcess([this.bin, ...args], { env: this.options.env ?? process.env, input, signal, timeoutMs, maxBytes });
   }
   private async initialize(): Promise<void> {
+    // Validate before looking up retained guests; an old or mutable custom
+    // policy must not bypass the supported per-thread ceiling on reopen.
+    const policy = await prepareIsolatedPolicy(this.options.stateDir, this.options.policyFile);
+    const policyLabel = labelDigest(policy.sha256), resourcesLabel = labelDigest(this.limits.sha256);
+    const info = await this.transport(["gateway", "info", "-o", "json"]);
+    if (info.exitCode !== 0 || info.truncated) throw new Error(`OpenShell resource capability lookup failed: ${info.stderr.slice(-1000)}`);
+    validateResourceCapabilities(info.stdout);
     const pending = join(this.options.stateDir, "sandbox-import-pending");
     const missing = (r: CommandResult) => /not found|does not exist|NotFound/i.test(r.stderr);
     let absent = false;
@@ -75,8 +102,12 @@ printf LAUN_BOUNDARY_OK`;
         if (!missing(exists)) throw new Error(`OpenShell lookup failed: ${exists.stderr.slice(-1000)}`);
         absent = true; break;
       }
-      const existing = JSON.parse(exists.stdout) as { labels?: Record<string, string> };
+      const existing = JSON.parse(exists.stdout) as { labels?: Record<string, string>; [key: string]: unknown };
       if (existing.labels?.["laun.thread-id"] !== this.options.threadId) throw new Error("OpenShell sandbox thread identity mismatch; preserved guest was not opened");
+      if ((existing.labels?.["laun.placement-id"] ?? "") !== (this.options.placementId ?? "")) throw new Error("OpenShell sandbox placement identity mismatch");
+      if (existing.labels?.["laun.policy-sha256"] !== policyLabel) throw new Error("OpenShell sandbox policy identity is missing or changed; preserve and reconcile the old guest before a reviewed placement move");
+      if (existing.labels?.["laun.resources-sha256"] !== resourcesLabel) throw new Error("OpenShell sandbox resource identity is missing or changed; preserve and reconcile the old guest before a reviewed placement move");
+      validateRetainedResources(existing, this.limits);
       try { await access(pending); throw new Error("previous sandbox workspace import was interrupted; inspect the preserved sandbox before recovery"); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const started = await this.transport(["sandbox", "start", this.name]);
@@ -89,22 +120,10 @@ printf LAUN_BOUNDARY_OK`;
     }
     if (!absent) throw new Error("OpenShell guest deletion has not reconciled; retry after inspecting its state");
     await mkdir(this.options.stateDir, { recursive: true, mode: 0o700 });
-    const policy = this.options.policyFile || join(this.options.stateDir, "sandbox-policy.yaml");
-    if (!this.options.policyFile) await writeFile(policy, `version: 1
-filesystem_policy:
-  include_workdir: false
-  read_only: [/usr, /lib, /bin, /etc, /opt/pi, /proc, /dev/urandom, /dev/random]
-  read_write: [/workspace, /tmp, /dev/null]
-landlock:
-  compatibility: hard_requirement
-process: {}
-network_policies: {}
-network_middlewares: {}
-`, { mode: 0o600 });
     // Record intent before creation so a crash between create and import can
     // never make an empty guest look like an authoritative recovered guest.
     if (this.options.workspaceRoot) await writeFile(pending, "new sandbox workspace import in progress\n", { mode: 0o600 });
-    const created = await this.transport(["sandbox", "create", "--name", this.name, "--from", this.options.image, "--policy", policy, "--label", `laun.thread-id=${this.options.threadId}`, "--approval-mode", "manual", "--detach", "--no-tty", "--no-auto-providers", "--", "sleep", "infinity"]);
+    const created = await this.transport(["sandbox", "create", "--name", this.name, "--from", this.options.image, "--cpu", this.limits.cpuArgument, "--memory", this.limits.memoryArgument, "--policy", policy.path, "--label", `laun.thread-id=${this.options.threadId}`, "--label", `laun.policy-sha256=${policyLabel}`, "--label", `laun.resources-sha256=${resourcesLabel}`, ...(this.options.placementId ? ["--label", `laun.placement-id=${this.options.placementId}`] : []), "--approval-mode", "manual", "--detach", "--no-tty", "--no-auto-providers", "--", "sleep", "infinity"]);
     if (created.exitCode !== 0) throw new Error(`OpenShell create failed (${created.exitCode}): ${created.stderr.slice(-1000)}`);
     this.boundaryStarted = true;
     if (this.options.workspaceRoot) {
@@ -164,7 +183,7 @@ network_middlewares: {}
     }
   }
   private async exec(argv: string[], input?: string, signal?: AbortSignal, timeoutMs = 120_000, maxBytes?: number): Promise<CommandResult> {
-    await this.ready; return this.rawExec(argv, input, signal, timeoutMs, maxBytes);
+    await this.ready; if (!this.verified) await this.prepare(); return this.rawExec(argv, input, signal, timeoutMs, maxBytes);
   }
   async checkpoint(): Promise<void> {
     if (!this.options.workspaceRoot) return;
@@ -202,6 +221,7 @@ network_middlewares: {}
       const result = await this.transport(["sandbox", "stop", this.name], undefined, undefined, 60_000);
       if (result.exitCode !== 0 || result.truncated) throw new Error(`OpenShell stop failed (${result.exitCode}): ${result.stderr.slice(-1000)}`);
       this.stopped = true;
+      this.verified = false;
     } catch (error) { this.uncertain = true; throw error; }
   }
   async close(): Promise<void> {
