@@ -1,0 +1,6 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "outDir": "dist", "rootDir": "src", "composite": true, "types": ["bun-types"] },
+  "include": ["src"],
+  "references": [{ "path": "../../packages/protocol" }, { "path": "../../packages/runtime" }, { "path": "../../packages/control" }]
+}
