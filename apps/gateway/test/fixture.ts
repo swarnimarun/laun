@@ -8,14 +8,15 @@ import {
   ControlStore,
   handleControlRequest,
 } from "@laun/control";
-import { checkBearer } from "@laun/protocol";
+import { checkBearer, type AgentRuntime } from "@laun/protocol";
 import { createBrowserFixtureRuntime } from "../../../packages/runtime/test/browser-fixture.js";
 
-export async function startBrowserFixture(repoRoot: string) {
+/** Documentation may inject a readable scripted runtime/longer review window; smoke defaults stay unchanged. */
+export async function startBrowserFixture(repoRoot: string, options: {runtime?:AgentRuntime;approvalTimeoutMs?:number} = {}) {
   const directory = await mkdtemp(join(tmpdir(), "laun-ui-fixture-"));
   await mkdir(join(directory, "data"));
   const store = new ControlStore(join(directory, "data", "control.sqlite"));
-  const runtime = createBrowserFixtureRuntime();
+  const runtime = options.runtime ?? createBrowserFixtureRuntime();
   const service = new ControlService({
     store,
     runtime,
@@ -23,7 +24,7 @@ export async function startBrowserFixture(repoRoot: string) {
     mode: "trusted-local",
     capacity: 2,
     defaultModel: "faux/faux-1",
-    approvalTimeoutMs: 60_000,
+    approvalTimeoutMs: options.approvalTimeoutMs ?? 60_000,
   });
   const key = randomBytes(32).toString("base64url");
   const principal = { id: "browser-owner", admin: true };

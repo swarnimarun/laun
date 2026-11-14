@@ -25,6 +25,8 @@
     "dev:bridge": "bun run build && bun --hot apps/telegram-bridge/src/index.ts",
     "dev:app": "bun scripts/dev-app.ts",
     "dev:worker": "bun apps/worker/src/index.ts",
+    "demo:scenarios": "bun apps/gateway/test/demo-fixture.ts",
+    "demo:capture": "bun apps/gateway/test/capture-demos.ts",
     "test:ui": "bun apps/gateway/test/ui-smoke.ts"
   },
   "devDependencies": {

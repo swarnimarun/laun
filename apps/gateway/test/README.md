@@ -65,3 +65,20 @@ without a connected worker; it does not prove execution.
 This suite does not qualify real OpenShell kernel containment, external MCP
 services, Telegram delivery, or production provider authentication. Those
 need their own integration checks.
+
+## Documentation demonstrations
+
+For a readable scripted story instead of regression-test markers:
+
+```sh
+bun apps/gateway/test/demo-fixture.ts
+CHROMIUM_PATH=/path/to/chromium bun apps/gateway/test/capture-demos.ts
+```
+
+The first command serves a disposable interactive workspace and prints its
+private access-file path. The second starts its own fixture, uses the actual
+browser UI, and writes seven screenshots to `docs/images/` (override with
+`LAUN_DEMO_SHOTS`). Both use the real controller and Pi Durable adapter with
+scripted model replies, and remove temporary state when they finish. They do
+not connect to an existing installation or any provider, Telegram bot, or VPS.
+See the [walkthrough and exact prompts](../../../docs/demos.md).
