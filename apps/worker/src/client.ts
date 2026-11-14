@@ -57,7 +57,7 @@ export class WorkerClient {
       try {
         for (;;) {
           const { done, value } = await reader.read(); if (done) break;
-          bytes += value.byteLength; if (bytes > (method==="checkpoint-download"?64*1024*1024:2_097_152)) throw new WorkerTransportError("controller response exceeds size limit");
+          bytes += value.byteLength; if (bytes > (method==="checkpoint-download"||method==="durable-load"?64*1024*1024:2_097_152)) throw new WorkerTransportError("controller response exceeds size limit");
           text += decoder.decode(value, { stream: true });
         }
         text += decoder.decode();

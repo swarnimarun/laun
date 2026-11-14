@@ -1,13 +1,17 @@
 import { createPiRuntime } from "@laun/runtime";
 import { loadWorkerConfig } from "./config.js";
 import { OutboundWorker } from "./worker.js";
+import capabilities from "./capabilities.json" with {type:"json"};
+import type {WorkerCapabilities} from "@laun/protocol";
 export { loadWorkerConfig, controllerUrl } from "./config.js";
 export { OutboundWorker, type WorkerOptions } from "./worker.js";
 export { WorkerJournal, type RunJournal } from "./journal.js";
 export { WorkerClient, WorkerHttpError, WorkerTransportError } from "./client.js";
 
 if (import.meta.main) {
-  if (process.argv.includes("--help")) {
+  if (process.argv.includes("--capabilities")) {
+    console.log(JSON.stringify(capabilities as WorkerCapabilities));
+  } else if (process.argv.includes("--help")) {
     console.log("Laun outbound yard worker\n\nEnroll a yard in the app, then set LAUN_CONTROLLER_URL and LAUN_WORKER_KEY.\nChoose OPENSHELL_ENABLED=true with OPENSHELL_SANDBOX_IMAGE, or explicitly\nchoose LAUN_TRUSTED_LOCAL=true for development. LAUN_WORKER_DIR stores\nper-thread sessions and the durable event outbox. Use --once for one poll.");
   } else {
     let worker: OutboundWorker | undefined;

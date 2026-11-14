@@ -1,0 +1,1 @@
+{"protocolVersion":1,"checkpointVersion":"pi-durable@1.5.2","inferenceModes":["controller","local"],"durabilityAdapters":[{"adapter":"pi-durable@1.5.2","version":1}]}
