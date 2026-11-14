@@ -37,6 +37,8 @@ Built-in imagegen, `illustration-story`: an enclosed medieval garden with founta
 
 ## Validation
 
+**Visual review remains open.** The later [layout audit](frontend-layout-audit.md) documents 14 open layout, hierarchy and validation findings with 23 screenshots. The passing checks below establish only their stated functional and geometry checks; they do not establish visual quality or usable layouts. The initial completion report overstated what had been verified.
+
 Baseline: the full existing UI smoke passed before edits, including durable conversations, permission decisions, delegation, recovery, retention, workers and mobile navigation. Screenshots are in `/tmp/laun-before` for local comparison.
 
 The redesigned app passed the same full browser workflow suite with zero browser exceptions. Typecheck passed. All 23 controller-source and yard-setup tests passed outside the restricted sandbox, including a new byte-for-byte asset install check. Initial sandbox failures in setup tests did not reproduce outside the sandbox.
