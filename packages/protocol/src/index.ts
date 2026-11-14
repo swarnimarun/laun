@@ -3,6 +3,10 @@
 // No pi/goose/dots-specific wire details outside the executor.
 
 export { isAgentEvent, isTerminalAgentEvent } from "./events.js";
+export type { BrokerConnection, BrokerContext, BrokerTool, BrokerToolResult, McpProtocolVersion, PermissionProposal } from "./broker.js";
+export type { ControlContext, RuntimeRunInput, RuntimePermissionRequest, RuntimeCallbacks, RuntimeResult, RuntimeModel, AgentRuntime,
+  ControlPrincipal, StoredProfile, MowerRecord, ThreadRecord, ControlRunStatus, ControlRun, ThreadEvent,
+  ControlApproval, WorkerRecord, TaskRecord, ControlState, WorkerJob } from "./control.js";
 
 export type { CapabilityRule, PermissionAction, PermissionEffect, PermissionGrant, PermissionMode,
   PermissionOperation, PermissionProfile, PermissionVerdict } from "./permissions.js";
