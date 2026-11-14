@@ -44,6 +44,8 @@ const runFrom = (r: RunRow): ControlRun => ({ id:r.id, ownerId:r.owner_id, threa
 export class ControlStore {
   readonly db: Database;
   admissionGuard?:()=>void;
+  /** Last-resort process fence when an unknown external effect cannot be persisted. */
+  private uncertainGenerations = new Map<string,number>();
   constructor(readonly path: string) {
     if (path !== ":memory:") {
       mkdirSync(dirname(path), { recursive:true, mode:0o700 });
@@ -287,8 +289,13 @@ export class ControlStore {
   }
   fence(runId:string,workerId:string,generation:number):ControlRun {
     const run=this.run(runId);
+    this.assertRunCertain(runId,generation);
     if(run.workerId!==workerId||run.generation!==generation||!["running","waiting_permission"].includes(run.status)||!run.leaseUntil||Date.parse(run.leaseUntil)<Date.now())throw new ControlError("stale run lease",409);
     return run;
+  }
+  markRunUncertain(runId:string,generation:number):void { this.uncertainGenerations.set(runId,Math.max(this.uncertainGenerations.get(runId)??-1,generation)); }
+  assertRunCertain(runId:string,generation:number):void {
+    if(this.uncertainGenerations.get(runId)===generation)throw new ControlError("External tool outcome requires reconciliation; its controller fence could not be persisted",503);
   }
   heartbeat(workerId:string,runId?:string,generation?:number){
     return this.transaction(()=>{

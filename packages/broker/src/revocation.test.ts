@@ -124,5 +124,5 @@ test("an older discovery cannot overwrite a competing catalog publication",async
 test("abort closes an in-flight tool request without retrying an already dispatched effect",async()=>{
   const f=fixture(),tool=await catalog(f),call=gate(),abort=new AbortController();f.hooks.call=()=>call.wait();
   const pending=f.broker.invoke(context,f.connection.id,tool.name,{},tool.schemaDigest,abort.signal);await call.entered;abort.abort();
-  await expect(pending).rejects.toThrow(/cancel|abort/i);expect(f.rpc.filter(method=>method==="tools/call")).toHaveLength(1);call.release();
+  await expect(pending).rejects.toThrow("outcome is unknown");expect(f.rpc.filter(method=>method==="tools/call")).toHaveLength(1);call.release();
 });

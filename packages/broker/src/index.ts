@@ -2,11 +2,13 @@ import type { BrokerConnection, BrokerContext, BrokerTool, BrokerToolResult, Per
 import { argumentsDigest, canonicalJson, isRecord, redactSecrets, sha256 } from "./canonical.js";
 import { McpHttpClient, schemaHeaderBindings } from "./client.js";
 import { pinEndpoint } from "./network.js";
+import { BrokerOutcomeUnknownError } from "./error.js";
 
 export { argumentsDigest, canonicalJson, redactSecrets } from "./canonical.js";
 export { isPublicAddress, isLoopback, pinEndpoint } from "./network.js";
 export { headerValue, parameterHeaders, schemaHeaderBindings } from "./client.js";
 export { proposePermissionChange } from "./adviser.js";
+export { BrokerOutcomeUnknownError } from "./error.js";
 
 export interface ToolBrokerOptions {
   /** Must reject unless the current server authority allows this exact intent. */
@@ -112,7 +114,7 @@ export class ToolBroker {
   }
 
   private async withClient<T>(context: BrokerContext, connection: BrokerConnection, work: (client: McpHttpClient, secret?: string) => Promise<T>, signal?: AbortSignal,
-    selected?: { name: string; digest: string }): Promise<T> {
+    selected?: { name: string; digest: string }, onToolDispatch?: () => void): Promise<T> {
     const check = async () => { await this.current(context, connection, signal, selected); };
     await check();
     let url: URL;
@@ -130,7 +132,7 @@ export class ToolBroker {
       if (!secret || /[\r\n]/.test(secret) || secret.length > 8192) throw new Error("connector credential is unavailable or invalid");
     }
     await check();
-    const client = new McpHttpClient(endpoint, connection, secret, this.limits, { signal, beforeRequest: check });
+    const client = new McpHttpClient(endpoint, connection, secret, this.limits, { signal, beforeRequest: check, onToolDispatch });
     try {
       await client.initialize(signal); await check();
       const result = await work(client, secret); await check(); return result;
@@ -187,13 +189,22 @@ export class ToolBroker {
     await cancellable(this.options.authorize(context, "mcp.invoke", tool.resource, { connectorId: id, tool: name, schemaDigest: tool.schemaDigest,
       arguments: canonicalArgs, argumentsDigest: argumentsDigest(canonicalArgs) }, signal), signal);
     await this.current(context, connection, signal, { name, digest: expectedSchemaDigest });
-    return await this.withClient(context, connection, async (client, secret) => {
+    let dispatched = false;
+    try { return await this.withClient(context, connection, async (client, secret) => {
       const value = redactSecrets(await client.call("tools/call", { name, arguments: canonicalArgs }, tool.inputSchema, signal), secret ? [secret] : []);
       if (!isRecord(value) || !Array.isArray(value.content) || (value.isError !== undefined && typeof value.isError !== "boolean") ||
         (value.structuredContent !== undefined && !isRecord(value.structuredContent))) throw new Error("connector returned an invalid tool result");
+      // No read-only/idempotency guarantee is trusted for this surface. A tool
+      // error may follow a partial external write just like a dropped reply.
+      if (value.isError === true) throw new BrokerOutcomeUnknownError();
       return { content: value.content, ...(value.isError !== undefined ? { isError: value.isError as boolean } : {}),
         ...(value.structuredContent ? { structuredContent: value.structuredContent as Record<string, unknown> } : {}) };
-    }, signal, { name, digest: expectedSchemaDigest });
+    }, signal, { name, digest: expectedSchemaDigest }, () => { dispatched = true; });
+    } catch (cause) {
+      if (cause instanceof BrokerOutcomeUnknownError) throw cause;
+      if (dispatched) throw new BrokerOutcomeUnknownError({ cause });
+      throw cause;
+    }
   }
 
   async dispatch(context: BrokerContext, operation: "mower.spawn" | "task.handoff", resource: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {

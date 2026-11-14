@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { BrokerConnection, McpProtocolVersion } from "@laun/protocol";
 import { canonicalJson, isRecord } from "./canonical.js";
 import { postPinned, type PinnedEndpoint } from "./network.js";
+import { BrokerOutcomeUnknownError } from "./error.js";
 
 interface HeaderBinding { name: string; path: string[]; type: "string" | "boolean" | "integer"; }
 const META = {
@@ -106,7 +107,7 @@ export class McpHttpClient {
   private sessionId: string | undefined;
   constructor(private endpoint: PinnedEndpoint, connection: BrokerConnection,
     private secret: string | undefined, private limits: { timeoutMs: number; maxBytes: number },
-    private controls: { signal?: AbortSignal; beforeRequest?(): void | Promise<void> } = {}) {
+    private controls: { signal?: AbortSignal; beforeRequest?(): void | Promise<void>; onToolDispatch?(): void } = {}) {
     this.protocol = connection.protocolVersion ?? "2026-07-28";
   }
 
@@ -116,8 +117,11 @@ export class McpHttpClient {
   private async check(signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted(); await this.controls.beforeRequest?.(); signal?.throwIfAborted();
   }
-  private async request(body: string | undefined, headers: Record<string, string>, signal?: AbortSignal, method?: "DELETE") {
+  private async request(body: string | undefined, headers: Record<string, string>, signal?: AbortSignal, method?: "DELETE", dispatch?: () => void) {
     const abort = this.signal(signal); await this.check(abort);
+    // This is the last boundary before an attempted socket write. Once crossed,
+    // even a timeout, revoked authority or malformed reply cannot prove no effect.
+    dispatch?.();
     const result = await postPinned(this.endpoint, body, headers, { ...this.limits, signal: abort, ...(method ? { method, timeoutMs: Math.min(this.limits.timeoutMs, 2_000) } : {}) });
     await this.check(abort); return result;
   }
@@ -155,9 +159,17 @@ export class McpHttpClient {
     const args = canonicalJson({ jsonrpc: "2.0", id, method, params: { ...params, ...(modern ? { _meta: META } : {}) } }, 262_144);
     const headers = this.headers(method, typeof params.name === "string" ? params.name : undefined);
     if (modern && method === "tools/call" && schema && isRecord(params.arguments)) Object.assign(headers, parameterHeaders(schema, params.arguments));
-    const reply = await this.request(args, headers, signal);
-    if (reply.status < 200 || reply.status >= 300) throw new Error(`connector HTTP ${reply.status}; operation was not retried`);
-    return responseResult(reply.body, reply.contentType, id);
+    let dispatched = false;
+    try {
+      const reply = await this.request(args, headers, signal, undefined, method === "tools/call" ? () => {
+        dispatched = true; this.controls.onToolDispatch?.();
+      } : undefined);
+      if (reply.status < 200 || reply.status >= 300) throw new Error(`connector HTTP ${reply.status}; operation was not retried`);
+      return responseResult(reply.body, reply.contentType, id);
+    } catch (cause) {
+      if (dispatched) throw new BrokerOutcomeUnknownError({ cause });
+      throw cause;
+    }
   }
 
   async close(signal?: AbortSignal): Promise<void> {

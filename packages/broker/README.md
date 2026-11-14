@@ -37,6 +37,21 @@ no standalone SSE subscription or automatic tool-list refresh during a call.
 An unsupported server interaction fails visibly; external results can remain
 uncertain after timeout and must not be blindly retried.
 
+After a `tools/call` dispatch attempt, a lost/invalid reply, HTTP/JSON-RPC error
+or `isError: true` becomes `BrokerOutcomeUnknownError`. A tool error can follow
+a partial write; no read-only or idempotency guarantee is currently trusted.
+The controller first persists an interrupted generation, clears its lease and
+pending approvals, and stops the runtime before returning the sanitized error.
+Further inference, tool calls and completion are fenced until an operator
+reconciles the external effect. Pre-dispatch denials and configuration failures
+remain ordinary failures that can use an authorized alternative. Applications
+embedding the broker directly must preserve this unknown-outcome distinction.
+If SQLite cannot persist that interruption, the current controller also keeps
+an in-memory generation fence and returns an unavailable/unknown outcome while
+stopping the runtime. Restore storage and confirm the external effect and prior
+execution have stopped before restarting/reconciling; this temporary fence is
+not a durable recovery receipt and never licenses an automatic retry.
+
 Executable stdio plugins are deliberately unavailable in this controller
 package: a future declared plugin process must use a sandbox adapter. Static
 HTTP MCP connections are the supported connector installation unit. Installing

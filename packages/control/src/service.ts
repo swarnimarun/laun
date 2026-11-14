@@ -1,6 +1,7 @@
 import { dirname, join, resolve } from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
 import { evaluatePermission } from "@laun/policy";
+import { BrokerOutcomeUnknownError } from "@laun/broker";
 import { isAgentEvent } from "@laun/protocol";
 import { captureCheckpoint, recoverCheckpoint, placementChanged, recordPlacement, inspectDiskReserve, StorageAdmissionError, type DiskReserve } from "@laun/storage";
 import type { AgentRuntime, BrokerConnection, ControlApproval, ControlContext, ControlPrincipal, ControlRun, ControlState, MowerRecord,
@@ -106,6 +107,7 @@ export class ControlService {
     const action:PermissionAction={id:`${callId}_g${run.generation}`,...context,generation:run.generation,operation:request.operation,resource:request.resource,argumentsDigest:hash(canonical(request.arguments))};
     const evaluate=()=>{
       this.store.admissionGuard?.();
+      this.store.assertRunCertain(run.id,run.generation);
       const current=this.store.run(run.id);
       this.store.assertThreadAuthority(this.store.get("thread",thread.id));
       if(current.generation!==run.generation)throw new ControlError("stale run generation",409);
@@ -270,7 +272,7 @@ export class ControlService {
     if(context.generation!==undefined&&context.generation!==run.generation)throw new ControlError("stale run generation",409);
     if(run.threadId!==source.id||source.mowerId!==context.mowerId||source.workspaceId!==context.workspaceId)throw new ControlError("tool context identity mismatch",403);
     if(run.cancelRequested||!["running","waiting_permission"].includes(run.status))throw new ControlError("run inactive",409);
-    const assertCurrent=()=>{const current=this.store.run(run.id,p);this.store.assertThreadAuthority(this.store.get("thread",source.id,p));if(current.generation!==run.generation||current.cancelRequested||!current.leaseUntil||Date.parse(current.leaseUntil)<=Date.now()||!["running","waiting_permission"].includes(current.status))throw new ControlError("stale run generation",409);};
+    const assertCurrent=()=>{this.store.assertRunCertain(run.id,run.generation);const current=this.store.run(run.id,p);this.store.assertThreadAuthority(this.store.get("thread",source.id,p));if(current.generation!==run.generation||current.cancelRequested||!current.leaseUntil||Date.parse(current.leaseUntil)<=Date.now()||!["running","waiting_permission"].includes(current.status))throw new ControlError("stale run generation",409);};
     assertCurrent();
     const b=record(input??{});
     if(name==="mower_list")return this.store.list<MowerRecord>("mower",p);
@@ -313,7 +315,32 @@ export class ControlService {
       if(!this.broker)throw new ControlError("MCP broker unavailable",503);
       const connectionId=text(b.connectionId,"connectionId",100);this.store.get("connection",connectionId,p);
       assertCurrent();
-      return this.broker.invoke({...context,generation:run.generation},connectionId,text(b.tool,"tool",256),b.arguments??{},text(b.schemaDigest,"schemaDigest",64),signal);
+      const tool=text(b.tool,"tool",256),schemaDigest=text(b.schemaDigest,"schemaDigest",64);
+      try{return await this.broker.invoke({...context,generation:run.generation},connectionId,tool,b.arguments??{},schemaDigest,signal);}
+      catch(error){
+        if(!(error instanceof BrokerOutcomeUnknownError))throw error;
+        // A model may otherwise turn an ordinary tool failure into another
+        // attempt. Persist the fence before publishing this error or aborting
+        // the runtime so neither inference nor tools can continue/replay.
+        let persistenceFailed=false;
+        try{this.store.transaction(()=>{
+          const current=this.store.run(run.id,p);
+          if(current.generation!==run.generation||!["running","waiting_permission"].includes(current.status))return;
+          this.store.db.query("UPDATE runs SET status='interrupted',cancel_requested=1,lease_until=NULL,summary=?,updated_at=? WHERE id=? AND generation=?")
+            .run(error.message,now(),run.id,run.generation);
+          this.store.expireRunApprovals(run.id);
+          this.store.event(source.id,"system",{status:"interrupted",text:error.message,connectionId,tool,schemaDigest},run.id);
+        });}catch{
+          // This mark is synchronous and survives the failed SQL transaction.
+          // Keep model/tool/finish boundaries closed even when storage cannot
+          // acknowledge the interruption. It never grants new authority.
+          this.store.markRunUncertain(run.id,run.generation);persistenceFailed=true;
+        }finally{
+          const active=this.active.get(run.id);
+          if(active?.job.run.generation===run.generation){active.controller.abort();this.cancelRuntime(source.id);}
+        }
+        throw new ControlError(persistenceFailed?`${error.message}. Controller could not persist its interruption; restore storage and reconcile before retry`:error.message,persistenceFailed?503:409);
+      }
     }
     throw new ControlError("unknown broker tool",404);
   }

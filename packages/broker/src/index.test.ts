@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { BrokerConnection, BrokerContext, PermissionAction, PermissionProfile } from "@laun/protocol";
-import { argumentsDigest, canonicalJson, catalogStorageIdentity, createToolBroker, headerValue, isPublicAddress, parameterHeaders, pinEndpoint, proposePermissionChange, toolDigest } from "./index.js";
+import { BrokerOutcomeUnknownError, argumentsDigest, canonicalJson, catalogStorageIdentity, createToolBroker, headerValue, isPublicAddress, parameterHeaders, pinEndpoint, proposePermissionChange, toolDigest } from "./index.js";
 import { postPinned } from "./network.js";
 
 const servers: Array<{ stop(force?: boolean): void }> = [];
@@ -139,12 +139,12 @@ describe("MCP broker authorization and real HTTP transport", () => {
 
   test("unsupported server interaction, oversized response and deadline fail without retry", async () => {
     const input = fixture({ result: { resultType: "input_required", inputRequests: { sample: { method: "sampling/createMessage" } } } });
-    await expect(callEcho(setup(input.connection).broker)).rejects.toThrow("unsupported sampling");
+    await expect(callEcho(setup(input.connection).broker)).rejects.toBeInstanceOf(BrokerOutcomeUnknownError);
     expect(input.requests.filter((r) => r.body.method === "tools/call")).toHaveLength(1);
     const large = fixture({ max: true });
-    await expect(callEcho(setup(large.connection, { maxResponseBytes: 1024 }).broker)).rejects.toThrow("byte limit");
+    await expect(callEcho(setup(large.connection, { maxResponseBytes: 1024 }).broker)).rejects.toBeInstanceOf(BrokerOutcomeUnknownError);
     const slow = fixture({ slow: true });
-    await expect(callEcho(setup(slow.connection, { timeoutMs: 50 }).broker)).rejects.toThrow("deadline exceeded");
+    await expect(callEcho(setup(slow.connection, { timeoutMs: 50 }).broker)).rejects.toBeInstanceOf(BrokerOutcomeUnknownError);
     expect(slow.requests.filter((r) => r.body.method === "tools/call")).toHaveLength(1);
   });
 });
