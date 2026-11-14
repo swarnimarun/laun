@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createGateway } from "./server.js";
@@ -84,5 +84,17 @@ describe("bounded display history with lifetime state", () => {
     mkdirSync(join(config.dataDir, "index.json"));
     await gw.sendMessage(rec.id, { text: "cannot start" });
     expect(gw.running.has(rec.id)).toBe(false);
+  });
+
+  test("corrupt authoritative history refuses replay rather than losing usage", () => {
+    const { config, gw } = setup();
+    const rec = gw.sessions.create({ goal: "g", model: "m", runtime: "pi" });
+    gw.publish(rec.id, { type: "usage", sessionId: rec.id, totalTokens: 99 });
+    const path = join(config.dataDir, `events-${rec.id}.jsonl`);
+    appendFileSync(path, '{"type":"usage"');
+    const original = readFileSync(path, "utf8");
+    const restored = createGateway(config);
+    expect(() => restored.sessionTokens(rec.id)).toThrow("cannot replay session events");
+    expect(readFileSync(path, "utf8")).toBe(original);
   });
 });

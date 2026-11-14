@@ -93,11 +93,13 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
     const pendingApprovals: SessionBus["pendingApprovals"] = new Map();
     try {
       if (!existsSync(eventsFile(id))) return { events, offset: 0, totalTokens, pendingApprovals };
-      const lines = readFileSync(eventsFile(id), "utf8").split("\n").filter(Boolean);
+      const raw = readFileSync(eventsFile(id), "utf8");
+      if (raw && !raw.endsWith("\n")) throw new Error("unterminated session event history");
+      const lines = raw.split("\n").filter(Boolean);
       for (const line of lines) {
         try {
           const e: unknown = JSON.parse(line);
-          if (!isAgentEvent(e) || e.sessionId !== id) continue;
+          if (!isAgentEvent(e) || e.sessionId !== id) throw new Error("invalid or cross-session event record");
           count++;
           totalTokens += countedTokens(e);
           events.push(e);
@@ -105,8 +107,10 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
           if (e.type === "approval_request") pendingApprovals.set(e.requestId, e);
           const settled = settledApproval(e);
           if (settled) pendingApprovals.delete(settled);
-        } catch {
-          // skip corrupt line
+        } catch (error) {
+          // Skipping a corrupt usage/decision record would silently reduce
+          // spend or resurrect authority. Preserve the file for recovery.
+          throw new Error("invalid session event history; restore from backup before resuming", { cause: error });
         }
       }
     } catch (error) {
