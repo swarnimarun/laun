@@ -1,4 +1,8 @@
 import type { AgentEvent, ExecutorRunRequest } from "@laun/protocol";
+import { isAgentEvent, isTerminalAgentEvent } from "@laun/protocol";
+
+/** Bound each decoded JSONL record, including an unfinished final line. */
+export const MAX_EXECUTOR_EVENT_CHARS = 1_048_576;
 
 /** POSTs a run to the executor and yields AgentEvents from the NDJSON stream. */
 export async function* streamExecutorRun(
@@ -20,40 +24,66 @@ export async function* streamExecutorRun(
     }
     throw new Error(`executor ${res.status}: ${detail.slice(0, 300)}`);
   }
-  if (!res.body) return;
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
+  if (!res.body) throw new Error("executor returned no event stream");
+  yield* readExecutorEvents(res.body, req.sessionId);
+}
+
+/** Stream framing is separate from HTTP so cancellation and split records can be verified. */
+export async function* readExecutorEvents(
+  stream: ReadableStream<Uint8Array>,
+  sessionId: string,
+): AsyncGenerator<AgentEvent> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   let buf = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const lines = buf.split("\n");
-    buf = lines.pop() ?? "";
-    for (const line of lines) {
-      const ev = parseEventLine(line);
-      if (ev) yield ev;
+  let consumed = false;
+  let terminal = false;
+  const parse = (line: string): AgentEvent | null => {
+    if (line.length > MAX_EXECUTOR_EVENT_CHARS) throw new Error("executor event exceeds record limit");
+    const ev = parseEventLine(line, sessionId);
+    // Recovery can emit error then running; only the final record settles a run.
+    if (ev) terminal = isTerminalAgentEvent(ev);
+    return ev;
+  };
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        consumed = true;
+        break;
+      }
+      buf += decoder.decode(value, { stream: true });
+      let start = 0;
+      let end: number;
+      while ((end = buf.indexOf("\n", start)) !== -1) {
+        const ev = parse(buf.slice(start, end));
+        start = end + 1;
+        if (ev) yield ev;
+      }
+      buf = buf.slice(start);
+      if (buf.length > MAX_EXECUTOR_EVENT_CHARS) throw new Error("executor event exceeds record limit");
     }
-  }
-  const tail = (buf + decoder.decode()).trim();
-  if (tail) {
-    const ev = parseEventLine(tail);
+    const ev = parse(buf + decoder.decode());
     if (ev) yield ev;
+    if (!terminal) throw new Error("executor stream ended without a terminal event");
+  } finally {
+    if (!consumed) await reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
 }
 
-function parseEventLine(line: string): AgentEvent | null {
+function parseEventLine(line: string, sessionId: string): AgentEvent | null {
   const t = line.trim();
   if (!t) return null;
+  let obj: unknown;
   try {
-    const obj = JSON.parse(t) as AgentEvent;
-    if (obj && typeof obj === "object" && typeof obj.type === "string" && typeof obj.sessionId === "string") {
-      return obj;
-    }
-    return null;
+    obj = JSON.parse(t);
   } catch {
-    return null;
+    throw new Error("executor stream contains malformed JSON");
   }
+  if (!isAgentEvent(obj)) throw new Error("executor stream contains an invalid event");
+  if (obj.sessionId !== sessionId) throw new Error("executor event session mismatch");
+  return obj;
 }
 
 /**
