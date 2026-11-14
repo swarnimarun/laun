@@ -15,5 +15,8 @@
     "@laun/control": "workspace:*",
     "@laun/runtime": "workspace:*",
     "@laun/broker": "workspace:*"
+  },
+  "devDependencies": {
+    "playwright": "1.56.1"
   }
 }

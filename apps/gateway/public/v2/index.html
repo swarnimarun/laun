@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#172b24" />
+    <title>Laun · Your agent workspace</title>
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%23172b24'/%3E%3Cpath d='M12 29V12h5v13h11v4z' fill='%23d5efa7'/%3E%3Cpath d='M22 12c8 0 9-5 9-5 1 8-3 13-9 13z' fill='%23d5efa7'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/app/style.css" />
+    <script src="/app/app.js" type="module"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to conversation</a>
+    <main id="login-view" class="login-view">
+      <div class="login-art" aria-hidden="true">
+        <div class="art-orbit orbit-one"></div>
+        <div class="art-orbit orbit-two"></div>
+        <div class="art-orbit orbit-three"></div>
+        <div class="art-leaf leaf-one"></div>
+        <div class="art-leaf leaf-two"></div>
+        <div class="art-leaf leaf-three"></div>
+        <div class="login-brand">
+          <span class="brand-mark">l<span></span></span
+          ><span>laun<span class="brand-period">.</span></span>
+        </div>
+        <div class="login-art-copy">
+          <p class="eyebrow">A WORKSPACE THAT KEEPS GROWING</p>
+          <h1>Good work<br />takes a crew.</h1>
+          <p>
+            Bring your agents, conversations, and permissions together. Give
+            every task a place to grow.
+          </p>
+        </div>
+        <div class="art-caption">
+          <span class="tiny-star">✳</span> Your server. Your workspace. Your
+          call.
+        </div>
+      </div>
+      <section class="login-content" aria-labelledby="login-title">
+        <div class="mobile-brand">laun<span>.</span></div>
+        <div class="login-card">
+          <p class="eyebrow">WELCOME TO YOUR YARD</p>
+          <h2 id="login-title">Let’s get to work.</h2>
+          <p class="subtle login-intro">
+            Connect to this installation with your agent key. Your conversations
+            stay on your server.
+          </p>
+          <form id="login-form" method="post" action="/app">
+            <label for="auth-key">Agent key</label>
+            <input
+              id="auth-key"
+              type="password"
+              name="key"
+              autocomplete="current-password"
+              placeholder="laun_…"
+              required
+              spellcheck="false"
+            />
+            <p class="field-hint">
+              Use the key from <code>laun setup</code>. It stays in this browser
+              tab’s session.
+            </p>
+            <button
+              class="button button-primary login-submit"
+              id="connect-button"
+              type="submit"
+            >
+              Open workspace <span aria-hidden="true">↗</span>
+            </button>
+            <p id="login-error" class="form-error" role="alert"></p>
+          </form>
+          <div class="login-help">
+            <span class="help-symbol">i</span>
+            <p>
+              First time here? Start your local control server or VPS
+              installation, then use its generated key.
+            </p>
+          </div>
+        </div>
+        <p class="login-origin" id="login-origin"></p>
+      </section>
+    </main>
+
+    <div id="workspace" class="workspace" hidden>
+      <aside class="sidebar" id="sidebar" aria-label="Mowers and threads">
+        <a class="brand" href="/app" aria-label="Laun workspace"
+          ><span class="brand-mark">l<span></span></span
+          ><span>laun<span class="brand-period">.</span></span></a
+        >
+        <button class="workspace-switch" id="workspace-info" type="button">
+          <span class="workspace-icon">Y</span
+          ><span
+            ><strong id="installation-name">Your workspace</strong
+            ><small id="installation-location"
+              >Connected installation</small
+            ></span
+          ><span class="subtle" aria-hidden="true">⌄</span>
+        </button>
+        <button
+          class="button button-sidebar"
+          id="new-thread-button"
+          type="button"
+        >
+          <span aria-hidden="true">+</span> New thread <kbd>⌘ ↵</kbd>
+        </button>
+        <div class="search-wrap">
+          <span aria-hidden="true">⌕</span
+          ><input
+            type="search"
+            id="thread-search"
+            placeholder="Find a thread"
+            aria-label="Find a thread"
+          /><kbd>⌘ K</kbd>
+        </div>
+        <div class="sidebar-section-title">
+          <h2>Mowers</h2>
+          <button
+            class="icon-button inverse"
+            id="new-mower-button"
+            type="button"
+            title="Add mower"
+            aria-label="Add mower"
+          >
+            +
+          </button>
+        </div>
+        <div id="mower-list" class="mower-list"></div>
+        <div class="sidebar-section-title threads-title">
+          <h2>Threads</h2>
+          <span id="thread-count" class="count-pill">0</span>
+        </div>
+        <nav id="thread-list" class="thread-list" aria-label="Threads"></nav>
+        <div class="sidebar-footer">
+          <div class="connection-state">
+            <span class="status-dot" id="connection-dot"></span
+            ><span id="connection-label">Connecting</span
+            ><button
+              id="refresh-button"
+              class="icon-button inverse"
+              type="button"
+              title="Refresh workspace"
+              aria-label="Refresh workspace"
+            >
+              ↻
+            </button>
+          </div>
+          <button id="disconnect-button" class="account-button" type="button">
+            <span class="account-avatar">Y</span
+            ><span
+              ><strong>Your workspace</strong
+              ><small>Disconnect this tab</small></span
+            ><span aria-hidden="true">↗</span>
+          </button>
+        </div>
+      </aside>
+
+      <section
+        id="main-content"
+        class="conversation-panel"
+        aria-label="Conversation"
+        tabindex="-1"
+      >
+        <header class="conversation-header">
+          <div class="header-heading">
+            <button
+              class="icon-button mobile-only"
+              id="sidebar-toggle"
+              type="button"
+              aria-label="Show navigation"
+              aria-expanded="false"
+            >
+              ☰
+            </button>
+            <div>
+              <div class="breadcrumb" id="thread-breadcrumb">
+                Your workspace <span>/</span> Threads
+              </div>
+              <h1 id="thread-title">Room to grow.</h1>
+            </div>
+          </div>
+          <div class="header-actions">
+            <span class="state-pill" id="thread-status" hidden></span
+            ><button
+              class="icon-button"
+              id="thread-menu-button"
+              type="button"
+              title="Thread settings"
+              aria-label="Thread settings"
+              hidden
+            >
+              ···</button
+            ><button
+              class="icon-button inspector-toggle"
+              id="inspector-toggle"
+              type="button"
+              aria-label="Toggle workspace details"
+              aria-expanded="true"
+            >
+              <span aria-hidden="true">◫</span>
+            </button>
+          </div>
+        </header>
+        <div id="readiness-banner" class="readiness-banner" hidden></div>
+        <div id="empty-state" class="empty-state">
+          <div class="empty-art" aria-hidden="true">
+            <span class="empty-leaf leaf-a"></span
+            ><span class="empty-leaf leaf-b"></span
+            ><span class="empty-leaf leaf-c"></span
+            ><span class="empty-stem"></span><span class="empty-ring"></span>
+          </div>
+          <p class="eyebrow">SMALL SEEDS. GOOD WORK.</p>
+          <h2>What are we growing today?</h2>
+          <p>
+            Your mowers work in durable threads.<br />Start a conversation and
+            keep the whole crew in view.
+          </p>
+          <button
+            class="button button-primary"
+            id="empty-start-button"
+            type="button"
+          >
+            Start your first thread <span aria-hidden="true">↗</span>
+          </button>
+          <div class="getting-started">
+            <div>
+              <span>01</span><strong>Name your mower</strong>
+              <p>Give an agent a purpose and a permission profile.</p>
+            </div>
+            <div>
+              <span>02</span><strong>Plant a task</strong>
+              <p>Start a thread that stays with you between runs.</p>
+            </div>
+            <div>
+              <span>03</span><strong>Stay in control</strong>
+              <p>Follow work, review requests, and talk to any mower.</p>
+            </div>
+          </div>
+        </div>
+        <div id="thread-view" class="thread-view" hidden>
+          <div id="thread-context" class="thread-context" hidden></div>
+          <div
+            id="recovery-strip"
+            class="recovery-strip"
+            role="status"
+            hidden
+          ></div>
+          <section
+            id="messages"
+            class="messages"
+            aria-label="Thread messages"
+            aria-live="off"
+            aria-relevant="additions text"
+          ></section>
+          <button class="jump-latest" id="jump-latest" type="button" hidden>
+            ↓ Latest messages
+          </button>
+          <div
+            id="approval-strip"
+            class="approval-strip"
+            aria-label="Permission requests"
+            hidden
+          ></div>
+          <div class="composer-wrap">
+            <form id="composer" class="composer">
+              <label class="sr-only" for="message-input"
+                >Message this thread</label
+              >
+              <textarea
+                id="message-input"
+                name="text"
+                rows="2"
+                maxlength="32000"
+                placeholder="Give your mower something to work on…"
+                required
+              ></textarea>
+              <div class="composer-toolbar">
+                <div class="composer-options">
+                  <span class="composer-mower" id="composer-mower"></span
+                  ><label class="delivery-select"
+                    ><span class="sr-only">Message delivery</span
+                    ><select id="delivery-mode">
+                      <option value="queue">Queue message</option>
+                      <option value="steer">Steer current run</option>
+                    </select></label
+                  >
+                </div>
+                <div class="composer-buttons">
+                  <button
+                    id="cancel-run-button"
+                    class="button button-small button-stop"
+                    type="button"
+                    hidden
+                  >
+                    <span class="stop-square" aria-hidden="true"></span>
+                    Stop</button
+                  ><button
+                    id="send-button"
+                    class="send-button"
+                    type="submit"
+                    aria-label="Send message"
+                  >
+                    ↑
+                  </button>
+                </div>
+              </div>
+            </form>
+            <div class="composer-footnote">
+              <span id="composer-note" role="status"
+                >Enter to send · Shift + Enter for a new line</span
+              ><span id="thread-usage"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <aside id="inspector" class="inspector" aria-label="Workspace details">
+        <header class="inspector-header">
+          <h2>In the yard</h2>
+          <span class="live-label"><span class="status-dot"></span> Live</span>
+          <button
+            id="inspector-close"
+            class="icon-button inspector-close"
+            type="button"
+            aria-label="Close workspace details"
+          >
+            ×
+          </button>
+        </header>
+        <div
+          class="inspector-tabs"
+          role="tablist"
+          aria-label="Workspace details sections"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected="true"
+            data-tab="overview"
+          >
+            Overview</button
+          ><button
+            type="button"
+            role="tab"
+            aria-selected="false"
+            data-tab="tasks"
+          >
+            Tasks</button
+          ><button
+            type="button"
+            role="tab"
+            aria-selected="false"
+            data-tab="permissions"
+          >
+            Permissions<span
+              id="approval-count"
+              class="tab-count"
+              hidden
+            ></span></button
+          ><button
+            type="button"
+            role="tab"
+            aria-selected="false"
+            data-tab="yards"
+          >
+            Yards</button
+          ><button
+            type="button"
+            role="tab"
+            aria-selected="false"
+            data-tab="connections"
+          >
+            Connectors
+          </button>
+        </div>
+        <section
+          id="inspector-content"
+          class="inspector-content"
+          role="tabpanel"
+          tabindex="0"
+        ></section>
+        <footer class="inspector-footer">
+          <span class="tiny-star" aria-hidden="true">✳</span
+          ><span>Good guardrails. Room to grow.</span>
+        </footer>
+      </aside>
+    </div>
+
+    <dialog id="modal" class="modal">
+      <form id="modal-form">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow" id="modal-eyebrow">YOUR WORKSPACE</p>
+            <h2 id="modal-title"></h2>
+          </div>
+          <button
+            class="icon-button"
+            id="modal-close"
+            type="button"
+            aria-label="Close dialog"
+          >
+            ×
+          </button>
+        </div>
+        <div id="modal-fields" class="modal-fields"></div>
+        <p id="modal-error" class="form-error" role="alert"></p>
+        <div class="modal-actions">
+          <button class="button button-quiet" id="modal-cancel" type="button">
+            Cancel</button
+          ><button
+            class="button button-primary"
+            id="modal-submit"
+            type="submit"
+          >
+            Save
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <div
+      id="thread-announcement"
+      class="sr-only"
+      role="status"
+      aria-live="polite"
+    ></div>
+    <datalist id="runtime-models"></datalist>
+    <div
+      id="toast-region"
+      class="toast-region"
+      role="status"
+      aria-live="polite"
+    ></div>
+  </body>
+</html>
