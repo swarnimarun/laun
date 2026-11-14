@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { parseAgentKey } from "@laun/protocol";
+import { parseAgentKey, type GatewayMe, type ControlState, type RuntimeModel } from "@laun/protocol";
 import { UsageError, flagBool, flagString, parseArgs, requiredArg } from "./args.js";
 import {
   collectUsageTotals,
@@ -15,6 +15,9 @@ import {
   type DoctorProbe,
 } from "./agent.js";
 import { GatewayClient, GatewayError } from "./client.js";
+import { CONTROL_COMMANDS, CONTROL_HELP, controlCommand, controlHelpRequested } from "./control.js";
+import {yardSetupCommand} from "./yard-cli.js";
+import {backupCommand} from "./backup-cli.js";
 import {
   authFilePath,
   homeFor,
@@ -41,14 +44,15 @@ const HELP = `laun — self-hosted remote agent control
         Prepare .env locally (gateway token + agent key) and start the stack.
 
     laun setup ssh -i <identity> [--user <u>] [--port <n>] [--remote-dir <dir>]
-        [--repo-url <url>] [--no-start] <host>
+        [--repo-url <url> --revision <40hex>] [--no-start] <host>
         Bootstrap a VPS over SSH and print its agent key.
 
   Connect
     laun agent auth --host <host> --key <key> [--port <n>] [--scheme http|https]
         Verify the key and save it to ~/.laun/auth.json (0600).
 
-  Drive agents (all accept --target <name> for a saved host)
+${CONTROL_HELP}
+  Legacy sessions (all accept --target <name> for a saved host)
     laun agent new "<goal>" [--model <m>] [--repo <url-or-path>] [--runtime pi|goose|dots] [--json]
     laun agent ls [--json]
     laun agent status <id> [--json]
@@ -84,8 +88,12 @@ const HELP = `laun — self-hosted remote agent control
 
   Keys (needs GATEWAY_TOKEN, the service secret)
     laun keys ls
-    laun keys create [--label <l>]
+    laun keys create [--label <l>] [--principal <existing-owner-id>]
     laun keys revoke <id>
+
+  Offline recovery (stop controller, bridge and workers first)
+    laun backup create --data-dir <dir> --out <new-dir> --confirmed-offline [--json]
+    laun backup restore <backup-dir> --to <new-dir> --confirmed-offline [--json]
 
   Environment overrides: LAUN_HOST, LAUN_PORT, LAUN_KEY
 `;
@@ -105,6 +113,14 @@ const defaultIo: Io = {
 
 function clientFor(target: Target, tokenOverride?: string): GatewayClient {
   return new GatewayClient(targetUrl(target), tokenOverride ?? target.key);
+}
+async function authenticatedIdentity(client: GatewayClient): Promise<GatewayMe|null> {
+  try {
+    const me=await client.control<GatewayMe>("/me",{timeoutMs:8000});
+    if(!me||typeof me.principalId!=="string"||!me.principalId||typeof me.admin!=="boolean")throw new Error("controller returned an invalid authenticated identity");
+    return me;
+  }
+  catch(error){if(error instanceof GatewayError&&error.status===404)return null;throw error;}
 }
 
 function requireTarget(env: NodeJS.ProcessEnv, io: Io, name?: string): Target {
@@ -168,11 +184,16 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 async function setupCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Promise<number> {
   const [sub, ...rest] = argv;
   if (sub === "ssh") {
-    const { flags } = parseArgs(rest, {
+    const parsed = parseArgs(rest, {
       boolean: ["no-start", "json"],
-      value: ["i", "identity", "user", "port", "remote-dir", "repo-url", "env-file"],
+      value: ["i", "identity", "user", "port", "remote-dir", "repo-url", "revision", "env-file"],
     });
-    const rawHost = requiredArg(parseArgs(rest, { boolean: ["no-start"], value: ["i", "identity", "user", "port", "remote-dir", "repo-url", "env-file"] }).positionals, 0, "host", "laun setup ssh -i <identity> [user@]host");
+    const {flags}=parsed;
+    const rawHost = requiredArg(parsed.positionals, 0, "host", "laun setup ssh -i <identity> [user@]host");
+    if(parsed.positionals.length>1)throw new UsageError("setup ssh accepts one host");
+    if(flagString(flags,"repo-url")&&(!flagString(flags,"revision")||!/^[0-9a-f]{40}$/.test(flagString(flags,"revision")!)))throw new UsageError("--repo-url requires an exact --revision commit; floating source branches are not deployed");
+    if(flagString(flags,"revision")&&!flagString(flags,"repo-url"))throw new UsageError("--revision requires --repo-url");
+    if(flagString(flags,"repo-url")){try{const url=new URL(flagString(flags,"repo-url")!);if(url.protocol!=="https:"||url.username||url.password||url.search||url.hash)throw new Error();}catch{throw new UsageError("--repo-url must be credential-free HTTPS");}}
     const identity = flagString(flags, "i") ?? flagString(flags, "identity");
     if (!identity) throw new UsageError("setup ssh needs a private key: -i <identity>");
     const portRaw = flagString(flags, "port");
@@ -184,8 +205,10 @@ async function setupCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
       port: portRaw ? Number(portRaw) : undefined,
       remoteDir: flagString(flags, "remote-dir") ?? "/opt/laun",
       repoUrl: flagString(flags, "repo-url"),
+      revision:flagString(flags,"revision"),
       noStart: flagBool(flags, "no-start"),
       envFile: flagString(flags, "env-file") ?? ".env",
+      releaseVersion:CLI_VERSION,
     });
     if (flagBool(flags, "json")) io.out(JSON.stringify({ url: result.url, key: result.key, host: target.host, remoteDir: result.remoteDir }));
     else io.out(connectionBlock(result.url, result.key, target.host));
@@ -202,6 +225,7 @@ async function setupCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
     composeFile: flagString(flags, "compose-file") ?? "deploy/docker-compose.yml",
     host,
     noStart: flagBool(flags, "no-start"),
+    releaseVersion:CLI_VERSION,
   });
   if (flagBool(flags, "json")) io.out(JSON.stringify({ url: result.url, key: result.key, envFile: result.envPath }));
   else io.out(connectionBlock(result.url, result.key, host));
@@ -242,15 +266,25 @@ async function agentCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pro
       keyId: parseAgentKey(key)?.id,
     };
     const client = clientFor(target);
-    const health = await client.health();
-    const { sessions } = await client.listSessions();
+    let summary: {api:"v2"|"legacy";principalId?:string;mowers?:number;threads?:number;sessions?:number};
+    const me=await authenticatedIdentity(client);
+    if(me) {
+      const workspace=await client.control<ControlState>("/state");
+      summary={api:"v2",principalId:me.principalId,mowers:workspace.mowers.length,threads:workspace.threads.length};
+    } else {
+      // Only an absent v2 identity endpoint identifies an older server. An
+      // authentication/outage/disabled-legacy response must never downgrade.
+      const {sessions}=await client.listSessions();
+      summary={api:"legacy",sessions:sessions.length};
+    }
     // Home comes from the env this invocation was given, not a bare homedir(),
     // so a test cannot write into the operator's real ~/.laun.
     const saved = saveTarget(target, homeFor(env));
-    if (flagBool(flags, "json")) io.out(JSON.stringify({ ...target, saved, sessions: sessions.length }));
+    if (flagBool(flags, "json")) io.out(JSON.stringify({url:targetUrl(target),keyId:target.keyId,saved,...summary}));
     else {
-      io.out(`connected to ${targetUrl(target)} (${health.service})`);
-      io.out(`sessions: ${sessions.length}`);
+      io.out(`connected to ${targetUrl(target)} (${summary.api})`);
+      if(summary.api==="v2")io.out(`principal: ${summary.principalId}; mowers: ${summary.mowers}; threads: ${summary.threads}`);
+      else io.out(`legacy sessions: ${summary.sessions} (single-operator compatibility; v2 readiness not qualified)`);
       io.out(`saved: ${saved}`);
     }
     return 0;
@@ -451,9 +485,10 @@ async function keysCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Prom
     return 0;
   }
   if (sub === "create") {
-    const { flags } = parseArgs(rest, { value: ["label"] });
-    const { key, record } = await client.createKey(flagString(flags, "label"));
+    const { flags } = parseArgs(rest, { value: ["label", "principal"] });
+    const { key, record } = await client.createKey(flagString(flags, "label"), flagString(flags, "principal"));
     io.out(`agent key ${record.id} (${record.label}) — shown once:`);
+    if (record.principalId) io.out(`principal ${record.principalId}`);
     io.out(key);
     return 0;
   }
@@ -486,11 +521,47 @@ async function doctorCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pr
   }
   const fromEnv = name === undefined && Boolean((env["LAUN_HOST"] ?? "").trim() && (env["LAUN_KEY"] ?? "").trim());
   const savedPresent = loadTarget(home) !== null;
+  if(resolved) {
+    const client=clientFor(resolved);
+    try {
+      const me=await authenticatedIdentity(client);
+      if(!me)io.out("legacy qualification: v2 /me is absent; checking authenticated single-operator compatibility only");
+      else {
+      const [workspace,catalog]=await Promise.all([
+        client.control<ControlState>("/state",{timeoutMs:8000}),
+        client.control<{models:RuntimeModel[]}>("/models",{timeoutMs:8000}),
+      ]);
+      const online=workspace.workers.filter(worker=>!worker.local&&worker.status==="online"&&worker.lastSeenAt&&Date.now()-Date.parse(worker.lastSeenAt)<45_000);
+      const configured=catalog.models.filter(model=>model.configured);
+      const local=workspace.readiness.runtime&&workspace.readiness.mode!=="unconfigured";
+      const problems:string[]=[];
+      io.out(`laun doctor (cli ${CLI_VERSION}; Bun ${Bun.version})`);
+      io.out(`target: ${targetUrl(resolved)}`);
+      io.out(`authenticated: ${me.principalId}${me.admin?" (installation administrator)":""}`);
+      io.out(`execution: ${local?workspace.readiness.mode:"no local runtime"}; online remote yards: ${online.length}`);
+      io.out(`central durable journal: ${workspace.readiness.durableJournal===true?"available":"unavailable"}`);
+      if(workspace.readiness.durableJournal!==true)problems.push("The controller does not advertise its central durable journal; upgrade it before relying on remote recovery.");
+      if(workspace.readiness.storage?.acceptingWork===false)problems.push(`Storage admission is closed: ${workspace.readiness.storage.message??"free disk is below the configured reserve"}. New work will not start.`);
+      if(!local&&!online.length)problems.push("No local execution runtime or recently online remote yard; accepted input will remain queued.");
+      if(local) {
+        io.out(`models: ${configured.length} configured in the controller catalog (${catalog.models.length} total); actual inference not probed`);
+        if(!configured.length)problems.push("The local runtime has no configured model in its catalog.");
+      } else io.out(`models: controller catalog has ${configured.length} configured; remote-yard provider credentials are unverified, not inferred from health`);
+      for(const problem of problems)io.out(`problem: ${problem}`);
+      if(!problems.length)io.out("healthy: authenticated control and execution capacity available; inference and external tools were not invoked");
+      return problems.length?1:0;
+      }
+    } catch(error) {
+        io.out(`gateway: unreachable or authentication/readiness failed: ${(error as Error).message}`);
+        return 1;
+    }
+  }
   const probe = async (): Promise<DoctorProbe> => {
-    if (!resolved) return { version: CLI_VERSION, target: null, savedPresent, keyPresent: false, gateway: null };
+    if (!resolved) return { version: CLI_VERSION,bunVersion:Bun.version, target: null, savedPresent, keyPresent: false, gateway: null };
     let gateway: DoctorGateway;
     try {
       const health = await withTimeout(new GatewayClient(targetUrl(resolved), resolved.key).health(), 8000);
+      await withTimeout(new GatewayClient(targetUrl(resolved), resolved.key).listSessions(),8000);
       gateway = { ok: true, service: health.service };
     } catch (e) {
       // First line only, and never a secret: our gateway errors carry the
@@ -499,6 +570,7 @@ async function doctorCommand(argv: string[], env: NodeJS.ProcessEnv, io: Io): Pr
     }
     return {
       version: CLI_VERSION,
+      bunVersion:Bun.version,
       target: {
         url: targetUrl(resolved),
         source: name !== undefined ? `saved target "${name}"` : fromEnv ? "environment" : "saved file",
@@ -583,8 +655,15 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
     if (command === "setup") return await setupCommand(rest, env, io);
     if (command === "agent") return await agentCommand(rest, env, io);
     if (command === "keys") return await keysCommand(rest, env, io);
+    if (command === "backup") return await backupCommand(rest,io);
     if (command === "doctor") return await doctorCommand(rest, env, io);
     if (command === "target") return await targetCommand(rest, env, io);
+    if (CONTROL_COMMANDS.has(command)) {
+      const split = splitTargetFlag(rest);
+      if (controlHelpRequested(split.argv)) { io.out(CONTROL_HELP); return 0; }
+      if(command==="yard"&&split.argv[0]==="setup")return await yardSetupCommand(split.argv.slice(1),clientFor(requireTarget(env,io,split.target)),io);
+      return await controlCommand(command, split.argv, clientFor(requireTarget(env, io, split.target)), io);
+    }
     const aliased = TOP_LEVEL_AGENT_ALIAS[command];
     if (aliased !== undefined) return await agentCommand([aliased, ...rest], env, io);
     throw new UsageError(`unknown command "${command}"\n\n${HELP}`);

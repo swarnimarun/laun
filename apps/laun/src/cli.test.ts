@@ -158,11 +158,11 @@ describe("ssh layer", () => {
 
     expect(result).toEqual({ key, port: 8081, dir: "/opt/laun" });
     expect(calls).toHaveLength(3);
-    expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain("mkdir -p '/opt/laun'");
+    expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain("installation path has a symlink ancestor");
     // non-root users need the sudo fallback for paths such as /opt/...
-    expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain("sudo -n mkdir -p '/opt/laun'");
-    expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain("$(id -u):$(id -g)");
-    expect(calls[1]!.argv[calls[1]!.argv.length - 1]).toContain("cat > '/opt/laun'/.env");
+    expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain("sudo -n mkdir -m");
+    expect(calls[0]!.argv[calls[0]!.argv.length - 1]).toContain("it will not be chowned");
+    expect(calls[1]!.argv[calls[1]!.argv.length - 1]).toContain("remote configuration differs");
     expect(calls[2]!.argv[calls[2]!.argv.length - 1]).toBe("bash -s -- '/opt/laun' 'git@github.com:me/laun.git'");
     // the env travels on stdin, and no secret ever appears in argv
     expect(calls[1]!.stdin).toContain(key);
@@ -180,14 +180,14 @@ describe("ssh layer", () => {
       return call < 3 ? { code: 0, stdout: "", stderr: "" } : { code: 1, stdout: "==> ERROR: boom", stderr: "nope" };
     };
     await expect(
-      runRemoteSetup({ ...spec, remoteDir: "/d", envContent: "x", bootstrapScript: "y", runner }),
+      runRemoteSetup({ ...spec, remoteDir: "/opt/laun-test", envContent: "x", bootstrapScript: "y", runner }),
     ).rejects.toThrow(/remote setup failed.*LAUN_KEY/s);
   });
 
   test("runRemoteSetup surfaces an ssh failure before bootstrapping", async () => {
     const runner: CommandRunner = async () => ({ code: 255, stdout: "", stderr: "Permission denied" });
     await expect(
-      runRemoteSetup({ ...spec, remoteDir: "/d", envContent: "x", bootstrapScript: "y", runner }),
+      runRemoteSetup({ ...spec, remoteDir: "/opt/laun-test", envContent: "x", bootstrapScript: "y", runner }),
     ).rejects.toThrow(/ssh mkdir failed.*Permission denied/s);
   });
 
@@ -299,10 +299,9 @@ describe("bootstrap contract", () => {
     expect(bootstrap).toContain("*.pi");
     // and warns when there is no pi login, instead of failing opaquely later
     expect(bootstrap).toContain("agent/auth.json");
-    // the resolved path must be persisted so a later manual `docker compose up`
-    // (which never runs this script) cannot fall back to HOME=/root
-    expect(bootstrap).toContain("^PI_CONFIG_DIR=");
-    expect(bootstrap).toContain("PI_CONFIG_DIR=%s");
+    // References are passed explicitly through sudo; setup preserves .env.
+    expect(bootstrap).toContain("export PI_CONFIG_DIR");
+    expect(bootstrap).not.toContain('cp "$ENV_BACKUP" "$ENV_FILE"');
   });
 });
 describe("named targets", () => {

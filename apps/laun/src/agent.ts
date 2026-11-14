@@ -381,6 +381,7 @@ export type DoctorGateway = { ok: true; service: string } | { ok: false; error: 
  * can stub the gateway probe; values (keys, tokens) never appear here. */
 export interface DoctorProbe {
   version: string;
+  bunVersion?:string;
   /** How commands would connect, or null when nothing is configured. */
   target: { url: string; source: string; keyId?: string } | null;
   savedPresent: boolean;
@@ -390,7 +391,7 @@ export interface DoctorProbe {
 
 /** Render the doctor report. Returns the lines and whether all is well. */
 export function renderDoctor(p: DoctorProbe): { lines: string[]; healthy: boolean } {
-  const lines = [`laun doctor (cli ${p.version})`];
+  const lines = [`laun doctor (cli ${p.version}${p.bunVersion?`; Bun ${p.bunVersion}`:""})`];
   const problems: string[] = [];
   if (p.target) {
     lines.push(`target: ${p.target.url} (from ${p.target.source})`);

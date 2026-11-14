@@ -1,3 +1,15 @@
+import { createHash } from "node:crypto";
+import { posix } from "node:path";
+import type { DeploymentFile } from "./assets.js";
+import {
+  prepareAssetParent,
+  prepareRemoteDirectory,
+  publishRemoteConfig,
+  validateInstallDirectory,
+} from "./remote-path.js";
+import { shQuote } from "./shell-quote.js";
+export { shQuote } from "./shell-quote.js";
+
 export interface CommandResult {
   code: number;
   stdout: string;
@@ -38,14 +50,22 @@ async function drain(
   return out;
 }
 
-export type CommandRunner = (argv: string[], opts?: RunOptions) => Promise<CommandResult>;
+export type CommandRunner = (
+  argv: string[],
+  opts?: RunOptions,
+) => Promise<CommandResult>;
 
 /** Default runner: Bun.spawn, so no shell is involved and quoting is explicit. */
 export const bunRunner: CommandRunner = async (argv, opts = {}) => {
   const stdio = opts.stdio ?? "pipe";
   const echo = opts.echo === true && stdio === "pipe";
   const proc = Bun.spawn(argv, {
-    stdin: opts.stdin !== undefined ? new Blob([opts.stdin]) : stdio === "inherit" ? "inherit" : "ignore",
+    stdin:
+      opts.stdin !== undefined
+        ? new Blob([opts.stdin])
+        : stdio === "inherit"
+          ? "inherit"
+          : "ignore",
     stdout: stdio === "inherit" ? "inherit" : "pipe",
     stderr: stdio === "inherit" ? "inherit" : "pipe",
     env: opts.env ? { ...Bun.env, ...opts.env } : Bun.env,
@@ -63,9 +83,6 @@ export const bunRunner: CommandRunner = async (argv, opts = {}) => {
 };
 
 /** POSIX single-quote a value so it survives a remote shell untouched. */
-export function shQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
 
 export interface SshTargetSpec {
   identity: string;
@@ -97,8 +114,11 @@ export interface RemoteSetupOptions extends SshTargetSpec {
   envContent: string;
   bootstrapScript: string;
   repoUrl?: string;
+  revision?: string;
   noStart?: boolean;
   runner?: CommandRunner;
+  assets?: DeploymentFile[];
+  releaseOnly?: boolean;
 }
 
 export interface RemoteSetupResult {
@@ -112,9 +132,11 @@ export interface RemoteSetupResult {
  * out of its stdout. The key never appears in argv or in an environment
  * variable — only in the piped payloads.
  */
-export async function runRemoteSetup(opts: RemoteSetupOptions): Promise<RemoteSetupResult> {
+export async function runRemoteSetup(
+  opts: RemoteSetupOptions,
+): Promise<RemoteSetupResult> {
   const run = opts.runner ?? bunRunner;
-  const dir = shQuote(opts.remoteDir);
+  const dir = shQuote(validateInstallDirectory(opts.remoteDir));
 
   // Every remote step echoes: a silent multi-minute bootstrap reads as "stuck".
   const show = { echo: true } as const;
@@ -122,30 +144,72 @@ export async function runRemoteSetup(opts: RemoteSetupOptions): Promise<RemoteSe
   // Creating a path like /opt/laun needs root on a stock Ubuntu box, but
   // /home/<user>/laun does not — try plainly first, then passwordless sudo,
   // and always hand the dir back to the calling user so the env write works.
-  const mkdirCmd =
-    `{ mkdir -p ${dir} && chmod 700 ${dir}; } 2>/dev/null || ` +
-    `{ sudo -n mkdir -p ${dir} && sudo -n chown "$(id -u):$(id -g)" ${dir} && sudo -n chmod 700 ${dir}; }`;
+  const mkdirCmd = `bash -c ${shQuote(prepareRemoteDirectory(opts.remoteDir, "controller"))}`;
   const mkdir = await run(sshArgv(opts, mkdirCmd), show);
   if (mkdir.code !== 0) {
     const why = mkdir.stderr.trim();
     throw new Error(
-      `ssh mkdir failed (${mkdir.code}): ${why ||
-        "cannot create the remote directory — it needs write access or passwordless sudo; use a writable --remote-dir such as ~/laun"}`,
+      `ssh mkdir failed (${mkdir.code}): ${
+        why ||
+        "use a fresh dedicated application directory, owned by this installer, with root/passwordless sudo when needed"
+      }`,
     );
   }
 
-  const writeEnv = await run(sshArgv(opts, `cat > ${dir}/.env && chmod 600 ${dir}/.env`), {
-    stdin: opts.envContent,
+  const writeEnv = await run(
+    sshArgv(
+      opts,
+      `bash -c ${shQuote(publishRemoteConfig(opts.remoteDir, ".env"))}`,
+    ),
+    {
+      stdin: opts.envContent,
+      echo: false,
+    },
+  );
+  if (writeEnv.code !== 0)
+    throw new Error(
+      `ssh env write failed (${writeEnv.code}): ${writeEnv.stderr.trim()}`,
+    );
+
+  for (const asset of opts.assets ?? []) {
+    if (
+      !/^(?:deploy\/.+|apps\/laun\/src\/compose-profile\.ts)$/.test(
+        asset.path,
+      ) ||
+      asset.path
+        .split("/")
+        .some((part) => !part || part === ".." || part === ".") ||
+      asset.path.includes("\\") ||
+      asset.path.endsWith("/.env") ||
+      createHash("sha256").update(asset.content).digest("hex") !== asset.sha256
+    )
+      throw new Error("invalid public deployment asset");
+    const destination = shQuote(`${opts.remoteDir}/${asset.path}`);
+    const command = `bash -c ${shQuote(`${prepareAssetParent(opts.remoteDir, posix.dirname(asset.path))}\ndestination=${destination}; if [ -e "$destination" ] || [ -L "$destination" ]; then [ ! -L "$destination" ] && [ -f "$destination" ] && [ "$(stat -c %u -- "$destination")" = "$(id -u)" ] && asset_mode=$(stat -c %a -- "$destination") && (( (8#$asset_mode & 0022) == 0 )) && printf '%s  %s\\n' ${shQuote(asset.sha256)} "$destination" | sha256sum --check --status || { echo 'existing deployment template differs or is unsafe; use the explicit upgrade workflow' >&2; exit 1; }; exit 0; fi; asset_tmp=$(mktemp "$destination.tmp.XXXXXX"); trap 'rm -f "$asset_tmp"' EXIT; cat > "$asset_tmp"; printf '%s  %s\\n' ${shQuote(asset.sha256)} "$asset_tmp" | sha256sum --check --status; ln "$asset_tmp" "$destination"`)}`;
+    const pushed = await run(sshArgv(opts, command), {
+      stdin: asset.content,
+      echo: false,
+    });
+    if (pushed.code !== 0)
+      throw new Error(
+        `verified deployment template transfer failed: ${asset.path}`,
+      );
+  }
+
+  const bootstrapCmd = `${opts.noStart ? "LAUN_NO_START=true " : ""}${opts.releaseOnly ? "LAUN_RELEASE_ONLY=true " : ""}bash -s -- ${dir}${opts.repoUrl ? ` ${shQuote(opts.repoUrl)}${opts.revision ? ` ${shQuote(opts.revision)}` : ""}` : ""}`;
+  const boot = await run(sshArgv(opts, bootstrapCmd), {
+    stdin: opts.bootstrapScript,
     echo: true,
   });
-  if (writeEnv.code !== 0) throw new Error(`ssh env write failed (${writeEnv.code}): ${writeEnv.stderr.trim()}`);
-
-  const bootstrapCmd = `${opts.noStart ? "LAUN_NO_START=true " : ""}bash -s -- ${dir}${opts.repoUrl ? ` ${shQuote(opts.repoUrl)}` : ""}`;
-  const boot = await run(sshArgv(opts, bootstrapCmd), { stdin: opts.bootstrapScript, echo: true });
-  const key = lastMatch(boot.stdout, /^LAUN_KEY=(laun_[0-9a-f]{8,32}_[A-Za-z0-9_-]{20,128})\s*$/m);
+  const key = lastMatch(
+    boot.stdout,
+    /^LAUN_KEY=(laun_[0-9a-f]{8,32}_[A-Za-z0-9_-]{20,128})\s*$/m,
+  );
   if (boot.code !== 0 || !key) {
     const tail = boot.stderr.trim() || boot.stdout.trim();
-    throw new Error(`remote setup failed (${boot.code})${key ? "" : ": no LAUN_KEY in bootstrap output"}\n${tail.slice(-2000)}`);
+    throw new Error(
+      `remote setup failed (${boot.code})${key ? "" : ": no LAUN_KEY in bootstrap output"}\n${tail.slice(-2000)}`,
+    );
   }
   return {
     key,

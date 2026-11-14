@@ -1,4 +1,8 @@
-import type { AgentEvent, SessionRecord } from "@laun/protocol";
+import type {
+  AgentEvent,
+  PublicAgentKeyRecord,
+  SessionRecord,
+} from "@laun/protocol";
 
 export class GatewayError extends Error {
   constructor(
@@ -25,7 +29,11 @@ export function connectionHint(base: string, cause: string): string {
     host = null;
   }
   if (!host) return msg;
-  const loopback = host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+  const loopback =
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host === "::1" ||
+    host === "[::1]";
   if (loopback) {
     return `${msg}\n  Are the services running? (bun run dev:executor / dev:gateway)`;
   }
@@ -57,7 +65,35 @@ export class GatewayClient {
     return this.base;
   }
 
-  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  /** Runtime-neutral durable control API; shares the saved target and authentication. */
+  control<T>(
+    path: string,
+    options: {
+      method?: string;
+      body?: unknown;
+      timeoutMs?: number;
+      response?: "json" | "text";
+    } = {},
+  ): Promise<T> {
+    if (!path.startsWith("/") || path.startsWith("//"))
+      throw new Error("invalid control API path");
+    return this.request<T>(
+      `/api/v2${path}`,
+      {
+        method: options.method ?? "GET",
+        body:
+          options.body === undefined ? undefined : JSON.stringify(options.body),
+        signal: AbortSignal.timeout(options.timeoutMs ?? 20_000),
+      },
+      options.response === "text",
+    );
+  }
+
+  private async request<T>(
+    path: string,
+    init: RequestInit = {},
+    raw = false,
+  ): Promise<T> {
     let res: Response;
     try {
       res = await fetch(`${this.base}${path}`, {
@@ -69,7 +105,10 @@ export class GatewayClient {
         },
       });
     } catch (e) {
-      throw new GatewayError(connectionHint(this.base, (e as Error).message), 0);
+      throw new GatewayError(
+        connectionHint(this.base, (e as Error).message),
+        0,
+      );
     }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
@@ -80,11 +119,20 @@ export class GatewayClient {
       } catch {
         // keep the raw body
       }
-      if (res.status === 401) throw new GatewayError("unauthorized — the agent key is wrong or revoked", 401);
-      if (res.status === 409) throw new GatewayError(detail || "session is busy", 409);
-      throw new GatewayError(`${res.status}: ${detail || res.statusText}`, res.status);
+      if (res.status === 401)
+        throw new GatewayError(
+          "unauthorized — the agent key is wrong or revoked",
+          401,
+        );
+      if (res.status === 409)
+        throw new GatewayError(detail || "session is busy", 409);
+      throw new GatewayError(
+        `${res.status}: ${detail || res.statusText}`,
+        res.status,
+      );
     }
     if (res.status === 204) return undefined as T;
+    if (raw) return (await res.text()) as T;
     return (await res.json()) as T;
   }
 
@@ -96,7 +144,11 @@ export class GatewayClient {
     return this.request("/sessions");
   }
 
-  createSession(goal: string, model?: string, opts?: { repo?: string; runtime?: string }): Promise<SessionRecord> {
+  createSession(
+    goal: string,
+    model?: string,
+    opts?: { repo?: string; runtime?: string },
+  ): Promise<SessionRecord> {
     const body: Record<string, unknown> = { goal };
     if (model) body["model"] = model;
     if (opts?.repo) body["repo"] = opts.repo;
@@ -107,25 +159,41 @@ export class GatewayClient {
     });
   }
 
-  getSession(id: string): Promise<{ session: SessionRecord; pendingApprovals: PendingApproval[] }> {
+  getSession(
+    id: string,
+  ): Promise<{ session: SessionRecord; pendingApprovals: PendingApproval[] }> {
     return this.request(`/sessions/${id}`);
   }
 
-  log(id: string, since: number): Promise<{ sessionId: string; events: AgentEvent[]; next: number }> {
+  log(
+    id: string,
+    since: number,
+  ): Promise<{ sessionId: string; events: AgentEvent[]; next: number }> {
     return this.request(`/sessions/${id}/log?since=${since}`);
   }
 
-  sendMessage(id: string, text: string, mode?: "steer" | "queue"): Promise<{ accepted: boolean; sessionId: string; outcome?: string }> {
+  sendMessage(
+    id: string,
+    text: string,
+    mode?: "steer" | "queue",
+  ): Promise<{ accepted: boolean; sessionId: string; outcome?: string }> {
     return this.request(`/sessions/${id}/messages`, {
       method: "POST",
       body: JSON.stringify(mode ? { text, mode } : { text }),
     });
   }
 
-  decideApproval(id: string, requestId: string, decision: "approve" | "deny", note?: string): Promise<{ ok: boolean }> {
+  decideApproval(
+    id: string,
+    requestId: string,
+    decision: "approve" | "deny",
+    note?: string,
+  ): Promise<{ ok: boolean }> {
     return this.request(`/sessions/${id}/approvals`, {
       method: "POST",
-      body: JSON.stringify(note ? { requestId, decision, note } : { requestId, decision }),
+      body: JSON.stringify(
+        note ? { requestId, decision, note } : { requestId, decision },
+      ),
     });
   }
 
@@ -138,11 +206,20 @@ export class GatewayClient {
     return this.request(`/sessions/${id}/abort`, { method: "POST" });
   }
 
-  createKey(label?: string): Promise<{ key: string; record: { id: string; label: string; createdAt: string } }> {
-    return this.request("/keys", { method: "POST", body: JSON.stringify(label ? { label } : {}) });
+  createKey(
+    label?: string,
+    principalId?: string,
+  ): Promise<{ key: string; record: PublicAgentKeyRecord }> {
+    return this.request("/keys", {
+      method: "POST",
+      body: JSON.stringify({
+        ...(label ? { label } : {}),
+        ...(principalId ? { principalId } : {}),
+      }),
+    });
   }
 
-  listKeys(): Promise<{ keys: Array<{ id: string; label: string; createdAt: string }> }> {
+  listKeys(): Promise<{ keys: PublicAgentKeyRecord[] }> {
     return this.request("/keys");
   }
 
