@@ -11,18 +11,21 @@
   "engines": {
     "bun": ">=1.2"
   },
-  "packageManager": "bun@1.4.2",
+  "packageManager": "bun@1.4.4",
   "scripts": {
     "build": "bun x tsc -b",
     "typecheck": "bun x tsc -b",
     "clean": "rm -rf dist tsconfig.tsbuildinfo packages/*/dist packages/*/tsconfig.tsbuildinfo apps/*/dist apps/*/tsconfig.tsbuildinfo",
-    "test": "bun test ./packages/protocol/src ./packages/policy/src ./packages/acp/src ./packages/broker/src ./packages/control/src ./packages/runtime/src ./apps/executor/src ./apps/gateway/src ./apps/telegram-bridge/src ./apps/laun/src ./apps/worker/src",
+    "test": "bun test ./packages/protocol/src ./packages/policy/src ./packages/acp/src ./packages/broker/src ./packages/control/src ./packages/storage/src ./packages/runtime/src ./apps/executor/src ./apps/gateway/src ./apps/telegram-bridge/src ./apps/laun/src ./apps/worker/src ./scripts/qualify-packaged-control.test.ts",
     "laun": "bun apps/laun/src/index.ts",
+    "cli:assets": "bun scripts/generate-cli-assets.ts",
+    "cli:build": "bun scripts/build-cli.ts",
     "dev:gateway": "bun run build && bun --hot apps/gateway/src/index.ts",
     "dev:executor": "bun run build && bun --hot apps/executor/src/index.ts",
     "dev:bridge": "bun run build && bun --hot apps/telegram-bridge/src/index.ts",
     "dev:app": "bun scripts/dev-app.ts",
-    "dev:worker": "bun apps/worker/src/index.ts"
+    "dev:worker": "bun apps/worker/src/index.ts",
+    "test:ui": "bun apps/gateway/test/ui-smoke.ts"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

@@ -26,7 +26,8 @@ env:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
@@ -38,9 +39,11 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
       - id: meta
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          tag="$RELEASE_TAG"
           if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
             echo "not a release tag: $tag (expected vX.Y.Z[-prerelease])" >&2
             exit 1
@@ -63,11 +66,41 @@ jobs:
             printf 'prerelease=%s\n' "$prerelease"
             printf 'image_prefix=%s\n' "$REGISTRY/${GITHUB_REPOSITORY_OWNER,,}"
           } >>"$GITHUB_OUTPUT"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - run: bun run build
+      - name: Full source acceptance before publication
+        run: bun run test
+      - run: bun test scripts/qualify-packaged-control.test.ts
+      - name: Install the workspace-pinned browser
+        run: bun apps/gateway/node_modules/playwright/cli.js install --with-deps chromium
+      - name: Authenticated v2 browser workflows
+        run: bun run test:ui
+      - uses: docker/setup-buildx-action@v3
+      - name: Synthetic private-state container context boundary
+        run: bun scripts/check-container-context.ts
+      - name: Build the packaged candidate without publishing
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          load: true
+          push: false
+          tags: localhost/laun-release-qualification:candidate
+          cache-from: type=gha,scope=laun-amd64
+          provenance: false
+          sbom: false
+      - name: Authenticated packaged v2 durability and restart qualification
+        env:
+          LAUN_SMOKE_IMAGE: localhost/laun-release-qualification:candidate
+        run: bun scripts/qualify-packaged-control.ts
 
   images:
     needs: verify
     # Native runners, no QEMU: ubuntu-24.04-arm is available for public repos.
-    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     permissions:
       contents: read
       packages: write
@@ -115,7 +148,7 @@ jobs:
 
   merge:
     needs: [verify, images]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -148,50 +181,34 @@ jobs:
 
   smoke:
     needs: [verify, merge]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: read
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - run: bun install --frozen-lockfile --ignore-scripts
       - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Boot gateway and executor from the released image
+      - name: Qualify the published packaged v2 controller
         env:
-          IMG: ${{ needs.verify.outputs.image_prefix }}/laun:${{ needs.verify.outputs.version }}
+          LAUN_SMOKE_IMAGE: ${{ needs.verify.outputs.image_prefix }}/laun:${{ needs.verify.outputs.version }}
         run: |
           set -euo pipefail
-          trap 'docker rm -f laun-smoke-gateway laun-smoke-executor >/dev/null 2>&1 || true' EXIT
-          docker pull "$IMG"
-
-          # Executor tooling must be present, not just the three services.
-          docker run --rm "$IMG" pi --version
-          docker run --rm "$IMG" sh -c 'command -v openshell || echo "openshell not on PATH (optional)"'
-
-          docker run -d --name laun-smoke-executor \
-            -e GATEWAY_TOKEN=smoke -e SESSION_DIR=/tmp/sessions -p 18081:8081 \
-            "$IMG" bun apps/executor/src/index.ts
-          docker run -d --name laun-smoke-gateway \
-            -e GATEWAY_TOKEN=smoke -p 18080:8080 \
-            "$IMG" bun apps/gateway/src/index.ts
-
-          for _ in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:18080/health >/dev/null 2>&1 \
-               && curl -fsS http://127.0.0.1:18081/health >/dev/null 2>&1; then
-              break
-            fi
-            sleep 2
-          done
-          docker logs laun-smoke-gateway || true
-          docker logs laun-smoke-executor || true
-          curl -fsS http://127.0.0.1:18080/health >/dev/null
-          curl -fsS http://127.0.0.1:18081/health >/dev/null
+          docker pull "$LAUN_SMOKE_IMAGE"
+          bun scripts/qualify-packaged-control.ts
 
   cli:
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     strategy:
@@ -211,17 +228,14 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
-      - run: bun install --frozen-lockfile
+          bun-version: "1.4.4"
+      - run: bun install --frozen-lockfile --ignore-scripts
       - name: Compile
         run: |
           set -euo pipefail
           mkdir -p dist
-          bun build --compile --minify \
-            --target=${{ matrix.target }} \
-            --define "process.env.LAUN_VERSION=\"$LAUN_VERSION\"" \
-            apps/laun/src/index.ts \
-            --outfile "dist/laun${{ matrix.ext }}"
+          bun scripts/build-cli.ts --target=${{ matrix.target }} \
+            --version "$LAUN_VERSION" --outfile "dist/laun${{ matrix.ext }}"
       - name: Check reported version
         if: matrix.target == 'bun-linux-x64'
         run: ./dist/laun --version | grep -qx "laun $LAUN_VERSION"
@@ -230,6 +244,7 @@ jobs:
           set -euo pipefail
           name="laun_${LAUN_VERSION}_${{ matrix.os }}_${{ matrix.arch }}"
           cd dist
+          cp "laun${{ matrix.ext }}.manifest.json" "../${name}.manifest.json"
           if [ "${{ matrix.os }}" = "windows" ]; then
             zip "../${name}.zip" "laun.exe"
           else
@@ -241,11 +256,12 @@ jobs:
           path: |
             laun_*.tar.gz
             laun_*.zip
+            laun_*.manifest.json
           if-no-files-found: error
 
   release:
     needs: [verify, smoke, cli]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:

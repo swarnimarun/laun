@@ -29,7 +29,8 @@ export async function checkContainerContext(options:{engine:string[];buildArgs?:
     const [stdout,stderr,exitCode]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);
     if(exitCode!==0){const log=join(tmpdir(),`laun-context-failure-${randomUUID()}.log`);writeFileSync(log,`${stdout}\n${stderr}`,{mode:0o600});throw new Error(`container context proof failed (exit ${exitCode}); engine diagnostics retained privately: ${log}`);}
     built=true;
-    if(!stdout.includes('"privateSentinelsAbsent":true')||!stdout.includes('"vendorDistRetained":true')||!stdout.includes('"sourceAuthTsRetained":true'))throw new Error("builder did not emit the expected context proof");
+    const proof=stdout+"\n"+stderr; // Docker BuildKit writes RUN progress to stderr.
+    if(!proof.includes('"privateSentinelsAbsent":true')||!proof.includes('"vendorDistRetained":true')||!proof.includes('"sourceAuthTsRetained":true'))throw new Error("builder did not emit the expected context proof");
     return{privateSentinelsAbsent:true,privateSentinelCount:privatePaths.length,sourceAuthTsRetained:true,vendorDistRetained:true,actualBuilderUsed:true};
   }finally{
     // A failing intermediate image can contain only synthetic values. Remove
