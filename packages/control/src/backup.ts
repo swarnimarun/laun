@@ -12,7 +12,7 @@ interface KeyRecord extends PublicAgentKeyRecord { hash: string }
 type Row = Record<string, unknown>;
 const CORE: Record<string, string[]> = {
   metadata: ["key", "value"], objects: ["kind", "id", "owner_id", "body"], worker_auth: ["id", "hash"],
-  runs: ["id", "owner_id", "thread_id", "request_id", "prompt", "status", "worker_id", "generation", "lease_until", "created_at", "updated_at", "cancel_requested", "summary", "model"],
+  runs: ["id", "owner_id", "thread_id", "request_id", "prompt", "status", "worker_id", "generation", "lease_until", "created_at", "updated_at", "cancel_requested", "summary", "model", "instructions"],
   events: ["sequence", "thread_id", "run_id", "created_at", "kind", "payload"], approvals: ["id", "owner_id", "run_id", "fingerprint", "status", "body"],
   receipts: ["owner_id", "key", "fingerprint", "body"], worker_sequences: ["run_id", "generation", "next_sequence"],
   routing: ["key", "owner_id", "thread_id"], checkpoints: ["thread_id", "body", "updated_at"], outbox: ["id", "owner_id", "destination", "body", "status"],
@@ -90,7 +90,9 @@ function schema(db: Database): void {
     if (entry.type === "table" && entry.name === "sqlite_sequence" && entry.sql === "CREATE TABLE sqlite_sequence(name,seq)") continue;
     if (entry.type !== "table" || !expected[entry.name] || !/^CREATE TABLE\b/i.test(entry.sql ?? "")) fail("unsupported database schema object");
     const columns = db.query(`PRAGMA table_info(${entry.name})`).all() as Array<{ name: string; pk: number; type: string }>;
-    if (columns.map(c => c.name).join("|") !== expected[entry.name]!.join("|")) fail(`unsupported ${entry.name} schema`);
+    const names=columns.map(c=>c.name).join("|");
+    const compatibleLegacyRuns=entry.name==="runs"&&names===CORE.runs!.slice(0,-1).join("|");
+    if (names !== expected[entry.name]!.join("|")&&!compatibleLegacyRuns) fail(`unsupported ${entry.name} schema`);
     const integers = new Set(["sequence", "generation", "cancel_requested", "next_sequence", "update_id", "cursor", "can_approve", "attempts", "profile_version"]);
     if (columns.some(column => column.type.toUpperCase() !== (integers.has(column.name) ? "INTEGER" : "TEXT"))) fail(`unsupported ${entry.name} column types`);
     if (columns.filter(column => column.pk).sort((a, b) => a.pk - b.pk).map(column => column.name).join("|") !== PRIMARY[entry.name]!.join("|")) fail(`unsupported ${entry.name} primary identity`);
@@ -115,8 +117,11 @@ function validateReferences(db: Database): void {
     const item = parse(row.body);
     if (!owner(item.ownerId) || item.ownerId !== row.owner_id || typeof item.id !== "string" || row.id !== (row.kind === "profile" ? `${item.id}:${item.version}` : item.id)) fail("invalid owned object identity");
     if (row.kind === "profile") { if (!isPermissionProfile(item)) fail("invalid permission profile"); }
-    else if (row.kind === "mower") { profile(item); if (!["mower", "director", "adviser"].includes(String(item.role))) fail("invalid mower role"); if (item.workerId) { const worker = get("worker", item.workerId); if (!worker.local && worker.ownerId !== item.ownerId) fail("cross-owner worker"); } }
-    else if (row.kind === "thread") { get("mower", item.mowerId, item.ownerId); profile(item); let parent = item.parentThreadId; const seen = new Set([item.id]);
+    else if (row.kind === "mower") { profile(item); if(item.instructions!==undefined&&(typeof item.instructions!=="string"||item.instructions.length>16000||item.instructions.includes("\0")))fail("invalid mower instructions");if (!["mower", "director", "adviser"].includes(String(item.role))) fail("invalid mower role"); if (item.workerId) { const worker = get("worker", item.workerId); if (!worker.local && worker.ownerId !== item.ownerId) fail("cross-owner worker"); } }
+    else if (row.kind === "thread") { get("mower", item.mowerId, item.ownerId); profile(item);
+      if (item.workerId) { const worker = get("worker", item.workerId); if (!worker.local && worker.ownerId !== item.ownerId) fail("cross-owner thread worker"); }
+      if (item.placementId !== undefined && (typeof item.placementId !== "string" || !/^[0-9a-f-]{36}$/.test(item.placementId))) fail("invalid placement epoch");
+      let parent = item.parentThreadId; const seen = new Set([item.id]);
       while (parent) { if (typeof parent !== "string" || seen.has(parent) || seen.size >= 9) fail("invalid thread ancestry"); seen.add(parent); parent = get("thread", parent, item.ownerId).parentThreadId; }
     }
     else if (row.kind === "worker") { if (!["online", "offline", "revoked"].includes(String(item.status)) || typeof item.local !== "boolean") fail("invalid worker"); }
@@ -130,6 +135,7 @@ function validateReferences(db: Database): void {
     if (!value || (ownerId !== undefined && value.owner_id !== ownerId)) return fail("missing or cross-owner run"); return value; };
   for (const row of db.query("SELECT * FROM runs").iterate() as Iterable<Row>) {
     get("thread", row.thread_id, row.owner_id);
+    if(row.instructions!==undefined&&row.instructions!==null&&(typeof row.instructions!=="string"||row.instructions.length>16000||row.instructions.includes("\0")))fail("invalid admitted run instructions");
     if (!["queued", "running", "waiting_permission", "interrupted", "done", "error", "cancelled"].includes(String(row.status)) || !Number.isSafeInteger(row.generation) || Number(row.generation) < 0) fail("invalid durable run");
     if (row.worker_id) { const worker = get("worker", row.worker_id); if (!worker.local && worker.ownerId !== row.owner_id) fail("cross-owner run worker"); }
   }

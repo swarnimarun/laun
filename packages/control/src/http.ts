@@ -114,6 +114,7 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
       const mower=store.get<MowerRecord>("mower",m[1]!,p);const b=await body(req);
       if(b.name!==undefined){const name=text(b.name,"name",80);if(store.list<MowerRecord>("mower",{id:mower.ownerId,admin:false}).some(other=>other.id!==mower.id&&!other.archivedAt&&other.name.toLowerCase()===name.toLowerCase()))throw new ControlError("mower name already exists",409);mower.name=name;}
       if(b.model!==undefined)mower.model=text(b.model,"model",256);
+      if(b.instructions!==undefined){if(b.instructions!==null&&typeof b.instructions!=="string")throw new ControlError("instructions must be text");mower.instructions=typeof b.instructions==="string"&&b.instructions.trim()?text(b.instructions,"instructions",16000):undefined;}
       if(b.workerId!==undefined){if(b.workerId!==null&&b.workerId!==""){const worker=store.get<WorkerRecord>("worker",String(b.workerId));if(!worker.local&&worker.ownerId!==mower.ownerId)throw new ControlError("worker not found",404);if(worker.status==="revoked")throw new ControlError("worker revoked",409);}mower.workerId=b.workerId?String(b.workerId):undefined;}
       if(b.profileId!==undefined){const profile=store.profile(text(b.profileId,"profileId",100),Number(b.profileVersion),p);if(profile.revokedAt)throw new ControlError("profile revoked",409);mower.profileId=profile.id;mower.profileVersion=profile.version;}
       if(b.archived===true)mower.archivedAt=now();store.put("mower",mower);
@@ -133,6 +134,10 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
     if(m){
       const threadId=m[1]!;store.get("thread",threadId,p);
       if(m[2]==="events"&&req.method==="GET"){
+        if(url.searchParams.has("before")||url.searchParams.has("tail")){
+          if(url.searchParams.has("after")||(url.searchParams.has("tail")&&url.searchParams.get("tail")!=="true"))throw new ControlError("choose a valid before/tail history cursor or after replay cursor");
+          return reply(store.history(p,threadId,url.searchParams.has("before")?Number(url.searchParams.get("before")):undefined));
+        }
         const after=Number(url.searchParams.get("after")??0);if(!Number.isSafeInteger(after)||after<0)throw new ControlError("invalid event cursor");return reply(store.events(p,threadId,after));
       }
       if(m[2]==="messages"&&req.method==="POST"){const run=store.submit(p,threadId,await body(req));void service.tick();return reply(run,202);}

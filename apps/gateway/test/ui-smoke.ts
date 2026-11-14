@@ -378,7 +378,17 @@ try {
       ),
       "proposal did not perform side effect",
     );
-    await deniedCard.getByRole("button", { name: "Deny", exact: true }).click();
+    await deniedCard
+      .getByRole("button", { name: "Give direction", exact: true })
+      .click();
+    await page
+      .locator("#field-denial-feedback")
+      .fill(
+        "Find a permitted read-only approach within the current guardrails.",
+      );
+    await page.locator("#field-denial-continuation").selectOption("replan");
+    await page.locator("#modal-submit").click();
+    await waitHidden("#modal");
     await page
       .locator("#messages .message.assistant .message-content")
       .filter({ hasText: "The write was denied." })
@@ -396,7 +406,7 @@ try {
       "denied tool did not write file",
     );
     checks.push(
-      "quick guardrail draft, reviewed revision, no self-grant, deny blocks file effect",
+      "quick guardrail draft, reviewed revision, feedback asks guarded replan, no self-grant, deny blocks file effect",
     );
   }
 
@@ -561,6 +571,59 @@ try {
     checks.push(
       "interrupted run holds later queue, requires explicit reconciliation, resumes fenced generation",
     );
+    const lifecycleThread = await createThread(
+      `Reviewed lifecycle ${stamp}`,
+      paused.id,
+    );
+    const beforeLifecycle = await getState();
+    const revision = beforeLifecycle.profiles
+      .filter((profile: { name: string }) => profile.name === profileName)
+      .sort(
+        (a: { version: number }, b: { version: number }) =>
+          b.version - a.version,
+      )[0];
+    await page.locator("#thread-menu-button").click();
+    await page
+      .getByRole("button", { name: "Rebase thread guardrails" })
+      .click();
+    await page
+      .locator("#field-thread-profile")
+      .selectOption(`${revision.id}:${revision.version}`);
+    await page.locator("#modal-submit").click();
+    assert(
+      await page.locator("#modal").isVisible(),
+      "profile rebase requires explicit confirmation",
+    );
+    await page.locator("#field-thread-profile-confirm").check();
+    await page.locator("#modal-submit").click();
+    await waitHidden("#modal");
+    const rebased = (await getState()).threads.find(
+      (item: { id: string }) => item.id === lifecycleThread.id,
+    );
+    assert.equal(rebased.profileId, revision.id);
+    assert.equal(rebased.profileVersion, revision.version);
+    assert(rebased.stoppedAt);
+    await page.locator("#thread-menu-button").click();
+    await page.getByRole("button", { name: "Move execution yard" }).click();
+    await page.locator("#field-thread-move-yard").waitFor({ state: "visible" });
+    await page.locator("#field-thread-move-yard").selectOption("local");
+    await page.locator("#field-thread-move-confirm").check();
+    await page.locator("#modal-submit").click();
+    await waitHidden("#modal");
+    const moved = (await getState()).threads.find(
+      (item: { id: string }) => item.id === lifecycleThread.id,
+    );
+    assert.equal(moved.workerId, "local");
+    assert(moved.placementId && moved.stoppedAt);
+    assert(
+      !(await getState()).runs.some(
+        (run: { threadId: string }) => run.threadId === lifecycleThread.id,
+      ),
+      "lifecycle changes never replay or submit a prompt",
+    );
+    checks.push(
+      "explicit pinned-profile rebase and idle yard move stay stopped without replay",
+    );
   }
 
   if (fixture) {
@@ -637,6 +700,19 @@ try {
     .waitFor({ state: "visible" });
   checks.push("worker revocation");
   await openThread(thread.id);
+  if(fixture){
+    const historyId=fixture.seedLongHistory();
+    await page.goto(`${base}/app#/threads/${historyId}`,{waitUntil:"networkidle"});
+    await messageVisible("History fixture marker 1999");
+    assert.equal(await page.getByText("History fixture marker 0000",{exact:true}).count(),0);
+    for(let i=0;i<3;i++){await page.getByRole("button",{name:"Load earlier messages",exact:true}).click();await page.getByRole("button",{name:"Loading history…",exact:true}).waitFor({state:"hidden"});}
+    await messageVisible("History fixture marker 0000");
+    assert((await page.locator("#messages .message").count())<=1000,"browser keeps a bounded history window");
+    await page.getByRole("button",{name:"Return to latest messages",exact:true}).click();await messageVisible("History fixture marker 1999");
+    assert.equal(await page.getByText("History fixture marker 0000",{exact:true}).count(),0);
+    checks.push("bounded newest/older durable history with an explicit return to live messages");
+    await page.goto(`${base}/app#/threads/${thread.id}`,{waitUntil:"networkidle"});
+  }
   await page.setViewportSize({ width: 390, height: 844 });
   await page.waitForFunction(() =>
     document

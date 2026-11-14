@@ -10,6 +10,7 @@ export interface ControlContext {
 export interface RuntimeRunInput {
   threadId: string; runId: string; prompt: string; model: string; workspaceRoot: string; sessionDir: string;
   placementId?: string;
+  instructions?: string;
 }
 export interface RuntimePermissionRequest { operation: PermissionOperation; resource: string; arguments: unknown; signal?: AbortSignal }
 export interface RuntimeCallbacks {
@@ -36,6 +37,7 @@ export interface StoredProfile extends PermissionProfile {
 export interface MowerRecord {
   id: string; ownerId: string; workspaceId: string; name: string; role: "mower" | "director" | "adviser";
   model: string; profileId: string; profileVersion: number; workerId?: string; createdAt: string; archivedAt?: string;
+  instructions?:string;
 }
 export interface ThreadRecord {
   id: string; ownerId: string; workspaceId: string; mowerId: string; title: string; parentThreadId?: string;
@@ -52,12 +54,14 @@ export interface ControlRun {
   workerId?: string; generation: number; leaseUntil?: string; createdAt: string; updatedAt: string;
   cancelRequested: boolean; summary?: string;
   model?: string;
+  instructions?:string;
 }
 export interface ThreadEvent {
   sequence: number; threadId: string; runId?: string; createdAt: string;
   kind: "message" | "agent" | "approval" | "task" | "system";
   payload: { text?: string; role?: "user" | "assistant"; event?: AgentEvent; [key: string]: unknown };
 }
+export interface ThreadEventPage {events:ThreadEvent[];nextCursor:number;previousCursor?:number;hasEarlier?:boolean}
 export interface ControlApproval {
   id: string; ownerId: string; action: PermissionAction; profileId: string; profileVersion: number;
   status: "pending" | "approved" | "denied" | "expired" | "consumed";

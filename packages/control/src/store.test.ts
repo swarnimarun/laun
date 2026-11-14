@@ -19,6 +19,22 @@ test("older control binary rejects future storage before changing its schema or 
  try{expect(future.query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all()).toEqual([{name:"future_data"},{name:"metadata"}]);expect(future.query("PRAGMA journal_mode").get()).toEqual({journal_mode:"delete"});expect(future.query("SELECT * FROM future_data").get()).toEqual({id:"preserved"});}finally{future.close();}
 });
 
+test("bounded newest/older history and replay cursors do not skip large durable events",()=>{
+ const {store}=setup(),{thread}=fixture(store);const ids:number[]=[];
+ for(let i=0;i<8;i++)ids.push(store.event(thread.id,"system",{text:`${i}:${"x".repeat(900_000)}`}).sequence);
+ const latest=store.history(alice,thread.id);expect(latest.events.length).toBeLessThan(8);expect(latest.events.at(-1)?.sequence).toBe(ids.at(-1));expect(latest.hasEarlier).toBe(true);
+ const previous=store.history(alice,thread.id,latest.previousCursor);expect([...previous.events,...latest.events].map(e=>e.sequence)).toEqual(ids);expect(previous.hasEarlier).toBe(false);
+ let cursor=0;const seen:number[]=[];for(;;){const page=store.events(alice,thread.id,cursor);if(!page.events.length)break;seen.push(...page.events.map(e=>e.sequence));cursor=page.nextCursor;}expect(seen).toEqual(ids);
+ expect(()=>store.history(bob,thread.id)).toThrow("not found");expect(()=>store.history(alice,thread.id,-1)).toThrow("cursor");
+});
+
+test("mower purpose is snapshotted with admitted work and unsupported steering is explicit",()=>{
+ const {store}=setup();const mower=store.createMower(alice,{name:"Documentation mower",instructions:"Maintain the project runbooks."}),thread=store.createThread(alice,{mowerId:mower.id});
+ const first=store.submit(alice,thread.id,{text:"first",requestId:"instructions-one"});mower.instructions="Review release evidence.";store.put("mower",mower);
+ const second=store.submit(alice,thread.id,{text:"second",requestId:"instructions-two"});expect(store.run(first.id).instructions).toBe("Maintain the project runbooks.");expect(second.instructions).toBe("Review release evidence.");
+ expect(()=>store.submit(alice,thread.id,{text:"steer",requestId:"unsupported",mode:"steer"})).toThrow("steering must be explicitly supported");expect(store.threadRuns(alice,thread.id)).toHaveLength(2);
+});
+
 describe("transactional control registry",()=>{
   test("names, profiles and FIFO submissions survive reopen with ownership enforced",()=>{
     const {store,path}=setup();const {mower,thread}=fixture(store);

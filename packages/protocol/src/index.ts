@@ -9,7 +9,7 @@ export type { BrokerConnection, BrokerContext, BrokerTool, BrokerToolResult, Mcp
 export type { TelegramIdentity, TelegramInboundUpdate, TelegramDelivery, TelegramIngestResult, TelegramLinkCode } from "./connector.js";
 export type { AdviceResult } from "./advice.js";
 export type { ControlContext, RuntimeRunInput, RuntimePermissionRequest, RuntimeCallbacks, RuntimeResult, RuntimeModel, AgentRuntime,
-  ControlPrincipal, StoredProfile, MowerRecord, ThreadRecord, ControlRunStatus, ControlRun, ThreadEvent,
+  ControlPrincipal, StoredProfile, MowerRecord, ThreadRecord, ControlRunStatus, ControlRun, ThreadEvent, ThreadEventPage,
   ControlApproval, WorkerCapabilities, WorkerRecord, TaskRecord, ControlState, WorkerJob } from "./control.js";
 
 export type { CapabilityRule, PermissionAction, PermissionEffect, PermissionGrant, PermissionMode,

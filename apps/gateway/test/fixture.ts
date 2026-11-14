@@ -96,6 +96,12 @@ export async function startBrowserFixture(repoRoot: string) {
     key,
     directory,
     mcpURL: `http://127.0.0.1:${mcp.port}/mcp`,
+    seedLongHistory(){
+      const mower=store.createMower(principal,{name:"Long history fixture",model:"faux/faux-1"});
+      const thread=store.createThread(principal,{mowerId:mower.id,title:"Long durable history"});
+      store.transaction(()=>{for(let i=0;i<2000;i++)store.event(thread.id,"message",{role:"user",text:`History fixture marker ${String(i).padStart(4,"0")}`});});
+      return thread.id;
+    },
     async close() {
       server.stop(true);
       mcp.stop(true);

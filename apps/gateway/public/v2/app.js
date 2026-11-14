@@ -34,6 +34,7 @@ const state = {
   inspectorTab: "overview",
   events: new Map(),
   cursors: new Map(),
+  history: new Map(),
   follow: true,
   pollTimer: null,
   polling: false,
@@ -269,6 +270,7 @@ function disconnect(
   state.server = emptyServer();
   state.events.clear();
   state.cursors.clear();
+  state.history.clear();
   state.advice.clear();
   state.adviceLoading.clear();
   state.currentThreadId = null;
@@ -368,13 +370,16 @@ async function loadModels() {
 }
 async function loadEvents(threadId, reset = false) {
   const generation = state.generation;
+  const initial=reset||!state.events.has(threadId);
+  const metadata=state.history.get(threadId);
+  if(!initial&&metadata?.viewingPast)return;
   const cursor = reset ? 0 : state.cursors.get(threadId) || 0;
   const data = await api(
-    `/threads/${encodeURIComponent(threadId)}/events?after=${cursor}`,
+    `/threads/${encodeURIComponent(threadId)}/events?${initial?"tail=true":`after=${cursor}`}`,
   );
   if (!state.key || generation !== state.generation) return;
   const incoming = Array.isArray(data.events) ? data.events : [];
-  const events = reset ? [] : state.events.get(threadId) || [];
+  const events = initial ? [] : state.events.get(threadId) || [];
   const seen = new Set(events.map((e) => e.sequence));
   for (const entry of incoming)
     if (!seen.has(entry.sequence)) {
@@ -382,7 +387,10 @@ async function loadEvents(threadId, reset = false) {
       seen.add(entry.sequence);
     }
   events.sort((a, b) => a.sequence - b.sequence);
-  state.events.set(threadId, events);
+  const kept=boundedEvents(events,true);
+  state.events.set(threadId, kept);
+  state.history.set(threadId,{previousCursor:kept[0]?.sequence,hasEarlier:initial?data.hasEarlier===true:metadata?.hasEarlier||kept.length<events.length,viewingPast:false});
+  evictThreadCaches(threadId);
   state.cursors.set(
     threadId,
     Number.isSafeInteger(data.nextCursor)
@@ -392,6 +400,33 @@ async function loadEvents(threadId, reset = false) {
   if (state.currentThreadId === threadId && (incoming.length || reset))
     renderTranscript();
   await loadThreadAdvice(threadId);
+}
+function boundedEvents(events,latest){
+  const kept=[];let bytes=0;
+  for(const entry of latest?[...events].reverse():events){const size=JSON.stringify(entry).length*2;if(kept.length&&(kept.length>=1000||bytes+size>8*1024*1024))break;kept.push(entry);bytes+=size;}
+  return latest?kept.reverse():kept;
+}
+function evictThreadCaches(threadId){
+  const value=state.events.get(threadId);state.events.delete(threadId);state.events.set(threadId,value);
+  while(state.events.size>6){const oldest=state.events.keys().next().value;if(oldest===threadId)break;state.events.delete(oldest);state.cursors.delete(oldest);state.history.delete(oldest);}
+}
+async function loadEarlier(threadId){
+  const metadata=state.history.get(threadId);if(!metadata?.hasEarlier||metadata.loading)return;
+  const generation=state.generation;metadata.loading=true;renderTranscript();
+  try{
+    const data=await api(`/threads/${encodeURIComponent(threadId)}/events?before=${metadata.previousCursor}`);
+    if(!state.key||generation!==state.generation||state.currentThreadId!==threadId)return;
+    const existing=state.events.get(threadId)||[],seen=new Set(existing.map(e=>e.sequence));
+    const events=[...(data.events||[]).filter(e=>!seen.has(e.sequence)),...existing].sort((a,b)=>a.sequence-b.sequence);
+    const kept=boundedEvents(events,false);state.events.set(threadId,kept);
+    state.history.set(threadId,{previousCursor:kept[0]?.sequence,hasEarlier:data.hasEarlier===true,viewingPast:true});
+    state.follow=false;renderTranscript();$("messages").scrollTop=0;
+  }catch(error){toast(errorMessage(error),true);}finally{const latest=state.history.get(threadId);if(latest)latest.loading=false;if(state.currentThreadId===threadId)renderTranscript();}
+}
+async function jumpToLatest(){
+  state.follow=true;const threadId=state.currentThreadId;
+  if(threadId&&state.history.get(threadId)?.viewingPast){try{await loadEvents(threadId,true);}catch(error){toast(errorMessage(error),true);return;}}
+  $("messages").scrollTop=$("messages").scrollHeight;$("jump-latest").hidden=true;
 }
 function isAdviceRun(runId) {
   if (state.advice.has(runId)) return true;
@@ -894,6 +929,14 @@ function renderTranscript() {
   const thread = currentThread();
   if (!thread) return;
   const mower = mowerById(thread.mowerId);
+  const history=state.history.get(thread.id);
+  if(history?.hasEarlier||history?.viewingPast){
+    const controls=element("div","history-controls");
+    controls.append(element("span","","Showing a window of this thread. Full history stays on the server."));
+    if(history.hasEarlier){const older=button(history.loading?"Loading history…":"Load earlier messages","text-button",()=>void loadEarlier(thread.id));older.disabled=history.loading;controls.append(older);}
+    if(history.viewingPast)controls.append(button("Return to latest messages","text-button",()=>void jumpToLatest()));
+    viewport.append(controls);
+  }
   const renderedAdvice = new Set();
   for (const group of groupTranscript(state.events.get(thread.id) || [])) {
     if (group.type === "assistant" && isAdviceRun(group.runId)) {
@@ -971,7 +1014,7 @@ function renderTranscript() {
     }
     viewport.append(article);
   }
-  if (!viewport.children.length) {
+  if (!viewport.querySelector(".message")) {
     const welcome = element("div", "thread-welcome");
     welcome.append(
       avatar(mower),
@@ -999,7 +1042,7 @@ function renderTranscript() {
       0,
       previousTop + Math.min(0, viewport.scrollHeight - previousHeight),
     );
-  $("jump-latest").hidden = state.follow;
+  $("jump-latest").hidden = state.follow&&!history?.viewingPast;
   renderUsage();
 }
 function renderAdviceContent(content, group, openTools) {
@@ -1489,6 +1532,9 @@ function renderPermissions(content) {
       ),
       button("Discuss with Gatekeeper", "button button-quiet", () =>
         showAdviceForm(approval),
+      ),
+      button("Give direction", "button button-quiet", () =>
+        showDenialDirectionForm(approval),
       ),
     );
     node.append(actions);
@@ -2539,6 +2585,61 @@ async function connectTelegram() {
     toast(errorMessage(error), true);
   }
 }
+function showDenialDirectionForm(approval) {
+  const choice = field("denial-continuation", "After denying this action", {
+    options: [
+      { value: "replan", label: "Replan within the current guardrails" },
+      { value: "stop", label: "Stop this thread and its children" },
+    ],
+    value: "replan",
+    required: true,
+  });
+  choice.querySelector("select").addEventListener("change", () => {
+    $("modal-submit").textContent =
+      value("denial-continuation") === "stop"
+        ? "Deny and stop thread"
+        : "Deny and replan";
+  });
+  showModal({
+    title: "Give your mower direction.",
+    eyebrow: "DENY · REPLAN OR STOP",
+    submit: "Deny and replan",
+    content: [
+      note(approval.action.operation, approval.action.resource),
+      choice,
+      field("denial-feedback", "Optional feedback", {
+        type: "textarea",
+        rows: 4,
+        maxlength: 4000,
+        placeholder:
+          "Explain a permitted approach or why you want the work to stop…",
+      }),
+      element(
+        "p",
+        "modal-warning",
+        "The requested action is denied. Feedback does not grant capabilities or change any guardrail. Replan lets the model find a permitted approach; Stop cancels active and queued work in this thread’s family.",
+      ),
+    ],
+    onSubmit: async () => {
+      const feedback = value("denial-feedback");
+      const continuation = value("denial-continuation");
+      await api(`/approvals/${encodeURIComponent(approval.id)}`, {
+        method: "POST",
+        body: {
+          decision: "deny",
+          continuation,
+          ...(feedback ? { feedback } : {}),
+        },
+      });
+      await refresh();
+      toast(
+        continuation === "stop"
+          ? "Action denied; this thread’s work was stopped."
+          : "Action denied. Your feedback asks for a permitted approach within unchanged guardrails.",
+      );
+    },
+  });
+}
 function showAdviceForm(approval) {
   const profile = profileById(approval.profileId, approval.profileVersion);
   if (!profile) return toast("This profile revision is unavailable.", true);
@@ -2749,12 +2850,255 @@ function showThreadSettings() {
         void openThread(thread.parentThreadId);
       }),
     );
+  if (mower?.role !== "adviser" && !thread.archivedAt)
+    content.push(
+      button("Rebase thread guardrails", "button button-quiet", () =>
+        showThreadProfileForm(thread),
+      ),
+      button(
+        "Move execution yard",
+        "button button-quiet",
+        () => void showThreadMoveForm(thread),
+      ),
+    );
   showModal({
     title: thread.title,
     eyebrow: "DURABLE THREAD",
     content,
     onSubmit: null,
   });
+}
+function threadHasUnresolvedWork(thread, wholeFamily = false) {
+  let root = thread;
+  if (wholeFamily) {
+    const visited = new Set();
+    while (root.parentThreadId && !visited.has(root.id)) {
+      visited.add(root.id);
+      root =
+        state.server.threads.find((item) => item.id === root.parentThreadId) ||
+        root;
+    }
+  }
+  const ids = new Set([wholeFamily ? root.id : thread.id]);
+  if (wholeFamily) {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const item of state.server.threads)
+        if (
+          item.parentThreadId &&
+          ids.has(item.parentThreadId) &&
+          !ids.has(item.id)
+        ) {
+          ids.add(item.id);
+          changed = true;
+        }
+    }
+  }
+  return state.server.runs.some(
+    (run) =>
+      ids.has(run.threadId) &&
+      (ACTIVE_RUNS.has(run.status) || run.status === "interrupted"),
+  );
+}
+function showThreadProfileForm(thread) {
+  if (threadHasUnresolvedWork(thread, true))
+    return toast(
+      "The entire thread family must have no queued, active or interrupted attempts. Stop and reconcile them first.",
+      true,
+    );
+  const options = profileOptions(false);
+  if (!options.length)
+    return toast(
+      "Create an active permission profile before rebasing this thread.",
+      true,
+    );
+  const select = field("thread-profile", "Reviewed profile revision", {
+    options,
+    value: selectedProfileValue(thread.profileId, thread.profileVersion),
+    required: true,
+  });
+  const preview = element("pre", "readonly-value");
+  const update = () => {
+    const chosen = parseProfileValue(value("thread-profile"));
+    preview.textContent = JSON.stringify(
+      profileById(chosen.profileId, chosen.profileVersion)?.rules || [],
+      null,
+      2,
+    );
+  };
+  select.querySelector("select").addEventListener("change", update);
+  const confirmed = checkbox(
+    "thread-profile-confirm",
+    "I reviewed this exact revision and verified that the family is idle and previous execution has stopped.",
+  );
+  confirmed.querySelector("input").required = true;
+  showModal({
+    title: "Review this thread’s guardrails.",
+    eyebrow: "EXPLICIT THREAD PROFILE REBASE",
+    submit: "Apply reviewed revision",
+    content: [
+      note(
+        "Current pinned revision",
+        `${profileById(thread.profileId, thread.profileVersion)?.name || "Profile"} · v${thread.profileVersion}`,
+      ),
+      select,
+      preview,
+      element(
+        "p",
+        "modal-warning",
+        "The server checks every ancestor and descendant permission ceiling. This thread and its descendants remain stopped after the change; no prompt is replayed and mower defaults do not change.",
+      ),
+      confirmed,
+    ],
+    onSubmit: async () => {
+      await api(`/threads/${encodeURIComponent(thread.id)}/profile`, {
+        method: "POST",
+        body: {
+          ...parseProfileValue(value("thread-profile")),
+          expectedProfileId: thread.profileId,
+          expectedProfileVersion: thread.profileVersion,
+          confirmedStopped: $("field-thread-profile-confirm").checked,
+        },
+      });
+      await refresh();
+      toast(
+        "Thread guardrails rebased. Direct user input is required to continue.",
+      );
+    },
+  });
+  update();
+}
+async function showThreadMoveForm(thread) {
+  if (threadHasUnresolvedWork(thread))
+    return toast(
+      "Stop and reconcile queued, active or interrupted work before moving this thread.",
+      true,
+    );
+  showModal({
+    title: "Inspecting saved thread state…",
+    eyebrow: "EXPLICIT YARD MOVE",
+    content: note(
+      "Checking placement and checkpoint",
+      "The server will require the exact current placement and saved checkpoint.",
+    ),
+    onSubmit: null,
+  });
+  const version = modalVersion,
+    generation = state.generation;
+  try {
+    const [history, reference] = await Promise.all([
+      api(`/threads/${encodeURIComponent(thread.id)}/runs`),
+      api(
+        `/threads/${encodeURIComponent(thread.id)}/checkpoint-reference`,
+      ).catch((error) => {
+        if (error.status === 404) return null;
+        throw error;
+      }),
+    ]);
+    if (
+      generation !== state.generation ||
+      version !== modalVersion ||
+      !$("modal").open
+    )
+      return;
+    const hasHistory = (history.runs || []).some((run) => run.generation > 0);
+    if (hasHistory && !reference)
+      throw new Error(
+        "Executed work needs a completed server checkpoint before it can move.",
+      );
+    const previous =
+      thread.workerId ||
+      (history.runs || []).find((run) => run.workerId)?.workerId ||
+      mowerById(thread.mowerId)?.workerId ||
+      null;
+    const workers = state.server.workers.filter(
+      (worker) =>
+        worker.status === "online" &&
+        (worker.local || worker.ownerId === thread.ownerId) &&
+        worker.lastSeenAt &&
+        Date.now() - Date.parse(worker.lastSeenAt) < 60_000 &&
+        (!hasHistory || worker.checkpointVersion === reference?.runtimeVersion),
+    );
+    if (!workers.length)
+      throw new Error(
+        "No recently online yard advertises a compatible checkpoint runtime. Bring the target yard online before moving.",
+      );
+    const confirmed = checkbox(
+      "thread-move-confirm",
+      "I verified previous execution has stopped and reconciled external effects. Move only this idle thread; do not replay work.",
+    );
+    confirmed.querySelector("input").required = true;
+    const omissions = reference?.omittedPaths || [];
+    const content = [
+      note(
+        "Current execution yard",
+        state.server.workers.find((worker) => worker.id === previous)?.name ||
+          previous ||
+          "Unassigned",
+      ),
+      field("thread-move-yard", "Target execution yard", {
+        options: workers.map((worker) => ({
+          value: worker.id,
+          label: `${worker.name} · ${worker.checkpointVersion || "no checkpoint version"}`,
+        })),
+        required: true,
+      }),
+      reference
+        ? note(
+            "Reviewed server checkpoint",
+            `${reference.createdAt} · ${reference.bytes.toLocaleString()} bytes · ${reference.runtimeVersion}\nSHA-256 ${reference.sha256}`,
+          )
+        : note(
+            "Fresh thread",
+            "No executed state needs restoration. The server will reject a concurrent placement or checkpoint change.",
+          ),
+      element(
+        "p",
+        "modal-warning",
+        "The destination receives the saved checkpoint through the fenced worker protocol. The thread remains stopped until direct user input. Unsaved or omitted files do not migrate.",
+      ),
+      confirmed,
+    ];
+    if (omissions.length) {
+      content.push(element("pre", "readonly-value", omissions.join("\n")));
+      const accepted = checkbox(
+        "thread-move-omissions",
+        "I inspected these omitted paths and accept that they are not restored by this move.",
+      );
+      accepted.querySelector("input").required = true;
+      content.push(accepted);
+    }
+    showModal({
+      title: "Move this thread carefully.",
+      eyebrow: "EXPLICIT YARD MOVE",
+      submit: "Move reconciled thread",
+      content,
+      onSubmit: async () => {
+        await api(`/threads/${encodeURIComponent(thread.id)}/move`, {
+          method: "POST",
+          body: {
+            workerId: value("thread-move-yard"),
+            expectedWorkerId: previous,
+            checkpointSha256: reference?.sha256,
+            confirmedStopped: $("field-thread-move-confirm").checked,
+            confirmedOmissions: omissions.length
+              ? $("field-thread-move-omissions").checked
+              : undefined,
+          },
+        });
+        await refresh();
+        toast(
+          "Thread placement moved. Direct user input is required to continue.",
+        );
+      },
+    });
+  } catch (error) {
+    if (generation === state.generation && version === modalVersion) {
+      closeModal();
+      toast(errorMessage(error), true);
+    }
+  }
 }
 function showCheckpointDownload(thread) {
   showModal({
@@ -2903,6 +3247,7 @@ async function sendMessage() {
         ? "Message saved in the thread’s durable queue."
         : "Message saved. Your mower is on it.",
     );
+    if(state.currentThreadId===thread.id)await jumpToLatest();
     await refresh();
   } catch (error) {
     composerNote(errorMessage(error), true);
@@ -3010,13 +3355,9 @@ $("cancel-run-button").addEventListener("click", () => void cancelRun());
 $("messages").addEventListener("scroll", () => {
   const view = $("messages");
   state.follow = view.scrollHeight - view.scrollTop - view.clientHeight < 100;
-  $("jump-latest").hidden = state.follow;
+  $("jump-latest").hidden = state.follow&&!state.history.get(state.currentThreadId)?.viewingPast;
 });
-$("jump-latest").addEventListener("click", () => {
-  state.follow = true;
-  $("messages").scrollTop = $("messages").scrollHeight;
-  $("jump-latest").hidden = true;
-});
+$("jump-latest").addEventListener("click", () => void jumpToLatest());
 for (const tab of document.querySelectorAll("[data-tab]")) {
   tab.id = `details-tab-${tab.dataset.tab}`;
   tab.setAttribute("aria-controls", "inspector-content");

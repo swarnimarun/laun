@@ -1145,6 +1145,17 @@ button:disabled:hover {
   scrollbar-color: #d4ddca transparent;
   scroll-behavior: smooth;
 }
+.history-controls {
+  max-width: 850px;
+  margin: 0 auto 24px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #58705b;
+  font-size: 12px;
+}
 .message {
   max-width: 850px;
   margin: 0 auto 27px;

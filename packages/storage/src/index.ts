@@ -76,3 +76,17 @@ export async function recoverCheckpoint(raw:string|Uint8Array,threadId:string,th
  try{await restoreCheckpoint(raw,threadId,threadRoot,expectedSha256);return {preservedAt};}
  catch(error){if(preservedAt){try{await lstat(threadRoot);}catch(e){if((e as NodeJS.ErrnoException).code==="ENOENT")await rename(preservedAt,threadRoot);}}throw error;}
 }
+
+/** Host cache epochs prevent A→B→A placement from reopening A's old files. */
+export async function placementChanged(threadRoot:string,placementId:string|undefined):Promise<boolean>{
+ if(!placementId)return false;if(!validId(placementId))throw new Error("invalid thread placement epoch");
+ let fd:Awaited<ReturnType<typeof open>>|undefined;
+ try{fd=await open(join(threadRoot,".laun-placement"),constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);const stat=await fd.stat();if(!stat.isFile()||stat.size>128)throw new Error("invalid placement marker");return (await fd.readFile("utf8"))!==placementId;}
+ catch(e){if((e as NodeJS.ErrnoException).code==="ENOENT")return true;throw e;}finally{await fd?.close();}
+}
+export async function recordPlacement(threadRoot:string,placementId:string|undefined):Promise<void>{
+ if(!placementId)return;if(!validId(placementId))throw new Error("invalid thread placement epoch");
+ await mkdir(threadRoot,{recursive:true,mode:0o700});const temporary=join(threadRoot,`.laun-placement-${randomUUID()}`);
+ try{const fd=await open(temporary,"wx",0o600);try{await fd.writeFile(placementId);await fd.sync();}finally{await fd.close();}await rename(temporary,join(threadRoot,".laun-placement"));const dir=await open(threadRoot,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);try{await dir.sync();}finally{await dir.close();}}
+ finally{await rm(temporary,{force:true});}
+}

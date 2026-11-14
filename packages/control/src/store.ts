@@ -30,10 +30,13 @@ type ObjectKind = "mower" | "thread" | "profile" | "worker" | "connection" | "ta
 interface Owned { id: string; ownerId: string }
 interface RunRow { id: string; owner_id: string; thread_id: string; request_id: string; prompt: string; status: ControlRunStatus;
   worker_id: string | null; generation: number; lease_until: string | null; created_at: string; updated_at: string;
-  cancel_requested: number; summary: string | null; model:string|null }
+  cancel_requested: number; summary: string | null; model:string|null;instructions:string|null }
+interface EventRow {sequence:number;thread_id:string;run_id:string|null;created_at:string;kind:ThreadEvent["kind"];payload:string}
+const eventFrom=(r:EventRow):ThreadEvent=>({sequence:r.sequence,threadId:r.thread_id,runId:r.run_id??undefined,createdAt:r.created_at,kind:r.kind,payload:JSON.parse(r.payload)});
+function eventRows(rows:Iterable<EventRow>):EventRow[]{const kept:EventRow[]=[];let bytes=0;for(const row of rows){const size=Buffer.byteLength(row.payload)+512;if(kept.length&&bytes+size>4*1024*1024)break;kept.push(row);bytes+=size;}return kept;}
 const runFrom = (r: RunRow): ControlRun => ({ id:r.id, ownerId:r.owner_id, threadId:r.thread_id, requestId:r.request_id, prompt:r.prompt,
   status:r.status, workerId:r.worker_id ?? undefined, generation:r.generation, leaseUntil:r.lease_until ?? undefined,
-  createdAt:r.created_at, updatedAt:r.updated_at, cancelRequested:!!r.cancel_requested, summary:r.summary ?? undefined,model:r.model??undefined });
+  createdAt:r.created_at, updatedAt:r.updated_at, cancelRequested:!!r.cancel_requested, summary:r.summary ?? undefined,model:r.model??undefined,instructions:r.instructions??undefined });
 
 /** Transactional control metadata. Pi's own conversation files remain separate. */
 export class ControlStore {
@@ -78,6 +81,7 @@ export class ControlStore {
     this.db.query("INSERT OR IGNORE INTO metadata VALUES('schema','1')").run();
     const columns=this.db.query("PRAGMA table_info(runs)").all() as {name:string}[];
     if(!columns.some(c=>c.name==="model"))this.db.exec("ALTER TABLE runs ADD COLUMN model TEXT");
+    if(!columns.some(c=>c.name==="instructions"))this.db.exec("ALTER TABLE runs ADD COLUMN instructions TEXT");
     this.db.exec("UPDATE runs SET model=(SELECT json_extract(m.body,'$.model') FROM objects t JOIN objects m ON m.kind='mower' AND m.id=json_extract(t.body,'$.mowerId') WHERE t.kind='thread' AND t.id=runs.thread_id) WHERE model IS NULL");
     if(path!==":memory:")for(const file of [path,`${path}-wal`,`${path}-shm`])if(existsSync(file))chmodSync(file,0o600);
   }
@@ -127,6 +131,8 @@ export class ControlStore {
   }
   createMower(p:ControlPrincipal,input:unknown):MowerRecord {
     const b=record(input); const name=text(b.name,"name",80);
+    if(b.instructions!==undefined&&b.instructions!==null&&typeof b.instructions!=="string")throw new ControlError("instructions must be text");
+    const instructions=typeof b.instructions==="string"&&b.instructions.trim()?text(b.instructions,"instructions",16000):undefined;
     const role=b.role ?? "mower"; if(!["mower","director","adviser"].includes(role as string)) throw new ControlError("invalid role");
     return this.transaction(()=>{
       if(this.list<MowerRecord>("mower",p).some((m)=>!m.archivedAt && m.name.toLowerCase()===name.toLowerCase())) throw new ControlError("mower name already exists",409);
@@ -137,7 +143,7 @@ export class ControlStore {
       if(profile.revokedAt) throw new ControlError("profile revoked",409);
       if(b.workerId){const worker=this.get<WorkerRecord>("worker",text(b.workerId,"workerId",100));if(!worker.local&&worker.ownerId!==p.id)throw new ControlError("worker not found",404);if(worker.status==="revoked")throw new ControlError("worker revoked",409);}
       const mower:MowerRecord={id:id(),ownerId:p.id,workspaceId:"default",name,role:role as MowerRecord["role"],model:text(b.model ?? "opencode-go/muse-spark-1.3-contributor","model",256),
-        profileId:profile.id,profileVersion:profile.version,workerId:b.workerId ? String(b.workerId):undefined,createdAt:now()};
+        profileId:profile.id,profileVersion:profile.version,workerId:b.workerId ? String(b.workerId):undefined,createdAt:now(),instructions};
       this.put("mower",mower);return mower;
     });
   }
@@ -167,12 +173,21 @@ export class ControlStore {
   }
   events(p:ControlPrincipal,threadId:string,after=0):{events:ThreadEvent[];nextCursor:number} {
     this.get<ThreadRecord>("thread",threadId,p);
-    const rows=this.db.query("SELECT * FROM events WHERE thread_id=? AND sequence>? ORDER BY sequence LIMIT 500").all(threadId,after) as
-      {sequence:number;thread_id:string;run_id:string|null;created_at:string;kind:ThreadEvent["kind"];payload:string}[];
-    return {events:rows.map(r=>({sequence:r.sequence,threadId:r.thread_id,runId:r.run_id??undefined,createdAt:r.created_at,kind:r.kind,payload:JSON.parse(r.payload)})),nextCursor:rows.at(-1)?.sequence??after};
+    const rows=eventRows(this.db.query("SELECT * FROM events WHERE thread_id=? AND sequence>? ORDER BY sequence LIMIT 500").iterate(threadId,after) as Iterable<EventRow>);
+    return {events:rows.map(eventFrom),nextCursor:rows.at(-1)?.sequence??after};
+  }
+  history(p:ControlPrincipal,threadId:string,before?:number):import("@laun/protocol").ThreadEventPage{
+    this.get<ThreadRecord>("thread",threadId,p);
+    if(before!==undefined&&(!Number.isSafeInteger(before)||before<1))throw new ControlError("invalid history cursor");
+    const rows=eventRows((before===undefined?this.db.query("SELECT * FROM events WHERE thread_id=? ORDER BY sequence DESC LIMIT 500").iterate(threadId):this.db.query("SELECT * FROM events WHERE thread_id=? AND sequence<? ORDER BY sequence DESC LIMIT 500").iterate(threadId,before)) as Iterable<EventRow>);
+    const oldest=rows.at(-1)?.sequence;
+    if(oldest===undefined)return {events:[],nextCursor:0,hasEarlier:false};
+    const newest=rows[0]!.sequence;const page={events:rows.reverse().map(eventFrom),nextCursor:newest};
+    return {...page,previousCursor:oldest,hasEarlier:!!this.db.query("SELECT 1 FROM events WHERE thread_id=? AND sequence<? LIMIT 1").get(threadId,oldest)};
   }
   submit(p:ControlPrincipal,threadId:string,input:unknown,source:"user"|"task"="user"):ControlRun {
     const b=record(input);const prompt=text(b.text,"text",32_000);const requestId=text(b.requestId,"requestId",128);
+    if(b.mode!==undefined&&b.mode!=="queue")throw new ControlError("this runtime accepts queued input; steering must be explicitly supported before it can interrupt a run",409);
     return this.transaction(()=>{
       const thread=this.get<ThreadRecord>("thread",threadId,p); if(thread.archivedAt)throw new ControlError("thread archived",409);
       const existing=this.db.query("SELECT * FROM runs WHERE thread_id=? AND request_id=?").get(threadId,requestId) as RunRow|null;
@@ -183,8 +198,8 @@ export class ControlStore {
       const queued=this.db.query("SELECT COUNT(*) n FROM runs WHERE thread_id=? AND status IN ('queued','running','waiting_permission')").get(threadId) as {n:number};
       if(queued.n>=32)throw new ControlError("thread queue is full",429);
       const runId=id(),at=now();
-      const model=this.get<MowerRecord>("mower",thread.mowerId).model;
-      this.db.query("INSERT INTO runs(id,owner_id,thread_id,request_id,prompt,status,created_at,updated_at,model) VALUES(?,?,?,?,?,'queued',?,?,?)").run(runId,thread.ownerId,threadId,requestId,prompt,at,at,model);
+      const mower=this.get<MowerRecord>("mower",thread.mowerId);
+      this.db.query("INSERT INTO runs(id,owner_id,thread_id,request_id,prompt,status,created_at,updated_at,model,instructions) VALUES(?,?,?,?,?,'queued',?,?,?,?)").run(runId,thread.ownerId,threadId,requestId,prompt,at,at,mower.model,mower.instructions??null);
       this.event(threadId,source==="user"?"message":"system",source==="user"?{role:"user",text:prompt}:{text:prompt,source:"task"},runId);
       thread.updatedAt=at;this.put("thread",thread);
       return this.run(runId);
