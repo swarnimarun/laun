@@ -4,6 +4,7 @@ import type { ControlApproval, ControlPrincipal, MowerRecord, TaskRecord, Telegr
 import { ControlService } from "./service.js";
 import { canonical, ControlError, hash, id, now, record, text } from "./store.js";
 import { ownerOnboarding } from "./onboarding.js";
+import { assertSamePrincipal, type AuthenticatePrincipal } from "./auth.js";
 
 export interface TelegramConnectorOptions {
   serviceToken: string;
@@ -259,7 +260,7 @@ async function requestBody(req: Request): Promise<Record<string, unknown>> {
 
 /** Independent bridge credential validation; a user header can never choose an owner. */
 export async function handleTelegramConnectorRequest(
-  service: ControlService, req: Request, options: TelegramConnectorOptions, authenticated?: ControlPrincipal | null,
+  service: ControlService, req: Request, options: TelegramConnectorOptions, authenticated?: ControlPrincipal | null, authenticate?: AuthenticatePrincipal,
 ): Promise<Response | null> {
   const path = new URL(req.url).pathname.replace(/^\/api\/v2/, "");
   const human = ["/identity/telegram-link", "/identity/telegram-deliveries"].includes(path);
@@ -270,6 +271,7 @@ export async function handleTelegramConnectorRequest(
     const db = service.store.db;
     if (human) {
       if (!authenticated) throw new ControlError("unauthorized", 401);
+      assertSamePrincipal(authenticated,authenticate);
       if (path === "/identity/telegram-link" && req.method === "POST") {
         const ttl = options.linkTtlMs ?? 120_000;
         if (!Number.isSafeInteger(ttl) || ttl < 100 || ttl > 300_000) throw new ControlError("invalid link lifetime");
@@ -283,7 +285,7 @@ export async function handleTelegramConnectorRequest(
       }
       if (path === "/identity/telegram-link" && req.method === "GET") return json({ links: db.query("SELECT bot_id botId,user_id userId,created_at createdAt FROM telegram_links WHERE owner_id=?").all(authenticated.id) });
       if (path === "/identity/telegram-link" && req.method === "DELETE") {
-        const b = await requestBody(req); const userId = text(b.userId, "userId", 20);
+        const b = await requestBody(req); assertSamePrincipal(authenticated,authenticate); const userId = text(b.userId, "userId", 20);
         service.store.transaction(() => {
           const routes = db.query("SELECT route_key FROM telegram_routes WHERE bot_id=? AND user_id=? AND owner_id=?").all(options.botId, userId, authenticated.id) as { route_key: string }[];
           for (const route of routes) {

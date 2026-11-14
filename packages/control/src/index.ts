@@ -3,6 +3,7 @@ export { ControlService } from "./service.js";
 export type { ControlOptions, BrokerSurface } from "./service.js";
 export { handleControlRequest } from "./http.js";
 export type { ControlHttpOptions } from "./http.js";
+export type { AuthenticatePrincipal } from "./auth.js";
 export { handleTelegramConnectorRequest } from "./connectors.js";
 export type { TelegramConnectorOptions } from "./connectors.js";
 export { createControlBackup, restoreControlBackup } from "./backup.js";

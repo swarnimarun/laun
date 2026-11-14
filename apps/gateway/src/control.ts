@@ -2,6 +2,7 @@ import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createToolBroker } from "@laun/broker";
 import { ControlService, ControlStore, handleControlRequest, handleTelegramConnectorRequest } from "@laun/control";
+import type { AuthenticatePrincipal } from "@laun/control";
 import { createPiRuntime, createPiInference } from "@laun/runtime";
 import { parseAllowlist, type BrokerConnection, type ControlPrincipal } from "@laun/protocol";
 import type { GatewayConfig } from "./config.js";
@@ -31,7 +32,7 @@ export function createControl(cfg:GatewayConfig,env:NodeJS.ProcessEnv=process.en
   service.broker=broker;
   const telegram={serviceToken:env.LAUN_TELEGRAM_BRIDGE_TOKEN?.trim()||cfg.gatewayToken,botId:env.LAUN_TELEGRAM_BOT_ID?.trim()||env.TELEGRAM_BOT_TOKEN?.split(":")[0]||"",
     allowlist:parseAllowlist(env.TELEGRAM_ALLOWLIST_IDS),allowChats:parseAllowlist(env.TELEGRAM_ALLOWLIST_CHAT_IDS),defaultModel:service.options.defaultModel};
-  return {service,store,legacyEnabled,handle:async(req:Request,principal:ControlPrincipal|null)=>
-    await handleTelegramConnectorRequest(service,req,telegram,principal)??handleControlRequest(service,req,principal,{resolveSecret,allowLoopback}),
+  return {service,store,legacyEnabled,handle:async(req:Request,principal:ControlPrincipal|null,authenticate?:AuthenticatePrincipal)=>
+    await handleTelegramConnectorRequest(service,req,telegram,principal,authenticate)??handleControlRequest(service,req,principal,{resolveSecret,allowLoopback,authenticate}),
     close:async()=>{await service.close();store.close();}};
 }

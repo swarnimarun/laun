@@ -5,6 +5,7 @@ import { createGateway } from "./server.js";
 import { SessionStore } from "./store.js";
 import { STREAMING_SERVE_OPTIONS } from "./serve.js";
 import { createControl } from "./control.js";
+import { authenticateControlPrincipal } from "./control-auth.js";
 import { isKeyPrincipalId, KeyStoreUnavailableError } from "./keys.js";
 
 const cfg = loadConfig();
@@ -82,7 +83,7 @@ const server=Bun.serve({
     catch (error) { if (error instanceof KeyStoreUnavailableError) return err(error.message, 503); throw error; }
     if (path.startsWith("/api/v2/")) {
       const principalId=id ? id.kind==="service"?"service":gw.keys.principalIdForKey(id.keyId) : null;
-      return control.handle(req, id&&principalId ? { id:principalId,admin:id.kind==="service" } : null);
+      return control.handle(req, id&&principalId ? { id:principalId,admin:id.kind==="service" } : null,()=>authenticateControlPrincipal(gw,req));
     }
     if (!id) return Response.json({ error: "unauthorized" }, { status: 401 });
     const serviceOnly = id.kind === "service";

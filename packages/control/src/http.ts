@@ -13,9 +13,10 @@ import {beginThreadPurge,continueThreadPurge,inspectThreadPurge,listHostCleanupP
 import {approveHostCleanupPlan,claimHostCleanup,fenceWorkerCleanup,finishHostCleanup,heartbeatHostCleanup,previewHostCleanupPlan,revokeHostCleanupPlan} from "./cleanup.js";
 import {rotateWorkerKey,setWorkerDraining} from "./fleet.js";
 import { canonical, ControlError, hash, id, now, record, text } from "./store.js";
+import { assertSamePrincipal, type AuthenticatePrincipal } from "./auth.js";
 
-export interface ControlHttpOptions { allowLoopback?:boolean; resolveSecret?:(ref:string)=>string|undefined }
-async function body(req:Request){
+export interface ControlHttpOptions { allowLoopback?:boolean; resolveSecret?:(ref:string)=>string|undefined; authenticate?:AuthenticatePrincipal }
+async function requestBody(req:Request){
   const path=new URL(req.url).pathname;
   const limit=path.endsWith("/worker/checkpoint")||path.endsWith("/worker/durable-append")?64*1024*1024:path.includes("/worker/")?2_097_152:262_144;
   const decoder=new TextDecoder("utf-8",{fatal:true});let raw="",bytes=0;
@@ -28,11 +29,13 @@ const reply=(value:unknown,status=200)=>Response.json(value,{status,headers:{"ca
 
 export async function handleControlRequest(service:ControlService,req:Request,p:ControlPrincipal|null,options:ControlHttpOptions={}):Promise<Response>{
   const url=new URL(req.url);const path=url.pathname.replace(/^\/api\/v2/,"");const store=service.store;
+  const assertHuman=()=>assertSamePrincipal(p,options.authenticate);
+  const body=requestBody;
   try{
     if(path.startsWith("/worker/")){
       const key=req.headers.get("authorization")?.match(/^Bearer (.+)$/i)?.[1];let worker=key?store.authenticateWorker(key):null;
       if(!worker)return reply({error:"unauthorized worker"},401);
-      const b=await body(req);if(req.method!=="POST")throw new ControlError("method not allowed",405);
+      const b=await requestBody(req);if(req.method!=="POST")throw new ControlError("method not allowed",405);
       // Revocation while a body is arriving must not be overwritten by a
       // stale heartbeat/capability snapshot or dispatch new private work.
       worker=key?store.authenticateWorker(key):null;if(!worker)return reply({error:"unauthorized worker"},401);
@@ -108,43 +111,44 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
       throw new ControlError("worker endpoint not found",404);
     }
     if(!p)return reply({error:"unauthorized"},401);
+    assertHuman();
     if(path==="/me"&&req.method==="GET")return reply({principalId:p.id,admin:p.admin});
     if(path==="/state"&&req.method==="GET")return reply(service.state(p));
     if(path==="/models"&&req.method==="GET")return reply({models:await service.listModels()});
     if(path==="/onboarding"&&req.method==="GET")return reply(await onboardingStatus(service,p));
-    if(path==="/onboarding"&&req.method==="POST")return reply(await configureOnboarding(service,p,await body(req)));
+    if(path==="/onboarding"&&req.method==="POST"){const b=await body(req);assertHuman();return reply(await configureOnboarding(service,p,b,assertHuman));}
     if(path==="/purges"&&req.method==="GET")return reply({purges:listThreadPurges(store,p)});
     const purgePreview=path.match(/^\/threads\/([A-Za-z0-9_-]+)\/purge-preview$/);
     if(purgePreview&&req.method==="GET")return reply({preview:previewThreadPurge(store,p,purgePreview[1]!)});
     const beginPurge=path.match(/^\/threads\/([A-Za-z0-9_-]+)\/purge$/);
-    if(beginPurge&&req.method==="POST")return reply({job:beginThreadPurge(store,p,beginPurge[1]!,await body(req) as unknown as import("@laun/protocol").ThreadPurgeInput)},202);
+    if(beginPurge&&req.method==="POST"){const b=await body(req);assertHuman();return reply({job:beginThreadPurge(store,p,beginPurge[1]!,b as unknown as import("@laun/protocol").ThreadPurgeInput)},202);}
     const purgeRoute=path.match(/^\/purges\/([A-Za-z0-9_-]+)(\/continue|\/host-copies)?$/);
     if(purgeRoute){
       if(!purgeRoute[2]&&req.method==="GET")return reply({job:inspectThreadPurge(store,p,purgeRoute[1]!)});
       if(purgeRoute[2]==="/host-copies"&&req.method==="GET"){inspectThreadPurge(store,p,purgeRoute[1]!);return reply({plans:listHostCleanupPlans(store,p,purgeRoute[1]!)});}
-      if(purgeRoute[2]==="/continue"&&req.method==="POST"){const b=await body(req);return reply({job:continueThreadPurge(store,p,purgeRoute[1]!,{maxRows:b.maxRows===undefined?undefined:Number(b.maxRows)})});}
+      if(purgeRoute[2]==="/continue"&&req.method==="POST"){const b=await body(req);assertHuman();return reply({job:continueThreadPurge(store,p,purgeRoute[1]!,{maxRows:b.maxRows===undefined?undefined:Number(b.maxRows)})});}
     }
     const directRun=path.match(/^\/runs\/([A-Za-z0-9_-]+)$/);
     if(directRun&&req.method==="GET")return reply({run:store.run(directRun[1]!,p)});
     const threadRuns=path.match(/^\/threads\/([A-Za-z0-9_-]+)\/runs$/);
     if(threadRuns&&req.method==="GET")return reply({runs:store.threadRuns(p,threadRuns[1]!)});
-    if(path==="/mowers"&&req.method==="POST"){const b=await body(req);if(b.role==="adviser")throw new ControlError("Gatekeeper identities are managed by the permission adviser",403);return reply(store.createMower(p,{...b,model:b.model??service.options.defaultModel}),201);}
-    if(path==="/threads"&&req.method==="POST")return reply(store.createThread(p,await body(req)),201);
-    if(path==="/profiles"&&req.method==="POST")return reply(store.createProfile(p,await body(req)),201);
-    if(path==="/workers"&&req.method==="POST")return reply(store.registerWorker(p,await body(req)),201);
+    if(path==="/mowers"&&req.method==="POST"){const b=await body(req);assertHuman();if(b.role==="adviser")throw new ControlError("Gatekeeper identities are managed by the permission adviser",403);return reply(store.createMower(p,{...b,model:b.model??service.options.defaultModel}),201);}
+    if(path==="/threads"&&req.method==="POST"){const b=await body(req);assertHuman();return reply(store.createThread(p,b),201);}
+    if(path==="/profiles"&&req.method==="POST"){const b=await body(req);assertHuman();return reply(store.createProfile(p,b),201);}
+    if(path==="/workers"&&req.method==="POST"){const b=await body(req);assertHuman();return reply(store.registerWorker(p,b),201);}
     const workerMaintenance=path.match(/^\/workers\/([A-Za-z0-9_-]+)\/(drain|resume|rotate)$/);
     if(workerMaintenance&&req.method==="POST"){
-      if(workerMaintenance[2]==="rotate")return reply(rotateWorkerKey(store,p,workerMaintenance[1]!,await body(req) as unknown as import("@laun/protocol").WorkerKeyRotation));
+      if(workerMaintenance[2]==="rotate"){const b=await body(req);assertHuman();return reply(rotateWorkerKey(store,p,workerMaintenance[1]!,b as unknown as import("@laun/protocol").WorkerKeyRotation));}
       return reply({worker:setWorkerDraining(store,p,workerMaintenance[1]!,workerMaintenance[2]==="drain")});
     }
     const hostCleanup=path.match(/^\/host-copies\/([A-Za-z0-9_-]+)(\/approve|\/revoke)?$/);
     if(hostCleanup){
       if(!hostCleanup[2]&&req.method==="GET")return reply({review:previewHostCleanupPlan(store,p,hostCleanup[1]!)});
-      if(hostCleanup[2]==="/approve"&&req.method==="POST")return reply({plan:approveHostCleanupPlan(store,p,hostCleanup[1]!,await body(req) as unknown as import("@laun/protocol").HostCleanupApproval)});
-      if(hostCleanup[2]==="/revoke"&&req.method==="POST"){const b=await body(req);return reply({plan:revokeHostCleanupPlan(store,p,hostCleanup[1]!,{expectedDigest:text(b.expectedDigest,"expectedDigest",64)})});}
+      if(hostCleanup[2]==="/approve"&&req.method==="POST"){const b=await body(req);assertHuman();return reply({plan:approveHostCleanupPlan(store,p,hostCleanup[1]!,b as unknown as import("@laun/protocol").HostCleanupApproval)});}
+      if(hostCleanup[2]==="/revoke"&&req.method==="POST"){const b=await body(req);assertHuman();return reply({plan:revokeHostCleanupPlan(store,p,hostCleanup[1]!,{expectedDigest:text(b.expectedDigest,"expectedDigest",64)})});}
     }
     const lifecyclePath=path.match(/^\/threads\/([A-Za-z0-9_-]+)\/(profile|move)$/);
-    if(lifecyclePath&&req.method==="POST")return reply(lifecyclePath[2]==="profile"?rebaseThreadProfile(store,p,lifecyclePath[1]!,await body(req)):moveThreadWorker(store,p,lifecyclePath[1]!,await body(req)));
+    if(lifecyclePath&&req.method==="POST"){const b=await body(req);assertHuman();return reply(lifecyclePath[2]==="profile"?rebaseThreadProfile(store,p,lifecyclePath[1]!,b):moveThreadWorker(store,p,lifecyclePath[1]!,b));}
     const checkpointPath=path.match(/^\/threads\/([A-Za-z0-9_-]+)\/(checkpoint|checkpoint-reference)$/);
     if(checkpointPath&&req.method==="GET"){
       store.get("thread",checkpointPath[1]!,p);const row=store.db.query("SELECT body FROM checkpoints WHERE thread_id=?").get(checkpointPath[1]!) as {body:string}|null;
@@ -152,7 +156,7 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
     }
     let m=path.match(/^\/mowers\/([a-zA-Z0-9_-]+)$/);
     if(m&&req.method==="PATCH"){
-      const b=await body(req);const mower=store.get<MowerRecord>("mower",m[1]!,p);
+      const b=await body(req);assertHuman();const mower=store.get<MowerRecord>("mower",m[1]!,p);
       if(mower.role==="adviser"&&(b.profileId!==undefined||b.workerId!==undefined||b.instructions!==undefined||b.archived===true))throw new ControlError("Gatekeeper retains its managed advice-only profile and placement; stop its thread to pause it",409);
       if(b.name!==undefined){const name=text(b.name,"name",80);if(store.list<MowerRecord>("mower",{id:mower.ownerId,admin:false}).some(other=>other.id!==mower.id&&!other.archivedAt&&other.name.toLowerCase()===name.toLowerCase()))throw new ControlError("mower name already exists",409);mower.name=name;}
       if(b.model!==undefined)mower.model=text(b.model,"model",256);
@@ -165,7 +169,7 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
     }
     m=path.match(/^\/profiles\/([a-zA-Z0-9_-]+)\/(revisions|revoke)$/);
     if(m&&req.method==="POST"){
-      const b=await body(req);const previous=store.latestProfile(m[1]!,p);
+      const b=await body(req);assertHuman();const previous=store.latestProfile(m[1]!,p);
       if(m[2]==="revisions"){if(b.expectedBaseVersion!==previous.version)throw new ControlError("profile changed; reload and review the latest revision",409);return reply(store.createProfile(p,b,previous),201);}
       const version=b.version===undefined?previous.version:Number(b.version);const profile=store.profile(m[1]!,version,p);profile.revokedAt=now();
       store.db.query("UPDATE objects SET body=? WHERE kind='profile' AND id=?").run(JSON.stringify(profile),`${profile.id}:${version}`);
@@ -182,13 +186,13 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
         }
         const after=Number(url.searchParams.get("after")??0);if(!Number.isSafeInteger(after)||after<0)throw new ControlError("invalid event cursor");return reply(store.events(p,threadId,after));
       }
-      if(m[2]==="messages"&&req.method==="POST"){const run=store.submit(p,threadId,await body(req));void service.tick();return reply(run,202);}
+      if(m[2]==="messages"&&req.method==="POST"){const b=await body(req);assertHuman();const run=store.submit(p,threadId,b);void service.tick();return reply(run,202);}
       if(m[2]==="cancel"&&req.method==="POST"){service.cancelTree(p,threadId);return reply({accepted:true});}
       if(m[2]==="archive"&&req.method==="POST"){let thread=store.get<ThreadRecord>("thread",threadId,p);if(store.get<MowerRecord>("mower",thread.mowerId,p).role==="adviser")throw new ControlError("Gatekeeper keeps its durable advice thread; stop it to pause",409);service.cancelTree(p,threadId);thread=store.get<ThreadRecord>("thread",threadId,p);thread.archivedAt=now();store.put("thread",thread);return reply(thread);}
     }
     m=path.match(/^\/runs\/([a-zA-Z0-9_-]+)\/resume$/);
     if(m&&req.method==="POST"){
-      const b=await body(req);const run=store.run(m[1]!,p);
+      const b=await body(req);assertHuman();const run=store.run(m[1]!,p);
       if(run.status!=="interrupted")throw new ControlError("run is not interrupted",409);
       if(!run.model)throw new ControlError("this older run has no admitted model; abandon it and send fresh input instead of replaying",409);
       if(b.confirmedStopped!==true)throw new ControlError("confirm previous execution has stopped before resuming",409);
@@ -197,7 +201,7 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
     }
     m=path.match(/^\/runs\/([a-zA-Z0-9_-]+)\/abandon$/);
     if(m&&req.method==="POST"){
-      const b=await body(req);const run=store.run(m[1]!,p);
+      const b=await body(req);assertHuman();const run=store.run(m[1]!,p);
       if(run.status!=="interrupted"||b.confirmedStopped!==true)throw new ControlError("confirm interrupted execution has stopped before abandoning it",409);
       store.transaction(()=>{store.cancel(p,run.threadId);store.db.query("UPDATE runs SET status='cancelled',generation=generation+1,lease_until=NULL,updated_at=? WHERE id=?").run(now(),run.id);store.expireRunApprovals(run.id);
         store.event(run.threadId,"system",{text:"Operator abandoned the reconciled attempt without replay",status:"cancelled"},run.id);});return reply(store.run(run.id));
@@ -206,7 +210,7 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
     if(m&&req.method==="GET")return reply(inspectAdvice(service,p,m[1]!));
     m=path.match(/^\/approvals\/([a-zA-Z0-9_-]+)(\/proposal|\/advice)?$/);
     if(m&&req.method==="POST"){
-      const b=await body(req);const a=store.approval(m[1]!,p);
+      const b=await body(req);assertHuman();const a=store.approval(m[1]!,p);
       if(m[2]==="/advice")return reply(requestAdvice(service,p,a.id,text(b.feedback,"feedback",4000),{requestId:b.requestId===undefined?undefined:text(b.requestId,"requestId",128)}),202);
       if(m[2]==="/proposal")return reply(proposePermissionChange(store.profile(a.profileId,a.profileVersion,p),a.action,text(b.feedback,"feedback",2000)));
       if(b.continuation!==undefined&&!["replan","stop"].includes(String(b.continuation)))throw new ControlError("invalid continuation");
@@ -215,7 +219,7 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
       return reply(decided);
     }
     if(path==="/tasks"&&req.method==="POST"){
-      const b=await body(req);const parent=store.get<ThreadRecord>("thread",text(b.parentThreadId,"parentThreadId",100),p);const goal=text(b.goal,"goal",32_000);
+      const b=await body(req);assertHuman();const parent=store.get<ThreadRecord>("thread",text(b.parentThreadId,"parentThreadId",100),p);const goal=text(b.goal,"goal",32_000);
       const taskTitle=b.name===undefined?goal.slice(0,160):text(b.name,"task name",160);
       const taskOwner={id:parent.ownerId,admin:false};
       const result=store.receipt(p,`user-task:${text(b.requestId,"requestId",128)}`,hash(canonical(b)),()=>{
@@ -227,7 +231,7 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
       void service.tick();return reply(result,201);
     }
     m=path.match(/^\/tasks\/([a-zA-Z0-9_-]+)\/handoff$/);
-    if(m&&req.method==="POST"){const result=service.handoff(p,m[1]!,await body(req));void service.tick();return reply(result);}
+    if(m&&req.method==="POST"){const b=await body(req);assertHuman();const result=service.handoff(p,m[1]!,b);void service.tick();return reply(result);}
     m=path.match(/^\/workers\/([a-zA-Z0-9_-]+)\/revoke$/);
     if(m&&req.method==="POST"){
       const worker=store.get<WorkerRecord>("worker",m[1]!,p);if(worker.local)throw new ControlError("disable local runtime in server configuration");worker.status="revoked";store.put("worker",worker);
@@ -235,7 +239,7 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
       for(const run of store.runs(p).filter(r=>r.workerId===worker.id&&["running","waiting_permission"].includes(r.status))){store.setRunStatus(run.id,"interrupted");store.expireRunApprovals(run.id);}return reply(worker);
     }
     if(path==="/connections"&&req.method==="POST"){
-      const b=await body(req);const endpoint=new URL(text(b.url,"url",4096));if(endpoint.username||endpoint.password||endpoint.hash||!["http:","https:"].includes(endpoint.protocol))throw new ControlError("invalid credential-free HTTP endpoint");
+      const b=await body(req);assertHuman();const endpoint=new URL(text(b.url,"url",4096));if(endpoint.username||endpoint.password||endpoint.hash||!["http:","https:"].includes(endpoint.protocol))throw new ControlError("invalid credential-free HTTP endpoint");
       if(b.secretRef!==undefined&&!/^MCP_[A-Z0-9_]+$/.test(String(b.secretRef)))throw new ControlError("secretRef must name a controller MCP_ environment secret");
       if(b.secretRef&&!p.admin)throw new ControlError("only the installation administrator can bind controller credential references",403);
       if(b.protocolVersion!==undefined&&!["2026-07-28","2025-11-25"].includes(String(b.protocolVersion)))throw new ControlError("invalid MCP protocol version");
@@ -247,7 +251,7 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
     if(m){
       let connection=store.get<BrokerConnection>("connection",m[1]!,p);
       if(!m[2]&&req.method==="PATCH"){
-        const b=await body(req);connection=store.get<BrokerConnection>("connection",m[1]!,p);const before=canonical({url:connection.url,protocol:connection.protocolVersion,secret:connection.secretRef});
+        const b=await body(req);assertHuman();connection=store.get<BrokerConnection>("connection",m[1]!,p);const before=canonical({url:connection.url,protocol:connection.protocolVersion,secret:connection.secretRef});
         if(b.name!==undefined)connection.name=text(b.name,"name",80);
         if(b.url!==undefined){const endpoint=new URL(text(b.url,"url",4096));if(endpoint.username||endpoint.password||endpoint.hash||!["http:","https:"].includes(endpoint.protocol))throw new ControlError("invalid endpoint");connection.url=endpoint.href;}
         if(b.protocolVersion!==undefined){if(!["2026-07-28","2025-11-25"].includes(String(b.protocolVersion)))throw new ControlError("invalid MCP protocol version");connection.protocolVersion=b.protocolVersion as BrokerConnection["protocolVersion"];}
@@ -263,8 +267,9 @@ export async function handleControlRequest(service:ControlService,req:Request,p:
         // This short-lived broker permits only this endpoint's network action;
         // it cannot authorize tool invocation or create a mower grant.
         const operatorBroker=createToolBroker({allowLoopback:options.allowLoopback,loadConnection:connectionId=>connectionId===connection.id?store.get<BrokerConnection>("connection",connectionId):undefined,
-          saveConnection:value=>store.saveConnection(value),resolveSecret:ref=>options.resolveSecret?.(ref),
-          saveCatalog:(expected,catalog)=>store.saveCatalog(expected,catalog),
+          saveConnection:value=>store.saveConnection(value),resolveSecret:ref=>{assertHuman();return options.resolveSecret?.(ref);},
+          saveCatalog:(expected,catalog)=>{assertHuman();return store.saveCatalog(expected,catalog);},
+          assertActive:()=>{req.signal.throwIfAborted();assertHuman();},
           authorize:async(_ctx,operation,resource)=>{if(operation!=="network.connect"||resource!==new URL(connection.url).origin)throw new ControlError("operator discovery scope exceeded",403);}});
         return reply(await operatorBroker.discover({principalId:connection.ownerId,workspaceId:connection.workspaceId,mowerId:"operator",threadId:"operator",runId:id()},connection.id,req.signal));
       }

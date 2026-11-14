@@ -23,7 +23,7 @@ function yard(service:ControlService,p:ControlPrincipal,workerId:string):WorkerR
  return worker;
 }
 /** Explicit human choices create authority. Setup never calls a provider or submits work. */
-export async function configureOnboarding(service:ControlService,principal:ControlPrincipal,input:unknown):Promise<OnboardingResult>{
+export async function configureOnboarding(service:ControlService,principal:ControlPrincipal,input:unknown,assertAuthenticated?:()=>void):Promise<OnboardingResult>{
  initialize(service);const b=record(input),p={id:principal.id,admin:false},requestId=text(b.requestId,"requestId",128),fingerprint=hash(canonical(b)),key=`onboarding:${requestId}`;
  const receipt=service.store.db.query("SELECT fingerprint,body FROM receipts WHERE owner_id=? AND key=?").get(p.id,key) as {fingerprint:string;body:string}|null;
  if(receipt){if(receipt.fingerprint!==fingerprint)throw new ControlError("idempotency key conflict",409);return JSON.parse(receipt.body);}
@@ -39,6 +39,7 @@ export async function configureOnboarding(service:ControlService,principal:Contr
  yard(service,p,workerId);
  if(!(await service.listModels()).some(m=>m.id===model&&m.configured))throw new ControlError("choose a model configured on this controller; no model call was made",409);
  return service.store.receipt(p,key,fingerprint,()=>{
+  assertAuthenticated?.();
   const previous=ownerOnboarding(service,p);yard(service,p,workerId);
   if(previous&&(!select||b.expectedRevision!==previous.revision))throw new ControlError("primary director already exists or changed; review its current revision before selecting another",409);
   let mower:MowerRecord,thread:ThreadRecord;
