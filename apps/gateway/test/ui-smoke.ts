@@ -46,6 +46,11 @@ const context = await browser.newContext({
 });
 const page = await context.newPage();
 const failures: string[] = [];
+const hostActions: Array<{ path: string; body: any }> = [];
+page.on("request", request => {
+  const path = new URL(request.url()).pathname;
+  if (request.method() === "POST" && /^\/api\/v2\/host-copies\/[^/]+\/(approve|revoke)$/.test(path)) hostActions.push({ path, body: request.postDataJSON() });
+});
 page.on("pageerror", (error) =>
   failures.push(error.message.replaceAll(key, "[KEY]")),
 );
@@ -134,6 +139,72 @@ try {
     fullPage: true,
   });
   checks.push("authenticated login");
+
+  if (fixture) {
+    const beforeSetup = await getState();
+    await page.locator("#workspace-info").click();
+    await page
+      .getByRole("button", {
+        name: "Set up primary Groundskeeper",
+        exact: true,
+      })
+      .click();
+    await page.locator("#field-setup-name").fill(`Groundskeeper ${stamp}`);
+    await page.locator("#field-setup-title").fill(`Primary garden ${stamp}`);
+    await page.locator("#field-setup-model").selectOption("faux/faux-1");
+    await page.locator("#field-setup-yard").selectOption("local");
+    await page.locator("#modal-submit").click();
+    assert.equal(await page.locator("#field-setup-write").inputValue(), "ask");
+    assert.equal(
+      await page.locator("#field-setup-process").inputValue(),
+      "ask",
+    );
+    await page.locator("#field-setup-delegation").selectOption("deny");
+    await page.locator("#modal-submit").click();
+    assert(
+      (await page.locator("#modal-fields").innerText()).includes(
+        '"resource": "threads:own"',
+      ),
+    );
+    await page.locator("#modal-submit").click();
+    await waitHidden("#modal");
+    const setupResponse = await context.request.get(
+      `${base}/api/v2/onboarding`,
+      { headers: { authorization: `Bearer ${key}` } },
+    );
+    const setup = (await setupResponse.json()).setup;
+    const afterSetup = await getState();
+    assert.equal(
+      afterSetup.runs.length,
+      beforeSetup.runs.length,
+      "setup performs no model call or run",
+    );
+    const starter = afterSetup.profiles.find(
+      (p: { id: string; version: number }) =>
+        p.id === setup.profileId && p.version === setup.profileVersion,
+    );
+    assert.equal(starter.rules.length, 6);
+    assert.equal(
+      starter.rules.find(
+        (rule: { operation: string }) => rule.operation === "workspace.write",
+      ).effect,
+      "ask",
+    );
+    assert.equal(
+      starter.rules.find(
+        (rule: { operation: string }) => rule.operation === "task.handoff",
+      ).effect,
+      "deny",
+    );
+    await page.locator("#primary-thread-button").click();
+    await page
+      .locator("#thread-title")
+      .filter({ hasText: `Primary garden ${stamp}` })
+      .waitFor({ state: "visible" });
+    checks.push(
+      "explicit primary Groundskeeper wizard with exact minimal guardrails, durable selection and no inference",
+    );
+  }
 
   const mower = await createMower(mowerName, "director");
   assert(mower?.id, "named director was created");
@@ -312,6 +383,36 @@ try {
       0,
       "Gatekeeper has no operational authority",
     );
+    await chooseTab("Overview");
+    await page
+      .locator("#inspector-content .inspector-section")
+      .first()
+      .locator(".icon-button")
+      .click();
+    assert.equal(
+      await page.locator("#field-profile").count(),
+      0,
+      "managed adviser cannot change authority",
+    );
+    assert.equal(await page.locator("#field-worker").count(), 0);
+    assert.equal(await page.locator("#field-instructions").count(), 0);
+    await page.locator("#field-name").fill("Gatekeeper");
+    await page.locator("#modal-submit").click();
+    await waitHidden("#modal");
+    await page.locator("#thread-menu-button").click();
+    assert.equal(
+      await page
+        .getByRole("button", { name: "Archive thread", exact: true })
+        .count(),
+      0,
+    );
+    assert.equal(
+      await page
+        .getByRole("button", { name: "Move execution yard", exact: true })
+        .count(),
+      0,
+    );
+    await closeDialog();
     assert.equal(
       afterAdvice.profiles.length,
       beforeAdvice.profiles.length,
@@ -503,7 +604,19 @@ try {
     const workerRequest = async (method: string, data: unknown) => {
       const response = await context.request.post(
         `${base}/api/v2/worker/${method}`,
-        { headers: { authorization: `Bearer ${workerKey}` }, data },
+        {
+          headers: { authorization: `Bearer ${workerKey}` },
+          data:
+            method === "poll"
+              ? {
+                  ...(data as object),
+                  durabilityAdapter: {
+                    adapter: "pi-durable@1.5.2",
+                    version: 1,
+                  },
+                }
+              : data,
+        },
       );
       assert(response.ok(), `worker ${method} accepted`);
       return response.json();
@@ -571,6 +684,179 @@ try {
     checks.push(
       "interrupted run holds later queue, requires explicit reconciliation, resumes fenced generation",
     );
+
+    const abandoned = await createThread(
+      `Abandon Pi attempt ${stamp}`,
+      mower.id,
+      "UI_ABANDON_OLD",
+    );
+    await page
+      .locator("#recovery-strip")
+      .waitFor({ state: "visible", timeout: 20000 });
+    await page
+      .locator("#message-input")
+      .fill("Old queued intent must never execute after abandon.");
+    await page.locator("#send-button").click();
+    await messageVisible("Old queued intent must never execute after abandon.");
+    await page
+      .locator("#recovery-strip")
+      .getByRole("button", { name: "Review interrupted work" })
+      .click();
+    await page
+      .getByRole("button", { name: "Review abandoning instead", exact: true })
+      .click();
+    await page.locator("#modal-submit").click();
+    assert(
+      await page.locator("#modal").isVisible(),
+      "abandon requires explicit stopped confirmation",
+    );
+    await page.locator("#field-resume-confirmed").check();
+    await page.locator("#modal-submit").click();
+    await waitHidden("#modal");
+    const abandonedRuns = (await getState()).runs.filter(
+      (run: { threadId: string }) => run.threadId === abandoned.id,
+    );
+    assert.equal(abandonedRuns.length, 2);
+    assert(
+      abandonedRuns.every(
+        (run: { status: string }) => run.status === "cancelled",
+      ),
+      "abandon cancels old attempt and queued intent",
+    );
+    const fresh = `A different fresh request ${stamp}`;
+    await page.locator("#message-input").fill(fresh);
+    await page.locator("#send-button").click();
+    await page
+      .locator("#messages .message.assistant .message-content")
+      .filter({ hasText: `Browser fixture answer: ${fresh}` })
+      .waitFor({ state: "visible", timeout: 20000 });
+    assert.equal(
+      (await getState()).runs.filter(
+        (run: { threadId: string; status: string }) =>
+          run.threadId === abandoned.id && run.status === "done",
+      ).length,
+      1,
+    );
+    checks.push(
+      "actual Pi interrupted boundary, explicit abandon cancels old queued intent, different fresh input completes",
+    );
+    await page.locator("#thread-menu-button").click();
+    await page
+      .getByRole("button", { name: "Archive thread", exact: true })
+      .click();
+    await page.locator("#modal-submit").click();
+    await waitHidden("#modal");
+    await page.locator("#workspace-info").click();
+    await page
+      .getByRole("button", { name: "Review controller copies", exact: true })
+      .click();
+    await page
+      .getByRole("button", {
+        name: `Review controller copy · ${abandoned.title}`,
+        exact: true,
+      })
+      .click();
+    await page
+      .getByRole("button", { name: "Remove controller copy", exact: true })
+      .waitFor({ state: "visible" });
+    await page.locator("#modal-submit").click();
+    assert(
+      await page.locator("#modal").isVisible(),
+      "removal requires stopped and scope confirmation",
+    );
+    assert(
+      (await getState()).threads.some(
+        (entry: { id: string }) => entry.id === abandoned.id,
+      ),
+    );
+    await page.locator("#field-purge-stopped").check();
+    await page.locator("#field-purge-scope").check();
+    await page.locator("#modal-submit").click();
+    await page
+      .getByRole("button", { name: "Continue bounded removal", exact: true })
+      .waitFor({ state: "visible" });
+    await page.locator("#modal-submit").click();
+    await page
+      .locator("#modal-title")
+      .filter({ hasText: "Controller copy removed." })
+      .waitFor({ state: "visible", timeout: 20000 });
+    assert(
+      !(await getState()).threads.some(
+        (entry: { id: string }) => entry.id === abandoned.id,
+      ),
+    );
+    assert(
+      (await page.locator("#modal-fields").innerText()).includes(
+        "Other copies remain separate",
+      ),
+    );
+    await page
+      .getByRole("button", { name: "Inspect known host copies", exact: true })
+      .click();
+    await page
+      .getByText("Controller removal is separate", { exact: true })
+      .waitFor({ state: "visible" });
+    assert(
+      (await page.locator("#modal-fields").innerText()).includes("pending"),
+      "logical controller removal does not automatically clean host copies",
+    );
+    await closeDialog();
+    // The prior actual-Pi fixture was local. Create a separate controller
+    // removal for the settled remote fixture, whose idle yard has no polling
+    // process, so approval/withdrawal can be inspected before any deletion.
+    const humanRequest = async (path: string, body?: unknown) => {
+      const response = await context.request.fetch(`${base}/api/v2${path}`, { method: body === undefined ? "GET" : "POST", headers: { authorization: `Bearer ${key}` }, ...(body === undefined ? {} : { data: body }) });
+      assert(response.ok(), `host-copy fixture setup ${path} accepted`); return response.json();
+    };
+    await humanRequest(`/threads/${pausedThread.id}/archive`, {});
+    const remotePreview = (await humanRequest(`/threads/${pausedThread.id}/purge-preview`)).preview;
+    let remotePurge = (await humanRequest(`/threads/${pausedThread.id}/purge`, { requestId: `browser-host-copy-${stamp}`, expectedDigest: remotePreview.digest, confirmedStopped: true, confirmedControllerCopyOnly: true })).job;
+    for (let batch = 0; batch < 30 && remotePurge.status !== "done"; batch++) remotePurge = (await humanRequest(`/purges/${remotePurge.id}/continue`, { maxRows: 256 })).job;
+    assert.equal(remotePurge.status, "done");
+    await page.locator("#workspace-info").click();
+    await page.getByRole("button", { name: "Review controller copies", exact: true }).click();
+    await page.getByRole("button", { name: new RegExp(`^Controller copy removed.*${pausedThread.id.slice(0, 8)}`) }).click();
+    await page.getByRole("button", { name: "Inspect known host copies", exact: true }).click();
+    const beforeHostActions = hostActions.length;
+    await page.getByRole("button", { name: `Review host copy · ${yardName}`, exact: true }).click();
+    await page.getByRole("button", { name: "Approve host-copy deletion", exact: true }).waitFor({ state: "visible" });
+    assert.equal(hostActions.length, beforeHostActions, "opening the exact host review grants no cleanup authority");
+    const reviewedHost = JSON.parse((await page.locator("#modal-fields details pre").textContent())!);
+    assert.match(reviewedHost.digest, /^[a-f0-9]{64}$/);
+    assert((await page.locator("#modal-fields").innerText()).includes("physical process stopped"));
+    await page.locator("#modal-submit").click();
+    assert.equal(hostActions.length, beforeHostActions, "host approval requires both explicit confirmations");
+    await page.locator("#field-host-copy-stopped").check();
+    await page.locator("#modal-submit").click();
+    assert.equal(hostActions.length, beforeHostActions, "stopped confirmation alone does not authorize host deletion");
+    await page.locator("#field-host-copy-delete").check();
+    await page.locator("#modal-submit").click();
+    await page.getByRole("button", { name: "Review withdrawal of host approval", exact: true }).waitFor({ state: "visible" });
+    assert.equal(hostActions.length, beforeHostActions + 1);
+    assert.deepEqual(hostActions.at(-1)!.body, { expectedDigest: reviewedHost.digest, confirmedStopped: true, confirmedDeleteHostCopies: true });
+    const hostPlanId = hostActions.at(-1)!.path.split("/").at(-2)!;
+    const approvedHostResponse = await context.request.get(`${base}/api/v2/host-copies/${hostPlanId}`, { headers: { authorization: `Bearer ${key}` } });
+    const approvedHost = (await approvedHostResponse.json()).review.plan;
+    assert.equal(approvedHost.workerId, holdingWorker.id);
+    assert(approvedHost.approvedAt && approvedHost.status === "pending" && approvedHost.verified !== true, "approval is not host completion");
+    await page.getByRole("button", { name: "Review withdrawal of host approval", exact: true }).click();
+    await page.getByRole("button", { name: "Withdraw host-copy approval", exact: true }).waitFor({ state: "visible" });
+    const withdrawalReview = JSON.parse((await page.locator("#modal-fields details pre").textContent())!);
+    await page.locator("#modal-submit").click();
+    assert.equal(hostActions.length, beforeHostActions + 1, "withdrawal requires acknowledgment of already-started effects");
+    await page.locator("#field-host-copy-revoke").check();
+    await page.locator("#modal-submit").click();
+    await page.getByRole("button", { name: "Approve host-copy deletion", exact: true }).waitFor({ state: "visible" });
+    assert.deepEqual(hostActions.at(-1)!.body, { expectedDigest: withdrawalReview.digest });
+    const withdrawnHostResponse = await context.request.get(`${base}/api/v2/host-copies/${hostPlanId}`, { headers: { authorization: `Bearer ${key}` } });
+    const withdrawnHost = (await withdrawnHostResponse.json()).review.plan;
+    assert.equal(withdrawnHost.status, "blocked"); assert.equal(withdrawnHost.approvedAt, undefined);
+    assert((await page.locator("#modal-fields").innerText()).includes("Outstanding host copy"));
+    await closeDialog();
+    checks.push(
+      "reviewed controller-copy preview, explicit confirmations, bounded resumable removal and separately pending host copies",
+    );
+    checks.push("separate exact host-copy review, two confirmations, digest-bound approval and explicit withdrawal with outstanding-copy status");
     const lifecycleThread = await createThread(
       `Reviewed lifecycle ${stamp}`,
       paused.id,
@@ -692,6 +978,152 @@ try {
   const workerCard = page
     .locator("#inspector-content .item-card")
     .filter({ hasText: yardName });
+  if (fixture) {
+    await workerCard
+      .getByRole("button", { name: "Drain yard", exact: true })
+      .click();
+    await page.locator("#modal-submit").click();
+    await waitHidden("#modal");
+    const maintenanceMower = await createMower(
+        `Maintenance mower ${stamp}`,
+        "mower",
+        holdingWorker.id,
+      ),
+      maintenanceThread = await createThread(
+        `Preserved yard input ${stamp}`,
+        maintenanceMower.id,
+        "Keep this input queued while the yard drains.",
+      );
+    const pollYard = async (secret: string, activeRunIds: string[] = []) =>
+      context.request.post(`${base}/api/v2/worker/poll`, {
+        headers: { authorization: `Bearer ${secret}` },
+        data: {
+          activeRunIds,
+          capacity: 1,
+          inferenceMode: "controller",
+          checkpointVersion: "pi-durable@1.5.2",
+          durabilityAdapter: { adapter: "pi-durable@1.5.2", version: 1 },
+        },
+      });
+    const drained = await pollYard(workerKey);
+    assert(drained.ok());
+    assert.equal(
+      (await drained.json()).job,
+      null,
+      "drain blocks new claims while authenticated metadata refreshes",
+    );
+    await chooseTab("Yards");
+    await workerCard
+      .getByRole("button", { name: "Resume dispatch", exact: true })
+      .click();
+    await page.locator("#modal-submit").click();
+    await waitHidden("#modal");
+    const admittedResponse = await pollYard(workerKey),
+      admitted = (await admittedResponse.json()).job;
+    assert.equal(admitted.thread.id, maintenanceThread.id);
+    const queuedThread = await createThread(
+      `Queued through key rotation ${stamp}`,
+      maintenanceMower.id,
+      "Retain this same yard placement through key replacement.",
+    );
+    await chooseTab("Yards");
+    await workerCard
+      .getByRole("button", { name: "Rotate worker key", exact: true })
+      .click();
+    await page.locator("#modal-submit").click();
+    assert(
+      await page.locator("#modal").isVisible(),
+      "rotation requires stopped-process confirmation",
+    );
+    assert.equal(
+      (await getState()).runs.find(
+        (run: { id: string }) => run.id === admitted.run.id,
+      ).status,
+      "running",
+    );
+    await page.locator("#field-rotate-stopped").check();
+    await page.locator("#modal-submit").click();
+    await page
+      .getByText("SAVE THIS KEY NOW", { exact: true })
+      .waitFor({ state: "visible" });
+    const replacementKey = await page
+      .locator("#modal-fields .readonly-value")
+      .textContent();
+    assert(
+      replacementKey && replacementKey !== workerKey,
+      "replacement worker credential returned once",
+    );
+    const savedState = await page.evaluate(() =>
+      JSON.stringify({
+        local: { ...localStorage },
+        session: { ...sessionStorage },
+      }),
+    );
+    assert(
+      !savedState.includes(replacementKey),
+      "replacement key is never persisted in browser storage",
+    );
+    await closeDialog();
+    assert.equal(
+      (await pollYard(workerKey)).status(),
+      401,
+      "old key invalid immediately",
+    );
+    const afterRotation = await getState(),
+      stable = afterRotation.workers.find(
+        (worker: { id: string }) => worker.id === holdingWorker.id,
+      );
+    assert.equal(stable.credentialVersion, 2);
+    assert(stable.drainingAt);
+    assert.equal(
+      afterRotation.runs.find(
+        (run: { id: string }) => run.id === admitted.run.id,
+      ).status,
+      "interrupted",
+    );
+    assert.equal(
+      afterRotation.runs.find(
+        (run: { threadId: string }) => run.threadId === queuedThread.id,
+      ).status,
+      "queued",
+    );
+    await workerCard
+      .getByRole("button", { name: "Resume dispatch", exact: true })
+      .click();
+    await page.locator("#modal-submit").click();
+    await page
+      .locator("#modal-error")
+      .filter({ hasText: "recent authenticated" })
+      .waitFor({ state: "visible" });
+    await closeDialog();
+    const reconnect = await pollYard(replacementKey);
+    assert(reconnect.ok());
+    assert.equal(
+      (await reconnect.json()).job,
+      null,
+      "replacement remains drained until human resumes",
+    );
+    await workerCard
+      .getByRole("button", { name: "Resume dispatch", exact: true })
+      .click();
+    await page.locator("#modal-submit").click();
+    await waitHidden("#modal");
+    const next = (await (await pollYard(replacementKey)).json()).job;
+    assert.equal(next.thread.id, queuedThread.id);
+    const finish = await context.request.post(`${base}/api/v2/worker/finish`, {
+      headers: { authorization: `Bearer ${replacementKey}` },
+      data: {
+        runId: next.run.id,
+        generation: next.run.generation,
+        status: "done",
+        summary: "Replacement worker completed preserved queued input.",
+      },
+    });
+    assert(finish.ok());
+    checks.push(
+      "yard drain preserves queued placement, explicit versioned key rotation fences old lease, key stays private, fresh reconnect precedes resume",
+    );
+  }
   await workerCard.getByRole("button", { name: "Revoke worker" }).click();
   await page.locator("#modal-submit").click();
   await waitHidden("#modal");
@@ -700,18 +1132,47 @@ try {
     .waitFor({ state: "visible" });
   checks.push("worker revocation");
   await openThread(thread.id);
-  if(fixture){
-    const historyId=fixture.seedLongHistory();
-    await page.goto(`${base}/app#/threads/${historyId}`,{waitUntil:"networkidle"});
+  if (fixture) {
+    const historyId = fixture.seedLongHistory();
+    await page.goto(`${base}/app#/threads/${historyId}`, {
+      waitUntil: "networkidle",
+    });
     await messageVisible("History fixture marker 1999");
-    assert.equal(await page.getByText("History fixture marker 0000",{exact:true}).count(),0);
-    for(let i=0;i<3;i++){await page.getByRole("button",{name:"Load earlier messages",exact:true}).click();await page.getByRole("button",{name:"Loading history…",exact:true}).waitFor({state:"hidden"});}
+    assert.equal(
+      await page
+        .getByText("History fixture marker 0000", { exact: true })
+        .count(),
+      0,
+    );
+    for (let i = 0; i < 3; i++) {
+      await page
+        .getByRole("button", { name: "Load earlier messages", exact: true })
+        .click();
+      await page
+        .getByRole("button", { name: "Loading history…", exact: true })
+        .waitFor({ state: "hidden" });
+    }
     await messageVisible("History fixture marker 0000");
-    assert((await page.locator("#messages .message").count())<=1000,"browser keeps a bounded history window");
-    await page.getByRole("button",{name:"Return to latest messages",exact:true}).click();await messageVisible("History fixture marker 1999");
-    assert.equal(await page.getByText("History fixture marker 0000",{exact:true}).count(),0);
-    checks.push("bounded newest/older durable history with an explicit return to live messages");
-    await page.goto(`${base}/app#/threads/${thread.id}`,{waitUntil:"networkidle"});
+    assert(
+      (await page.locator("#messages .message").count()) <= 1000,
+      "browser keeps a bounded history window",
+    );
+    await page
+      .getByRole("button", { name: "Return to latest messages", exact: true })
+      .click();
+    await messageVisible("History fixture marker 1999");
+    assert.equal(
+      await page
+        .getByText("History fixture marker 0000", { exact: true })
+        .count(),
+      0,
+    );
+    checks.push(
+      "bounded newest/older durable history with an explicit return to live messages",
+    );
+    await page.goto(`${base}/app#/threads/${thread.id}`, {
+      waitUntil: "networkidle",
+    });
   }
   await page.setViewportSize({ width: 390, height: 844 });
   await page.waitForFunction(() =>

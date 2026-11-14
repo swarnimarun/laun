@@ -50,7 +50,7 @@ export type GatewayIdentity =
   | { kind: "service" }
   | { kind: "agent"; keyId: string; label: string };
 
-export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore?: AgentKeyStore) {
+export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore?: AgentKeyStore, options:{legacyEnabled?:boolean}={}) {
   const sessions = store ?? new SessionStore(cfg.dataDir);
   const keys = keyStore ?? new AgentKeyStore(cfg.dataDir);
   const buses = new Map<string, SessionBus>();
@@ -259,7 +259,7 @@ export function createGateway(cfg: GatewayConfig, store?: SessionStore, keyStore
   // once the abort verifiably lands. An unreachable executor leaves the
   // record alone for the next sweep instead of stranding a live run's record.
   // Unref'd so tests and idle processes exit cleanly.
-  if (stallMs > 0) {
+  if (stallMs > 0 && options.legacyEnabled!==false) {
     const sweepTimer = setInterval(() => {
       const now = Date.now();
       for (const id of [...running]) {
@@ -550,7 +550,7 @@ gateway/executor desync (record settled here, slot wedged there) once
   // Boot recovery: resume recently-interrupted runs instead of abandoning
   // them. pi resumes from its session files, so the continuation just needs
   // sending. Aged-out interruptions still go to error for human triage.
-  for (const rec of sessions.list()) {
+  for (const rec of options.legacyEnabled===false?[]:sessions.list()) {
     if (rec.status === "running" || rec.status === "waiting_approval") {
       const ageMs = Date.now() - Date.parse(rec.updatedAt);
       if (autoResume && (autoResumeMaxAgeMs <= 0 || ageMs <= autoResumeMaxAgeMs)) {

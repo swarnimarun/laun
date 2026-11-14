@@ -49,6 +49,8 @@ const state = {
   announcedStatus: "",
   advice: new Map(),
   adviceLoading: new Set(),
+  onboarding: null,
+  onboardingAt: 0,
 };
 
 function element(tag, className, text) {
@@ -175,6 +177,7 @@ function clearKey() {
 }
 
 async function api(path, options = {}) {
+  const generation = state.generation;
   const headers = new Headers(options.headers);
   headers.set("authorization", `Bearer ${state.key}`);
   if (options.body !== undefined)
@@ -206,6 +209,10 @@ async function api(path, options = {}) {
   } catch {
     data = {};
   }
+  if (generation !== state.generation)
+    throw new Error(
+      "The active workspace changed while this request was pending.",
+    );
   if (!response.ok) {
     const error = new Error(
       data.error || `The server returned HTTP ${response.status}.`,
@@ -247,6 +254,7 @@ async function connect(key) {
     $("auth-key").value = "";
     state.failures = 0;
     void loadModels();
+    void loadOnboarding();
     setConnection(true);
     chooseInitialThread();
     renderWorkspace();
@@ -268,6 +276,8 @@ function disconnect(
   state.key = "";
   clearKey();
   state.server = emptyServer();
+  state.onboarding = null;
+  state.onboardingAt = 0;
   state.events.clear();
   state.cursors.clear();
   state.history.clear();
@@ -315,6 +325,7 @@ async function poll() {
     chooseInitialThread();
     renderWorkspace();
     if (state.currentThreadId) await loadEvents(state.currentThreadId);
+    if (Date.now() - state.onboardingAt > 60_000) void loadOnboarding();
   } catch (error) {
     if (generation !== state.generation || !state.key) return;
     state.failures++;
@@ -338,6 +349,428 @@ async function refresh() {
   renderWorkspace();
   setConnection(true);
   if (state.currentThreadId) await loadEvents(state.currentThreadId);
+}
+async function loadOnboarding(quiet = true) {
+  const generation = state.generation;
+  try {
+    const status = await api("/onboarding");
+    if (generation !== state.generation || !state.key) return null;
+    if (!Array.isArray(status.models) || !Array.isArray(status.workers))
+      throw new Error("The controller returned incomplete setup readiness.");
+    state.onboarding = status;
+    state.onboardingAt = Date.now();
+    renderWorkspace();
+    return status;
+  } catch (error) {
+    if (generation === state.generation) state.onboardingAt = Date.now();
+    if (!quiet) throw error;
+    return null;
+  }
+}
+async function showOwnerOnboarding() {
+  showModal({
+    title: "Preparing your Laun…",
+    eyebrow: "PRIMARY GROUNDSKEEPER",
+    content: note(
+      "Checking setup readiness",
+      "Reading configured model metadata and execution yards. No model is called.",
+    ),
+    onSubmit: null,
+  });
+  const generation = state.generation,
+    version = modalVersion;
+  try {
+    const status = await loadOnboarding(false);
+    if (
+      !status ||
+      generation !== state.generation ||
+      version !== modalVersion ||
+      !$("modal").open
+    )
+      return;
+    if (
+      state.server.readiness.durableJournal !== true ||
+      state.server.readiness.storage?.acceptingWork === false
+    ) {
+      showModal({
+        title: "Prepare the controller first.",
+        eyebrow: "PRIMARY SETUP · READINESS",
+        content: note(
+          "Setup is paused",
+          state.server.readiness.storage?.acceptingWork === false
+            ? state.server.readiness.storage.message ||
+                "The controller’s free disk reserve is exhausted. Restore storage capacity before creating new work."
+            : "Upgrade the controller to support the central durable journal before creating a primary Groundskeeper.",
+        ),
+        onSubmit: null,
+      });
+      return;
+    }
+    const draft = {
+      requestId: crypto.randomUUID(),
+      name: "Groundskeeper",
+      title: "The big picture",
+      model: "",
+      workerId: "",
+      mode: "manual",
+      workspaceWrite: "ask",
+      processExecute: "ask",
+      delegation: "ask",
+      signature: "",
+    };
+    const existing = state.server.mowers.filter(
+      (mower) => mower.role === "director" && !mower.archivedAt,
+    );
+    const complete = async (payload) => {
+      const signature = JSON.stringify(payload);
+      if (draft.signature && draft.signature !== signature)
+        draft.requestId = crypto.randomUUID();
+      draft.signature = signature;
+      const result = await api("/onboarding", {
+        method: "POST",
+        body: { ...payload, requestId: draft.requestId },
+      });
+      await refresh();
+      await loadOnboarding(false);
+      await openThread(result.setup.primaryThreadId);
+      toast(
+        result.created
+          ? "Your Groundskeeper and primary thread are ready. Send a goal when you choose."
+          : "Primary Groundskeeper selected. Existing threads and guardrails remain as configured.",
+      );
+    };
+    const chooseExisting = () => {
+      const mowerField = field("setup-existing-mower", "Groundskeeper", {
+        options: existing.map((mower) => ({
+          value: mower.id,
+          label: mower.name,
+        })),
+        value: status.setup?.primaryMowerId || existing[0]?.id,
+        required: true,
+      });
+      const threadField = field("setup-existing-thread", "Primary thread", {
+        options: [],
+        required: true,
+      });
+      const update = () => {
+        const select = threadField.querySelector("select");
+        select.replaceChildren();
+        for (const thread of state.server.threads.filter(
+          (thread) =>
+            thread.mowerId === value("setup-existing-mower") &&
+            !thread.archivedAt &&
+            !thread.parentThreadId,
+        )) {
+          const option = element("option", "", thread.title);
+          option.value = thread.id;
+          select.append(option);
+        }
+        if (
+          status.setup?.primaryThreadId &&
+          select.querySelector(
+            `option[value="${CSS.escape(status.setup.primaryThreadId)}"]`,
+          )
+        )
+          select.value = status.setup.primaryThreadId;
+      };
+      mowerField.querySelector("select").addEventListener("change", update);
+      showModal({
+        title: "Choose your primary Groundskeeper.",
+        eyebrow: "EXISTING DIRECTOR · REVIEWED SELECTION",
+        submit: "Use this primary thread",
+        content: [
+          mowerField,
+          threadField,
+          note(
+            "Preserve existing work",
+            "This selects an existing active director and thread. Its current model, yard and guardrails must pass server readiness checks; no profile or thread is rewritten.",
+          ),
+          ...(!status.setup
+            ? [
+                button(
+                  "Create a new Groundskeeper instead",
+                  "text-button",
+                  () => stepOne(),
+                ),
+              ]
+            : []),
+        ],
+        onSubmit: () =>
+          complete({
+            mowerId: value("setup-existing-mower"),
+            threadId: value("setup-existing-thread"),
+            expectedRevision: status.setup?.revision,
+          }),
+      });
+      update();
+    };
+    const stepOne = () => {
+      const models = status.models.filter((model) => model.configured),
+        workers = status.workers.filter(
+          (worker) =>
+            worker.status === "online" &&
+            (worker.local ||
+              (worker.lastSeenAt &&
+                Date.now() - Date.parse(worker.lastSeenAt) < 45000 &&
+                worker.inferenceMode === "controller" &&
+                typeof worker.durabilityAdapter?.adapter === "string" &&
+                worker.durabilityAdapter?.version === 1 &&
+                typeof worker.checkpointVersion === "string")),
+        );
+      if (!models.length || !workers.length) {
+        showModal({
+          title: "Connect your first model and yard.",
+          eyebrow: "PRIMARY SETUP · READINESS",
+          content: [
+            note(
+              "Configured execution is required",
+              !models.length
+                ? "Configure provider authentication on the controller before choosing a model. Credentials stay outside this browser and agent threads."
+                : "Bring a controller-compatible durable yard online, or enable a configured local runtime.",
+            ),
+            button(
+              "Refresh readiness",
+              "button button-quiet",
+              () => void showOwnerOnboarding(),
+            ),
+            button("Manage execution yards", "button button-quiet", () => {
+              closeModal();
+              selectInspector("yards");
+              openInspector();
+            }),
+            ...(existing.length
+              ? [
+                  button(
+                    "Choose an existing director",
+                    "text-button",
+                    chooseExisting,
+                  ),
+                ]
+              : []),
+          ],
+          onSubmit: null,
+        });
+        return;
+      }
+      showModal({
+        title: "A Groundskeeper for your Laun.",
+        eyebrow: "PRIMARY SETUP · 1 OF 3",
+        submit: "Review permission choices",
+        content: [
+          formRow(
+            field("setup-name", "Groundskeeper name", {
+              value: draft.name,
+              required: true,
+              maxlength: 80,
+            }),
+            field("setup-title", "Primary thread title", {
+              value: draft.title,
+              required: true,
+              maxlength: 160,
+            }),
+          ),
+          field("setup-model", "Configured model", {
+            value: draft.model,
+            required: true,
+            options: [
+              { value: "", label: "Choose a configured provider/model" },
+              ...models.map((model) => ({
+                value: model.id,
+                label: `${model.name} · ${model.id}${model.provider === "faux" ? " · scripted demo" : ""}`,
+              })),
+            ],
+          }),
+          field("setup-yard", "Execution yard", {
+            value: draft.workerId,
+            required: true,
+            options: [
+              { value: "", label: "Choose an online execution yard" },
+              ...workers.map((worker) => ({
+                value: worker.id,
+                label: `${worker.name}${worker.local ? ` · ${state.server.readiness.mode}` : " · controller inference"}`,
+              })),
+            ],
+          }),
+          note(
+            "You choose when work starts",
+            "Setup creates an empty primary thread. No model call, tool or connector is invoked.",
+          ),
+          ...(existing.length
+            ? [
+                button(
+                  "Use an existing director and thread instead",
+                  "text-button",
+                  chooseExisting,
+                ),
+              ]
+            : []),
+        ],
+        onSubmit: () => {
+          draft.name = value("setup-name");
+          draft.title = value("setup-title");
+          draft.model = value("setup-model");
+          draft.workerId = value("setup-yard");
+          stepTwo();
+          return false;
+        },
+      });
+    };
+    const captureRules = () => {
+      draft.mode = value("setup-mode");
+      draft.workspaceWrite = value("setup-write");
+      draft.processExecute = value("setup-process");
+      draft.delegation = value("setup-delegation");
+    };
+    const stepTwo = () =>
+      showModal({
+        title: "Start with clear guardrails.",
+        eyebrow: "PRIMARY SETUP · 2 OF 3",
+        submit: "Review the exact setup",
+        content: [
+          field("setup-mode", "Permission mode", {
+            value: draft.mode,
+            options: [
+              { value: "manual", label: "Manual · review permission requests" },
+              { value: "auto", label: "Auto · Gatekeeper discusses requests" },
+              {
+                value: "isolated",
+                label: "Isolated profile · explicit minimal rules",
+              },
+            ],
+            required: true,
+          }),
+          field("setup-write", "Write in this thread’s workspace", {
+            value: draft.workspaceWrite,
+            options: [
+              { value: "ask", label: "Ask before writes" },
+              { value: "allow", label: "Allow workspace writes" },
+            ],
+            required: true,
+          }),
+          formRow(
+            field("setup-process", "Execute commands", {
+              value: draft.processExecute,
+              options: [
+                { value: "ask", label: "Ask for the exact command" },
+                { value: "deny", label: "Deny commands" },
+              ],
+              required: true,
+            }),
+            field(
+              "setup-delegation",
+              "Spawn, hand off and message child threads",
+              {
+                value: draft.delegation,
+                options: [
+                  { value: "ask", label: "Ask before delegation actions" },
+                  { value: "deny", label: "Deny delegation actions" },
+                ],
+                required: true,
+              },
+            ),
+          ),
+          note(
+            "Permission and containment are separate",
+            "These rules control mediated actions. OpenShell isolation comes from the execution yard. Auto mode can queue Gatekeeper model advice for permission requests; it never approves an action or applies a profile revision.",
+          ),
+          button("Back to model and yard", "text-button", () => {
+            captureRules();
+            stepOne();
+          }),
+        ],
+        onSubmit: () => {
+          captureRules();
+          stepThree();
+          return false;
+        },
+      });
+    const stepThree = () => {
+      const rules = [
+        {
+          operation: "workspace.read",
+          resource: "workspace:own",
+          effect: "allow",
+        },
+        {
+          operation: "workspace.write",
+          resource: "workspace:own",
+          effect: draft.workspaceWrite,
+        },
+        {
+          operation: "process.execute",
+          resource: "workspace:own",
+          effect: draft.processExecute,
+        },
+        {
+          operation: "mower.spawn",
+          resource: "mowers:own",
+          effect: draft.delegation,
+        },
+        {
+          operation: "task.handoff",
+          resource: "tasks:own",
+          effect: draft.delegation,
+        },
+        {
+          operation: "connector.send",
+          resource: "threads:own",
+          effect: draft.delegation,
+        },
+      ];
+      showModal({
+        title: "Plant your primary thread.",
+        eyebrow: "PRIMARY SETUP · 3 OF 3",
+        submit: "Create Groundskeeper and thread",
+        content: [
+          detailsGrid([
+            ["Groundskeeper", draft.name],
+            ["Primary thread", draft.title],
+            ["Model", draft.model],
+            [
+              "Execution yard",
+              status.workers.find((worker) => worker.id === draft.workerId)
+                ?.name || draft.workerId,
+            ],
+            ["Permission mode", draft.mode],
+          ]),
+          element("pre", "readonly-value", JSON.stringify(rules, null, 2)),
+          note(
+            "Exact, reusable rules",
+            "Reads cover this thread’s workspace. Matching allowed rules apply to future arguments in that scope. External network and MCP capabilities require separate review; missing rules deny. Children retain parent ceilings.",
+          ),
+          button("Edit permission choices", "text-button", stepTwo),
+        ],
+        onSubmit: () =>
+          complete({
+            name: draft.name,
+            title: draft.title,
+            model: draft.model,
+            workerId: draft.workerId,
+            mode: draft.mode,
+            workspaceWrite: draft.workspaceWrite,
+            processExecute: draft.processExecute,
+            delegation: draft.delegation,
+          }),
+      });
+    };
+    if (status.setup && existing.length) chooseExisting();
+    else if (status.setup)
+      showModal({
+        title: "Choose an active Groundskeeper.",
+        eyebrow: "PRIMARY DIRECTOR",
+        content: note(
+          "Existing primary setup is preserved",
+          "Create an active director and top-level thread through the crew controls, then return here to choose it. An archived primary is not silently replaced.",
+        ),
+        onSubmit: null,
+      });
+    else stepOne();
+  } catch (error) {
+    if (generation === state.generation && version === modalVersion) {
+      closeModal();
+      toast(errorMessage(error), true);
+    }
+  }
 }
 async function loadModels() {
   const generation = state.generation;
@@ -370,12 +803,12 @@ async function loadModels() {
 }
 async function loadEvents(threadId, reset = false) {
   const generation = state.generation;
-  const initial=reset||!state.events.has(threadId);
-  const metadata=state.history.get(threadId);
-  if(!initial&&metadata?.viewingPast)return;
+  const initial = reset || !state.events.has(threadId);
+  const metadata = state.history.get(threadId);
+  if (!initial && metadata?.viewingPast) return;
   const cursor = reset ? 0 : state.cursors.get(threadId) || 0;
   const data = await api(
-    `/threads/${encodeURIComponent(threadId)}/events?${initial?"tail=true":`after=${cursor}`}`,
+    `/threads/${encodeURIComponent(threadId)}/events?${initial ? "tail=true" : `after=${cursor}`}`,
   );
   if (!state.key || generation !== state.generation) return;
   const incoming = Array.isArray(data.events) ? data.events : [];
@@ -387,9 +820,15 @@ async function loadEvents(threadId, reset = false) {
       seen.add(entry.sequence);
     }
   events.sort((a, b) => a.sequence - b.sequence);
-  const kept=boundedEvents(events,true);
+  const kept = boundedEvents(events, true);
   state.events.set(threadId, kept);
-  state.history.set(threadId,{previousCursor:kept[0]?.sequence,hasEarlier:initial?data.hasEarlier===true:metadata?.hasEarlier||kept.length<events.length,viewingPast:false});
+  state.history.set(threadId, {
+    previousCursor: kept[0]?.sequence,
+    hasEarlier: initial
+      ? data.hasEarlier === true
+      : metadata?.hasEarlier || kept.length < events.length,
+    viewingPast: false,
+  });
   evictThreadCaches(threadId);
   state.cursors.set(
     threadId,
@@ -401,32 +840,83 @@ async function loadEvents(threadId, reset = false) {
     renderTranscript();
   await loadThreadAdvice(threadId);
 }
-function boundedEvents(events,latest){
-  const kept=[];let bytes=0;
-  for(const entry of latest?[...events].reverse():events){const size=JSON.stringify(entry).length*2;if(kept.length&&(kept.length>=1000||bytes+size>8*1024*1024))break;kept.push(entry);bytes+=size;}
-  return latest?kept.reverse():kept;
+function boundedEvents(events, latest) {
+  const kept = [];
+  let bytes = 0;
+  for (const entry of latest ? [...events].reverse() : events) {
+    const size = JSON.stringify(entry).length * 2;
+    if (kept.length && (kept.length >= 1000 || bytes + size > 8 * 1024 * 1024))
+      break;
+    kept.push(entry);
+    bytes += size;
+  }
+  return latest ? kept.reverse() : kept;
 }
-function evictThreadCaches(threadId){
-  const value=state.events.get(threadId);state.events.delete(threadId);state.events.set(threadId,value);
-  while(state.events.size>6){const oldest=state.events.keys().next().value;if(oldest===threadId)break;state.events.delete(oldest);state.cursors.delete(oldest);state.history.delete(oldest);}
+function evictThreadCaches(threadId) {
+  const value = state.events.get(threadId);
+  state.events.delete(threadId);
+  state.events.set(threadId, value);
+  while (state.events.size > 6) {
+    const oldest = state.events.keys().next().value;
+    if (oldest === threadId) break;
+    state.events.delete(oldest);
+    state.cursors.delete(oldest);
+    state.history.delete(oldest);
+  }
 }
-async function loadEarlier(threadId){
-  const metadata=state.history.get(threadId);if(!metadata?.hasEarlier||metadata.loading)return;
-  const generation=state.generation;metadata.loading=true;renderTranscript();
-  try{
-    const data=await api(`/threads/${encodeURIComponent(threadId)}/events?before=${metadata.previousCursor}`);
-    if(!state.key||generation!==state.generation||state.currentThreadId!==threadId)return;
-    const existing=state.events.get(threadId)||[],seen=new Set(existing.map(e=>e.sequence));
-    const events=[...(data.events||[]).filter(e=>!seen.has(e.sequence)),...existing].sort((a,b)=>a.sequence-b.sequence);
-    const kept=boundedEvents(events,false);state.events.set(threadId,kept);
-    state.history.set(threadId,{previousCursor:kept[0]?.sequence,hasEarlier:data.hasEarlier===true,viewingPast:true});
-    state.follow=false;renderTranscript();$("messages").scrollTop=0;
-  }catch(error){toast(errorMessage(error),true);}finally{const latest=state.history.get(threadId);if(latest)latest.loading=false;if(state.currentThreadId===threadId)renderTranscript();}
+async function loadEarlier(threadId) {
+  const metadata = state.history.get(threadId);
+  if (!metadata?.hasEarlier || metadata.loading) return;
+  const generation = state.generation;
+  metadata.loading = true;
+  renderTranscript();
+  try {
+    const data = await api(
+      `/threads/${encodeURIComponent(threadId)}/events?before=${metadata.previousCursor}`,
+    );
+    if (
+      !state.key ||
+      generation !== state.generation ||
+      state.currentThreadId !== threadId
+    )
+      return;
+    const existing = state.events.get(threadId) || [],
+      seen = new Set(existing.map((e) => e.sequence));
+    const events = [
+      ...(data.events || []).filter((e) => !seen.has(e.sequence)),
+      ...existing,
+    ].sort((a, b) => a.sequence - b.sequence);
+    const kept = boundedEvents(events, false);
+    state.events.set(threadId, kept);
+    state.history.set(threadId, {
+      previousCursor: kept[0]?.sequence,
+      hasEarlier: data.hasEarlier === true,
+      viewingPast: true,
+    });
+    state.follow = false;
+    renderTranscript();
+    $("messages").scrollTop = 0;
+  } catch (error) {
+    toast(errorMessage(error), true);
+  } finally {
+    const latest = state.history.get(threadId);
+    if (latest) latest.loading = false;
+    if (state.currentThreadId === threadId) renderTranscript();
+  }
 }
-async function jumpToLatest(){
-  state.follow=true;const threadId=state.currentThreadId;
-  if(threadId&&state.history.get(threadId)?.viewingPast){try{await loadEvents(threadId,true);}catch(error){toast(errorMessage(error),true);return;}}
-  $("messages").scrollTop=$("messages").scrollHeight;$("jump-latest").hidden=true;
+async function jumpToLatest() {
+  state.follow = true;
+  const threadId = state.currentThreadId;
+  if (threadId && state.history.get(threadId)?.viewingPast) {
+    try {
+      await loadEvents(threadId, true);
+    } catch (error) {
+      toast(errorMessage(error), true);
+      return;
+    }
+  }
+  $("messages").scrollTop = $("messages").scrollHeight;
+  $("jump-latest").hidden = true;
 }
 function isAdviceRun(runId) {
   if (state.advice.has(runId)) return true;
@@ -699,9 +1189,18 @@ function renderHeader() {
       button(parent.title, "text-button", () => void openThread(parent.id)),
     );
   const emptyStart = $("empty-start-button");
-  emptyStart.textContent = state.server.mowers.length
-    ? "Start a new thread ↗"
-    : "Name your first mower ↗";
+  emptyStart.textContent =
+    state.onboarding && !state.onboarding.setup
+      ? "Set up your Groundskeeper ↗"
+      : state.server.mowers.length
+        ? "Start a new thread ↗"
+        : "Name your first mower ↗";
+  const primary = state.onboarding?.setup?.primaryThreadId;
+  $("primary-thread-button").hidden =
+    !primary ||
+    !state.server.threads.some(
+      (item) => item.id === primary && !item.archivedAt,
+    );
   renderUsage();
 }
 function renderReadiness() {
@@ -929,12 +1428,33 @@ function renderTranscript() {
   const thread = currentThread();
   if (!thread) return;
   const mower = mowerById(thread.mowerId);
-  const history=state.history.get(thread.id);
-  if(history?.hasEarlier||history?.viewingPast){
-    const controls=element("div","history-controls");
-    controls.append(element("span","","Showing a window of this thread. Full history stays on the server."));
-    if(history.hasEarlier){const older=button(history.loading?"Loading history…":"Load earlier messages","text-button",()=>void loadEarlier(thread.id));older.disabled=history.loading;controls.append(older);}
-    if(history.viewingPast)controls.append(button("Return to latest messages","text-button",()=>void jumpToLatest()));
+  const history = state.history.get(thread.id);
+  if (history?.hasEarlier || history?.viewingPast) {
+    const controls = element("div", "history-controls");
+    controls.append(
+      element(
+        "span",
+        "",
+        "Showing a window of this thread. Full history stays on the server.",
+      ),
+    );
+    if (history.hasEarlier) {
+      const older = button(
+        history.loading ? "Loading history…" : "Load earlier messages",
+        "text-button",
+        () => void loadEarlier(thread.id),
+      );
+      older.disabled = history.loading;
+      controls.append(older);
+    }
+    if (history.viewingPast)
+      controls.append(
+        button(
+          "Return to latest messages",
+          "text-button",
+          () => void jumpToLatest(),
+        ),
+      );
     viewport.append(controls);
   }
   const renderedAdvice = new Set();
@@ -1042,7 +1562,7 @@ function renderTranscript() {
       0,
       previousTop + Math.min(0, viewport.scrollHeight - previousHeight),
     );
-  $("jump-latest").hidden = state.follow&&!history?.viewingPast;
+  $("jump-latest").hidden = state.follow && !history?.viewingPast;
   renderUsage();
 }
 function renderAdviceContent(content, group, openTools) {
@@ -1339,6 +1859,9 @@ function renderOverview(content) {
           "Review before resuming",
           "button button-quiet button-small",
           () => showResumeForm(run),
+        ),
+        button("Review abandoning attempt", "text-button", () =>
+          showResumeForm(run, true),
         ),
       );
       block.append(node);
@@ -1693,6 +2216,15 @@ function renderYards(content) {
           "Assigned mowers",
           state.server.mowers.filter((m) => m.workerId === worker.id).length,
         ],
+        [
+          "Dispatch",
+          worker.drainingAt
+            ? "Draining · no new assignments"
+            : "Accepting assignments",
+        ],
+        ...(!worker.local
+          ? [["Credential revision", `v${worker.credentialVersion ?? 1}`]]
+          : []),
       ]),
     );
     if (worker.labels?.length) {
@@ -1705,6 +2237,14 @@ function renderYards(content) {
     if (!worker.local && worker.status !== "revoked") {
       const actions = element("div", "card-actions");
       actions.append(
+        button(
+          worker.drainingAt ? "Resume dispatch" : "Drain yard",
+          "button button-quiet",
+          () => showDrainWorker(worker),
+        ),
+        button("Rotate worker key", "button button-quiet", () =>
+          showRotateWorker(worker),
+        ),
         button("Revoke worker", "button button-quiet", () =>
           showRevokeWorker(worker),
         ),
@@ -1960,6 +2500,7 @@ function profileOptions(includeStarter = true) {
 function showMowerForm(mower) {
   void loadModels();
   const editing = !!mower;
+  const managed = mower?.role === "adviser";
   const fields = [
     field("name", "Mower name", {
       value: mower?.name || "",
@@ -1973,7 +2514,9 @@ function showMowerForm(mower) {
         options: [
           { value: "mower", label: "Mower" },
           { value: "director", label: "Groundskeeper · Director" },
-          { value: "adviser", label: "Gatekeeper · Adviser" },
+          ...(managed
+            ? [{ value: "adviser", label: "Gatekeeper · Managed adviser" }]
+            : []),
         ],
         disabled: editing,
       }),
@@ -1981,29 +2524,55 @@ function showMowerForm(mower) {
         value: mower?.model || "",
         placeholder: state.server.readiness.defaultModel || "Server default",
         list: "runtime-models",
-        hint: "Choose a configured model or enter provider/model-id. Blank uses the server default.",
+        hint: editing
+          ? "Choose a configured model or enter provider/model-id. Blank keeps the current model."
+          : "Choose a configured model or enter provider/model-id. Blank uses the server default.",
       }),
     ),
-    field("profile", "Permission profile", {
-      value: selectedProfileValue(mower?.profileId, mower?.profileVersion),
-      options: profileOptions(),
-      hint: editing
-        ? "Changing a default applies to new threads. Existing threads keep their pinned revision."
-        : "Starter guardrails allow reads and writes inside the thread workspace. Process execution asks first.",
-    }),
-    field("worker", "Execution yard", {
-      value: mower?.workerId || "",
-      options: [
-        { value: "", label: "Automatic placement" },
-        ...state.server.workers
-          .filter((w) => w.status !== "revoked")
-          .map((w) => ({
-            value: w.id,
-            label: `${w.name}${w.local ? " · local" : ""}`,
-          })),
-      ],
-    }),
+    ...(!managed
+      ? [
+          field("profile", "Permission profile", {
+            value: selectedProfileValue(
+              mower?.profileId,
+              mower?.profileVersion,
+            ),
+            options: profileOptions(),
+            hint: editing
+              ? "Changing a default applies to new threads. Existing threads keep their pinned revision."
+              : "Starter guardrails allow reads and writes inside the thread workspace. Process execution asks first.",
+          }),
+          field("worker", "Execution yard", {
+            value: mower?.workerId || "",
+            options: [
+              { value: "", label: "Automatic placement" },
+              ...state.server.workers
+                .filter((w) => w.status !== "revoked")
+                .map((w) => ({
+                  value: w.id,
+                  label: `${w.name}${w.local ? " · local" : ""}`,
+                })),
+            ],
+          }),
+        ]
+      : [
+          note(
+            "Managed Gatekeeper",
+            "Its empty permission profile and isolated execution are maintained by the controller. You can change its name and model; stop its discussion thread to cancel advice.",
+          ),
+        ]),
   ];
+  if (!managed)
+    fields.push(
+      field("instructions", "Purpose and working instructions", {
+        type: "textarea",
+        value: mower?.instructions || "",
+        rows: 4,
+        maxlength: 16000,
+        placeholder:
+          "Describe this mower’s responsibilities, priorities and working style…",
+        hint: "Saved with the mower and captured when each new run is accepted. Permissions and already accepted work keep their existing boundaries.",
+      }),
+    );
   showModal({
     title: editing ? `Edit ${mower.name}` : "A new member of the crew.",
     eyebrow: editing ? "MOWER SETTINGS" : "ADD A MOWER",
@@ -2012,12 +2581,19 @@ function showMowerForm(mower) {
     onSubmit: async () => {
       const body = {
         name: value("name"),
-        ...parseProfileValue(value("profile")),
+        ...(!managed
+          ? {
+              instructions: value("instructions"),
+              ...parseProfileValue(value("profile")),
+            }
+          : {}),
       };
       if (!editing) body.role = value("role");
       if (value("model")) body.model = value("model");
-      if (value("worker")) body.workerId = value("worker");
-      else if (editing) body.workerId = null;
+      if (!managed) {
+        if (value("worker")) body.workerId = value("worker");
+        else if (editing) body.workerId = null;
+      }
       const result = await api(
         editing ? `/mowers/${encodeURIComponent(mower.id)}` : "/mowers",
         { method: editing ? "PATCH" : "POST", body },
@@ -2419,7 +2995,7 @@ function showWorkerForm() {
     },
   });
 }
-function showWorkerCredentials(worker, key) {
+function showWorkerCredentials(worker, key, rotation = false, interrupted = 0) {
   const keyBox = element("div", "readonly-value", key);
   const copy = button(
     "Copy worker key",
@@ -2432,7 +3008,9 @@ function showWorkerCredentials(worker, key) {
     element(
       "p",
       "",
-      "Save LAUN_CONTROLLER_URL and LAUN_WORKER_KEY in the target worker’s protected environment file. Choose explicit LAUN_TRUSTED_LOCAL=true for trusted development, or configure OPENSHELL_ENABLED=true for isolation. This key is shown once and is not stored in your browser.",
+      rotation
+        ? "Keep the old process stopped. Replace LAUN_WORKER_KEY in the service’s protected environment file through a deliberate operator update, then start the worker and wait for an authenticated heartbeat before resuming dispatch. The SSH setup command refuses differing existing worker.env and will not perform this replacement. This key is shown once and is not stored in your browser."
+        : "Save LAUN_CONTROLLER_URL and LAUN_WORKER_KEY in the target worker’s protected environment file. Choose explicit LAUN_TRUSTED_LOCAL=true for trusted development, or configure OPENSHELL_ENABLED=true for isolation. This key is shown once and is not stored in your browser.",
     ),
     element(
       "pre",
@@ -2441,7 +3019,9 @@ function showWorkerCredentials(worker, key) {
     ),
   );
   showModal({
-    title: `${worker?.name || "Your yard"} is registered.`,
+    title: rotation
+      ? `${worker.name} has a replacement key.`
+      : `${worker?.name || "Your yard"} is registered.`,
     eyebrow: "SAVE THIS KEY NOW",
     content: [
       element(
@@ -2452,8 +3032,96 @@ function showWorkerCredentials(worker, key) {
       keyBox,
       copy,
       instructions,
+      ...(rotation
+        ? [
+            note(
+              "Dispatch remains drained",
+              `${interrupted} active attempts require explicit reconciliation. Queued host affinity is preserved. Old cleanup approvals and leases were fenced; destructive host cleanup requires fresh owner review. If this one-time key is lost, review the new credential revision and rotate again.`,
+            ),
+          ]
+        : []),
     ],
     onSubmit: null,
+  });
+}
+function showDrainWorker(worker) {
+  const resume = !!worker.drainingAt;
+  showModal({
+    title: resume ? `Resume ${worker.name}?` : `Drain ${worker.name}?`,
+    eyebrow: "EXECUTION YARD · DISPATCH CONTROL",
+    submit: resume ? "Resume dispatch" : "Drain yard",
+    content: [
+      note(
+        resume ? "Resume queued assignments" : "Pause new assignments",
+        resume
+          ? "Queued work can run after dispatch resumes. The server requires a recent authenticated heartbeat and current durability, inference and capacity metadata. After key rotation, the worker must reconnect with its replacement credential first."
+          : "No new attempt is assigned to this yard. Existing attempts keep their leases and can finish; queued input and thread placement remain preserved. Drain does not stop a command that is already running.",
+      ),
+    ],
+    onSubmit: async () => {
+      await api(
+        `/workers/${encodeURIComponent(worker.id)}/${resume ? "resume" : "drain"}`,
+        { method: "POST", body: {} },
+      );
+      await refresh();
+      toast(
+        resume
+          ? "Yard dispatch resumed."
+          : "Yard drained. Existing work can finish; queued work is preserved.",
+      );
+    },
+  });
+}
+function showRotateWorker(worker) {
+  const confirm = checkbox(
+    "rotate-stopped",
+    "I stopped the old worker process and reconciled any external effects before replacing its credential.",
+  );
+  confirm.querySelector("input").required = true;
+  showModal({
+    title: `Replace ${worker.name}’s key?`,
+    eyebrow: "ONE-TIME WORKER CREDENTIAL · REVIEWED REVISION",
+    submit: "Rotate worker key",
+    content: [
+      detailsGrid([
+        ["Yard", worker.name],
+        ["Stable yard ID", worker.id],
+        ["Current credential", `v${worker.credentialVersion ?? 1}`],
+      ]),
+      note(
+        "Existing execution will be fenced",
+        "The old key becomes invalid immediately. Active attempts become interrupted and require reconciliation; queued host affinity is preserved. Host-cleanup leases and approvals are invalidated. Rotation cannot establish that a physical process stopped.",
+      ),
+      note(
+        "Manual private configuration update",
+        "The replacement key is returned once. Keep it out of transcripts, source control and shell history. Update the protected worker environment explicitly; SSH setup never overwrites a different existing worker.env. The yard stays offline and drained until reconnect and explicit resume.",
+      ),
+      confirm,
+    ],
+    onSubmit: async () => {
+      const result = await api(
+        `/workers/${encodeURIComponent(worker.id)}/rotate`,
+        {
+          method: "POST",
+          body: {
+            expectedCredentialVersion: worker.credentialVersion ?? 1,
+            confirmedStopped: $("field-rotate-stopped").checked,
+          },
+        },
+      );
+      await refresh();
+      if (!result.key)
+        throw new Error(
+          "The response did not include the replacement credential. Review the current revision before rotating again.",
+        );
+      showWorkerCredentials(
+        result.worker,
+        result.key,
+        true,
+        result.interruptedRunIds.length,
+      );
+      return false;
+    },
   });
 }
 function showRevokeWorker(worker) {
@@ -2772,16 +3440,18 @@ function showProposal(profile, proposal) {
     },
   });
 }
-function showResumeForm(run) {
+function showResumeForm(run, abandon = false) {
   const confirm = checkbox(
     "resume-confirmed",
-    "I verified the previous worker has stopped and reconciled any external side effects before resuming this durable request.",
+    `I verified the previous worker has stopped and reconciled any external side effects before ${abandon ? "abandoning this attempt" : "resuming this durable request"}.`,
   );
   confirm.querySelector("input").required = true;
   showModal({
-    title: "Reconcile before resuming.",
+    title: abandon
+      ? "Reconcile before abandoning."
+      : "Reconcile before resuming.",
     eyebrow: "INTERRUPTED EXECUTION",
-    submit: "Resume durable request",
+    submit: abandon ? "Abandon attempt" : "Resume durable request",
     content: [
       element(
         "p",
@@ -2789,6 +3459,14 @@ function showResumeForm(run) {
         "A lost connection does not prove work stopped. Resuming on another worker while the old one is active can duplicate side effects. Check the previous host and any external destination first.",
       ),
       note("Original request", run.prompt),
+      ...(abandon
+        ? [
+            note(
+              "Keep history, cancel old intent",
+              "Abandoning records this attempt as cancelled and cancels queued messages accepted under it. It does not undo external effects. A fresh message can start a different request after you confirm the old execution stopped.",
+            ),
+          ]
+        : []),
       ...(run.cancelRequested
         ? [
             element(
@@ -2799,14 +3477,26 @@ function showResumeForm(run) {
           ]
         : []),
       confirm,
+      button(
+        abandon ? "Review resuming instead" : "Review abandoning instead",
+        "text-button",
+        () => showResumeForm(run, !abandon),
+      ),
     ],
     onSubmit: async () => {
-      await api(`/runs/${encodeURIComponent(run.id)}/resume`, {
-        method: "POST",
-        body: { confirmedStopped: $("field-resume-confirmed").checked },
-      });
+      await api(
+        `/runs/${encodeURIComponent(run.id)}/${abandon ? "abandon" : "resume"}`,
+        {
+          method: "POST",
+          body: { confirmedStopped: $("field-resume-confirmed").checked },
+        },
+      );
       await refresh();
-      toast("Reconciled request returned to the durable queue.");
+      toast(
+        abandon
+          ? "Attempt abandoned. Old queued intent was cancelled; history is preserved. Send a fresh message when ready."
+          : "Reconciled request returned to the durable queue.",
+      );
     },
   });
 }
@@ -2836,9 +3526,13 @@ function showThreadSettings() {
           `${location.origin}${location.pathname}#/threads/${thread.id}`,
         ),
     ),
-    button("Archive thread", "button button-quiet", () =>
-      showArchiveThread(thread),
-    ),
+    ...(mower?.role !== "adviser"
+      ? [
+          button("Archive thread", "button button-quiet", () =>
+            showArchiveThread(thread),
+          ),
+        ]
+      : []),
     button("Download last saved checkpoint", "button button-quiet", () =>
       showCheckpointDownload(thread),
     ),
@@ -3164,6 +3858,424 @@ function showArchiveThread(thread) {
     },
   });
 }
+async function showControllerCopies() {
+  showModal({
+    title: "Controller copies.",
+    eyebrow: "DURABLE HISTORY · RETENTION",
+    content: note(
+      "Reading removal status",
+      "Archived threads can be reviewed individually. No data is removed by opening this view.",
+    ),
+    onSubmit: null,
+  });
+  const generation = state.generation,
+    version = modalVersion;
+  try {
+    const [{ purges }] = await Promise.all([api("/purges"), refresh()]);
+    if (
+      generation !== state.generation ||
+      version !== modalVersion ||
+      !$("modal").open
+    )
+      return;
+    const content = [
+      note(
+        "Remove only the controller copy",
+        "Quoted results in other threads, exports, backups, Telegram messages and bridge inboxes remain separate copies. Known worker caches and sandboxes require a separate cleanup plan; unknown hosts can retain copies.",
+      ),
+    ];
+    const archived = state.server.threads.filter((thread) => thread.archivedAt);
+    if (!archived.length && !purges.length)
+      content.push(
+        element(
+          "p",
+          "",
+          "No archived threads or removal jobs. Archive a settled leaf thread before reviewing removal.",
+        ),
+      );
+    for (const thread of archived)
+      content.push(
+        button(
+          `Review controller copy · ${thread.title}`,
+          "button button-quiet",
+          () => void showPurgePreview(thread),
+        ),
+      );
+    for (const job of purges)
+      content.push(
+        button(
+          `${job.status === "done" ? "Controller copy removed" : "Continue controller removal"} · ${shortId(job.threadId)} · ${job.pendingHostCopies} host copies pending`,
+          "button button-quiet",
+          () => void showPurgeJob(job),
+        ),
+      );
+    showModal({
+      title: "Controller copies.",
+      eyebrow: "DURABLE HISTORY · RETENTION",
+      content,
+      onSubmit: null,
+    });
+  } catch (error) {
+    if (generation === state.generation && version === modalVersion) {
+      closeModal();
+      toast(errorMessage(error), true);
+    }
+  }
+}
+async function showPurgePreview(thread) {
+  showModal({
+    title: "Review the controller copy.",
+    eyebrow: "NO REMOVAL YET",
+    content: note(
+      "Checking exact records",
+      "The controller binds your confirmation to a snapshot digest. Changed records require a fresh review.",
+    ),
+    onSubmit: null,
+  });
+  const generation = state.generation,
+    version = modalVersion,
+    requestId = crypto.randomUUID();
+  try {
+    const { preview } = await api(
+      `/threads/${encodeURIComponent(thread.id)}/purge-preview`,
+    );
+    if (
+      generation !== state.generation ||
+      version !== modalVersion ||
+      !$("modal").open
+    )
+      return;
+    const content = [
+      detailsGrid([
+        ["Thread", thread.title],
+        [
+          "Controller records",
+          Object.values(preview.counts).reduce((sum, count) => sum + count, 0),
+        ],
+        ["Recorded payload bytes", preview.bytes.toLocaleString()],
+        ["Known host copies", preview.workers.length],
+        [
+          "Usage retained for family accounting",
+          `${preview.tokens} tokens · $${preview.cost}`,
+        ],
+      ]),
+      ...preview.warnings.map((warning) =>
+        note("Scope of this removal", warning),
+      ),
+    ];
+    const counts = element("details");
+    counts.append(
+      element("summary", "", "Inspect exact record counts and snapshot digest"),
+      element(
+        "pre",
+        "readonly-value",
+        JSON.stringify(
+          { counts: preview.counts, digest: preview.digest },
+          null,
+          2,
+        ),
+      ),
+    );
+    content.push(counts);
+    for (const blocker of preview.blockers)
+      content.push(note("Removal is blocked", blocker, true));
+    if (preview.legacyTelegramRoutes.length) {
+      content.push(
+        note(
+          "Separate broad Telegram history cleanup",
+          "Older deliveries lack a thread source. This operation also removes unrelated settled untyped Telegram delivery history for every listed route, including switched or unlinked routes. Typed surviving output and already-sent Telegram messages remain separate.",
+        ),
+        element(
+          "pre",
+          "readonly-value",
+          JSON.stringify(preview.legacyTelegramRouteDetails, null, 2),
+        ),
+      );
+      const consent = checkbox(
+        "purge-legacy",
+        "I reviewed these routes and consent to removing their entire listed untyped Telegram delivery history, including unrelated settled entries.",
+      );
+      consent.querySelector("input").required = true;
+      content.push(consent);
+    }
+    if (preview.eligible) {
+      const stopped = checkbox(
+          "purge-stopped",
+          "I verified execution is stopped and reconciled external effects.",
+        ),
+        scope = checkbox(
+          "purge-scope",
+          "Remove this controller copy. I understand quoted results, exports, backups and host copies are separate.",
+        );
+      stopped.querySelector("input").required = true;
+      scope.querySelector("input").required = true;
+      content.push(stopped, scope);
+    }
+    showModal({
+      title: "Remove controller copy?",
+      eyebrow: "EXPLICIT REMOVAL · REVIEWED SNAPSHOT",
+      submit: "Remove controller copy",
+      content,
+      onSubmit: preview.eligible
+        ? async () => {
+            const { job } = await api(
+              `/threads/${encodeURIComponent(thread.id)}/purge`,
+              {
+                method: "POST",
+                body: {
+                  requestId,
+                  expectedDigest: preview.digest,
+                  confirmedStopped: $("field-purge-stopped").checked,
+                  confirmedControllerCopyOnly: $("field-purge-scope").checked,
+                  ...(preview.legacyTelegramRoutes.length
+                    ? {
+                        confirmedLegacyTelegramRouteCleanup:
+                          $("field-purge-legacy").checked,
+                      }
+                    : {}),
+                },
+              },
+            );
+            state.events.delete(thread.id);
+            state.cursors.delete(thread.id);
+            state.history.delete(thread.id);
+            if (state.currentThreadId === thread.id) {
+              state.currentThreadId = null;
+              history.replaceState(null, "", location.pathname);
+            }
+            await refresh();
+            await loadOnboarding();
+            await showPurgeJob(job);
+          }
+        : null,
+    });
+  } catch (error) {
+    if (generation === state.generation && version === modalVersion) {
+      closeModal();
+      toast(errorMessage(error), true);
+    }
+  }
+}
+async function showPurgeJob(job) {
+  const content = [
+    detailsGrid([
+      ["Removal job", job.id],
+      ["Thread", job.threadId],
+      [
+        "Controller copy",
+        job.status === "done" ? "Removed" : "Removal in progress",
+      ],
+      ["Known host copies pending", job.pendingHostCopies],
+      ["SQLite page reclamation", job.reclamation],
+    ]),
+    note(
+      "Other copies remain separate",
+      "This logical removal does not erase quoted results, exports, backups, already-sent Telegram messages or unknown host copies. SQLite can reuse released pages without shrinking its file. Host cleanup requires its own reviewed action.",
+    ),
+    element("pre", "readonly-value", JSON.stringify(job.removed, null, 2)),
+    button(
+      "Inspect known host copies",
+      "button button-quiet",
+      () => void showPurgeHostCopies(job),
+    ),
+    button(
+      "All controller copies",
+      "text-button",
+      () => void showControllerCopies(),
+    ),
+  ];
+  showModal({
+    title:
+      job.status === "done"
+        ? "Controller copy removed."
+        : "Continue removing controller copy.",
+    eyebrow: "RESUMABLE CONTROLLER REMOVAL",
+    submit: "Continue bounded removal",
+    content,
+    onSubmit:
+      job.status !== "done"
+        ? async () => {
+            const generation = state.generation,
+              version = modalVersion;
+            let current = job;
+            for (
+              let batches = 0;
+              batches < 16 && current.status !== "done";
+              batches++
+            ) {
+              current = (
+                await api(`/purges/${encodeURIComponent(job.id)}/continue`, {
+                  method: "POST",
+                  body: { maxRows: 256 },
+                })
+              ).job;
+              if (
+                generation !== state.generation ||
+                version !== modalVersion ||
+                !$("modal").open
+              )
+                return false;
+            }
+            await showPurgeJob(current);
+            return false;
+          }
+        : null,
+  });
+}
+async function showPurgeHostCopies(job) {
+  showModal({
+    title: "Known host copies.",
+    eyebrow: "SEPARATE CLEANUP · NO AUTOMATIC DELETION",
+    content: note(
+      "Reading cleanup plans",
+      "Opening these plans does not delete a worker directory or sandbox.",
+    ),
+    onSubmit: null,
+  });
+  const generation = state.generation,
+    version = modalVersion;
+  try {
+    const [{ plans }, { job: current }] = await Promise.all([
+      api(`/purges/${encodeURIComponent(job.id)}/host-copies`),
+      api(`/purges/${encodeURIComponent(job.id)}`),
+    ]);
+    if (
+      generation !== state.generation ||
+      version !== modalVersion ||
+      !$("modal").open
+    )
+      return;
+    const content = [
+      note(
+        "Controller removal is separate",
+        "Known host copies remain pending until their explicit cleanup workflow finishes. Unknown hosts, external copies and quoted conversations are outside this list.",
+      ),
+      ...plans.map((plan) => {
+        const node = card(
+          state.server.workers.find((worker) => worker.id === plan.workerId)
+            ?.name || plan.workerId,
+          plan.status,
+        );
+        node.append(
+          detailsGrid([
+            ["Approval", plan.approvedAt ? "Granted, not completion" : "None"],
+            ["Placement epochs", plan.placementIds.length],
+            [
+              "Older placements untracked",
+              plan.unknownPlacements ? "Yes" : "No",
+            ],
+          ]),
+          button(
+            `Review host copy · ${state.server.workers.find((worker) => worker.id === plan.workerId)?.name || plan.workerId}`,
+            "button button-quiet",
+            () => void showHostCopyReview(plan.id, current),
+          ),
+        );
+        for (const reason of plan.outstanding || [])
+          node.append(element("p", "", reason));
+        return node;
+      }),
+      button(
+        "Back to removal status",
+        "text-button",
+        () => void showPurgeJob(current),
+      ),
+    ];
+    if (!plans.length)
+      content.push(
+        element(
+          "p",
+          "",
+          "No known host copy is recorded. This does not establish that no other copy exists.",
+        ),
+      );
+    showModal({
+      title: "Known host copies.",
+      eyebrow: "SEPARATE CLEANUP · NO AUTOMATIC DELETION",
+      content,
+      onSubmit: null,
+    });
+  } catch (error) {
+    if (generation === state.generation && version === modalVersion) {
+      closeModal();
+      toast(errorMessage(error), true);
+    }
+  }
+}
+async function showHostCopyReview(planId, job, mode = "review") {
+  showModal({
+    title: "Review this host copy.",
+    eyebrow: "SEPARATE HOST APPROVAL · NO DELETION YET",
+    content: note("Reading the current plan", "Reviewing this host does not authorize deletion."),
+    onSubmit: null,
+  });
+  const generation = state.generation, version = modalVersion;
+  try {
+    const { review } = await api(`/host-copies/${encodeURIComponent(planId)}`);
+    if (generation !== state.generation || version !== modalVersion || !$('modal').open) return;
+    const plan = review.plan;
+    const host = state.server.workers.find((worker) => worker.id === plan.workerId)?.name || plan.workerId;
+    const canApprove = job.status === "done" && ["pending", "blocked"].includes(plan.status) && !plan.approvedAt;
+    const canRevoke = plan.status !== "done" && !!plan.approvedAt;
+    const withdrawing = mode === "revoke" && canRevoke;
+    const content = [
+      detailsGrid([
+        ["Host", `${host} · ${plan.workerId}`],
+        ["Thread", plan.threadId],
+        ["Plan", plan.id],
+        ["State", plan.status],
+        ["Approval", plan.approvedAt ? `Granted until ${new Date(plan.approvalExpiresAt).toLocaleString()}` : "None"],
+        ["Host verified completion", plan.status === "done" && plan.verified === true ? "Yes, for this managed boundary" : "No"],
+        ["Removed managed paths", plan.removedPaths ?? 0],
+        ["Removed managed sandboxes", plan.removedSandboxes ?? 0],
+      ]),
+      note("Verify work is stopped on this host", "Keep the idle yard service online to perform cleanup. Independently verify this thread's work is stopped and earlier effects are reconciled. Online, offline, draining and controller status cannot prove that a physical process stopped."),
+      ...review.warnings.map((warning) => note("Scope of this host action", warning)),
+      note("Approval is not completion", "The host verifies managed paths, placement identities and stopped sandboxes before removal. Unknown or unverified copies remain outstanding. Exports, backups, bridge data, original imports and unknown hosts remain separate."),
+    ];
+    const exact = element("details");
+    exact.append(element("summary", "", "Inspect placement identities and exact plan digest"), element("pre", "readonly-value", JSON.stringify({ digest: review.digest, placementIds: plan.placementIds, unknownPlacements: plan.unknownPlacements, generation: plan.generation, leaseUntil: plan.leaseUntil }, null, 2)));
+    content.push(exact);
+    if (job.status !== "done") content.push(note("Finish controller removal first", "Complete the controller removal job before separately authorizing this host action.", true));
+    for (const reason of plan.outstanding || []) content.push(note("Outstanding host copy", reason, true));
+    if (withdrawing) {
+      content.push(note("Withdrawal cannot undo deletion", "Withdraw authority for further steps. A deletion already begun may have completed before the host receives cancellation. Inspect this host before approving a fresh attempt.", true));
+      const confirmation = checkbox("host-copy-revoke", "I understand already-started deletion may have completed and want to withdraw further cleanup authority.");
+      confirmation.querySelector("input").required = true;
+      content.push(confirmation);
+    } else if (canApprove) {
+      const stopped = checkbox("host-copy-stopped", "I verified this thread's work is stopped and earlier effects are reconciled on this intended host.");
+      const scope = checkbox("host-copy-delete", "Delete only this host's verified Laun-managed copies. I reviewed the placements and understand other copies can remain.");
+      stopped.querySelector("input").required = true; scope.querySelector("input").required = true;
+      content.push(stopped, scope);
+    }
+    if (canRevoke && !withdrawing) content.push(button("Review withdrawal of host approval", "button button-danger", () => void showHostCopyReview(planId, job, "revoke")));
+    content.push(
+      button("Refresh host-copy review", "button button-quiet", () => void showHostCopyReview(planId, job, mode)),
+      button("Back to known host copies", "text-button", () => void showPurgeHostCopies(job)),
+    );
+    showModal({
+      title: withdrawing ? "Withdraw this host approval?" : "Review this host copy.",
+      eyebrow: "EXPLICIT HOST AUTHORITY · REVIEWED PLAN",
+      submit: withdrawing ? "Withdraw host-copy approval" : "Approve host-copy deletion",
+      content,
+      onSubmit: withdrawing || canApprove ? async () => {
+        const action = withdrawing ? "revoke" : "approve";
+        const body = withdrawing ? { expectedDigest: review.digest } : {
+          expectedDigest: review.digest,
+          confirmedStopped: $("field-host-copy-stopped").checked,
+          confirmedDeleteHostCopies: $("field-host-copy-delete").checked,
+        };
+        await api(`/host-copies/${encodeURIComponent(planId)}/${action}`, { method: "POST", body });
+        await showHostCopyReview(planId, job);
+        toast(withdrawing ? "Further host cleanup authority withdrawn. Inspect any action already begun." : "Host cleanup approved. Review the result before considering it complete.");
+        return false;
+      } : null,
+    });
+  } catch (error) {
+    if (generation === state.generation && version === modalVersion) { closeModal(); toast(errorMessage(error), true); }
+  }
+}
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
@@ -3247,7 +4359,7 @@ async function sendMessage() {
         ? "Message saved in the thread’s durable queue."
         : "Message saved. Your mower is on it.",
     );
-    if(state.currentThreadId===thread.id)await jumpToLatest();
+    if (state.currentThreadId === thread.id) await jumpToLatest();
     await refresh();
   } catch (error) {
     composerNote(errorMessage(error), true);
@@ -3295,7 +4407,15 @@ $("refresh-button").addEventListener(
 );
 $("new-mower-button").addEventListener("click", () => showMowerForm());
 $("new-thread-button").addEventListener("click", showThreadForm);
-$("empty-start-button").addEventListener("click", showThreadForm);
+$("empty-start-button").addEventListener("click", () =>
+  state.onboarding && !state.onboarding.setup
+    ? void showOwnerOnboarding()
+    : showThreadForm(),
+);
+$("primary-thread-button").addEventListener("click", () => {
+  const thread = state.onboarding?.setup?.primaryThreadId;
+  if (thread) void openThread(thread);
+});
 $("thread-menu-button").addEventListener("click", showThreadSettings);
 $("thread-search").addEventListener("input", (event) => {
   state.filter = event.target.value;
@@ -3310,6 +4430,13 @@ $("workspace-info").addEventListener("click", () =>
         ["Control server", location.origin],
         ["Execution mode", state.server.readiness.mode],
       ]),
+      button(
+        state.onboarding?.setup
+          ? "Choose primary Groundskeeper"
+          : "Set up primary Groundskeeper",
+        "button button-quiet",
+        () => void showOwnerOnboarding(),
+      ),
       button("Manage execution yards", "button button-quiet", () => {
         closeModal();
         selectInspector("yards");
@@ -3319,6 +4446,11 @@ $("workspace-info").addEventListener("click", () =>
         "Connect Telegram ↗",
         "button button-quiet",
         () => void connectTelegram(),
+      ),
+      button(
+        "Review controller copies",
+        "button button-quiet",
+        () => void showControllerCopies(),
       ),
     ],
     onSubmit: null,
@@ -3355,7 +4487,8 @@ $("cancel-run-button").addEventListener("click", () => void cancelRun());
 $("messages").addEventListener("scroll", () => {
   const view = $("messages");
   state.follow = view.scrollHeight - view.scrollTop - view.clientHeight < 100;
-  $("jump-latest").hidden = state.follow&&!state.history.get(state.currentThreadId)?.viewingPast;
+  $("jump-latest").hidden =
+    state.follow && !state.history.get(state.currentThreadId)?.viewingPast;
 });
 $("jump-latest").addEventListener("click", () => void jumpToLatest());
 for (const tab of document.querySelectorAll("[data-tab]")) {

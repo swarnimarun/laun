@@ -5,10 +5,11 @@ import { createGateway } from "./server.js";
 import { SessionStore } from "./store.js";
 import { STREAMING_SERVE_OPTIONS } from "./serve.js";
 import { createControl } from "./control.js";
+import { isKeyPrincipalId, KeyStoreUnavailableError } from "./keys.js";
 
 const cfg = loadConfig();
-const gw = createGateway(cfg, new SessionStore(cfg.dataDir));
 const control = createControl(cfg);
+const gw = createGateway(cfg, new SessionStore(cfg.dataDir),undefined,{legacyEnabled:control.legacyEnabled});
 
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -57,10 +58,10 @@ function serveStatic(pathname: string): Response | null {
   }
 }
 
-Bun.serve({
+const server=Bun.serve({
   port: cfg.port,
   hostname: process.env.GATEWAY_BIND ?? "127.0.0.1",
-  maxRequestBodySize: 2_097_152,
+  maxRequestBodySize: 64 * 1024 * 1024,
   ...STREAMING_SERVE_OPTIONS,
   async fetch(req) {
     const url = new URL(req.url);
@@ -76,9 +77,12 @@ Bun.serve({
       return err("not found", 404);
     }
 
-    const id = gw.authenticate(req);
+    let id: ReturnType<typeof gw.authenticate>;
+    try { id = gw.authenticate(req); }
+    catch (error) { if (error instanceof KeyStoreUnavailableError) return err(error.message, 503); throw error; }
     if (path.startsWith("/api/v2/")) {
-      return control.handle(req, id ? { id: id.kind === "service" ? "service" : `key_${id.keyId}`, admin: id.kind === "service" } : null);
+      const principalId=id ? id.kind==="service"?"service":gw.keys.principalIdForKey(id.keyId) : null;
+      return control.handle(req, id&&principalId ? { id:principalId,admin:id.kind==="service" } : null);
     }
     if (!id) return Response.json({ error: "unauthorized" }, { status: 401 });
     const serviceOnly = id.kind === "service";
@@ -89,9 +93,12 @@ Bun.serve({
       if (path === "/keys" && req.method === "POST") {
         if (!serviceOnly) return err("service token required", 403);
         const body = await req.json().catch(() => null);
-        const label = body && typeof body === "object" ? (body as { label?: unknown }).label : undefined;
+        if (!body || typeof body !== "object" || Array.isArray(body)) return err("invalid JSON body", 400);
+        if (Object.keys(body).some((field) => field !== "label" && field !== "principalId")) return err("invalid key fields", 400);
+        const { label, principalId } = body as { label?: unknown; principalId?: unknown };
         if (label !== undefined && (typeof label !== "string" || label.length > 64)) return err("invalid label", 400);
-        const { key, record } = gw.keys.add(typeof label === "string" ? label : "default");
+        if (principalId !== undefined && !isKeyPrincipalId(principalId)) return err("invalid principalId", 400);
+        const { key, record } = gw.keys.add(typeof label === "string" ? label : "default", principalId);
         // The only place a key is ever returned. Never logged.
         return Response.json({ key, record }, { status: 201 });
       }
@@ -105,6 +112,8 @@ Bun.serve({
         return Response.json({ ok: gw.keys.revoke(km![1]) });
       }
 
+      // Legacy shared-key sessions are an explicit single-operator mode.
+      if((path==="/sessions"||path.startsWith("/sessions/"))&&!control.legacyEnabled)return err("legacy sessions API disabled; use /api/v2 or explicitly enable LAUN_LEGACY_API for a single-operator installation",410);
       // POST /sessions
       if (path === "/sessions" && req.method === "POST") {
         const body = await req.json().catch(() => null);
@@ -198,4 +207,17 @@ function err(error: string, status: number): Response {
   return Response.json({ error }, { status });
 }
 
-console.log(`[gateway] listening :${cfg.port} -> executor ${cfg.executorUrl}`);
+let stopping=false;
+function shutdown(){
+  if(stopping)return;stopping=true;server.stop(true);
+  const deadline=setTimeout(()=>{console.error("[gateway] shutdown outcome remains interrupted; verify execution hosts before resuming");process.exit(1);},20_000);
+  void (async()=>{
+    try{
+      await control.close();
+      if(control.legacyEnabled)await Promise.allSettled(gw.sessions.list().filter(s=>["running","waiting_approval"].includes(s.status)).map(s=>gw.abort(s.id,"gateway shutdown")));
+      clearTimeout(deadline);process.exit(0);
+    }catch{clearTimeout(deadline);console.error("[gateway] shutdown requires operator reconciliation");process.exit(1);}
+  })();
+}
+process.once("SIGTERM",shutdown);process.once("SIGINT",shutdown);
+console.log(`[gateway] Laun control listening :${cfg.port}`);

@@ -30,6 +30,18 @@ feedback and review after reload, and no automatic profile or approval change.
 The interruption scenario also simulates the actual authenticated worker
 protocol to establish a stopped assignment; it verifies that unconfirmed UI
 submission cannot resume it and that a confirmed resume advances generation.
+The primary setup wizard chooses explicit model/yard/guardrails and is checked
+to create no model run. Managed Gatekeeper editing omits authority fields. A
+second interruption scenario runs actual Pi Durable, injects a failed execution
+shutdown attestation, then verifies explicit abandonment cancels the prior queue
+and permits a different fresh input. Disposable retention checks archive that
+thread, review exact controller-copy scope, require both confirmations, continue
+bounded removal, and confirm known host copies remain separately pending.
+Fleet maintenance drains a disposable yard without losing queued placement,
+rotates its key with explicit stopped-execution confirmation, checks the old
+credential is rejected and active attempts require reconciliation, then requires
+the replacement worker's authenticated metadata before dispatch resumes. The
+replacement key is checked to remain absent from browser storage and test logs.
 Screenshots default to `/tmp/laun-ui-shots` (`LAUN_UI_SHOTS` overrides it).
 Keys and worker credentials are never printed or included in screenshots.
 

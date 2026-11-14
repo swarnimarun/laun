@@ -13,6 +13,7 @@ if(!existsSync(credentialsPath))writeFileSync(credentialsPath,JSON.stringify(cre
 const port=process.env.GATEWAY_PORT??"8080";
 console.log(`Laun: http://127.0.0.1:${port}/app\nAgent key: ${credentials.key}\nMode: ${demo?"explicit demonstration provider":trusted?"trusted local host execution":"OpenShell"}\nData: ${directory}\n`);
 const child=Bun.spawn([process.execPath,"apps/gateway/src/index.ts"],{cwd:resolve(import.meta.dir,".."),env:{...process.env,GATEWAY_TOKEN:credentials.service,LAUN_KEY:credentials.key,DATA_DIR:directory,
- LAUN_TRUSTED_LOCAL:trusted||demo?"true":"false",LAUN_DEMO:demo?"true":"false",GATEWAY_PORT:port},stdin:"inherit",stdout:"inherit",stderr:"inherit"});
+ LAUN_TRUSTED_LOCAL:trusted||demo?"true":"false",LAUN_DEMO:demo?"true":"false",OPENSHELL_ENABLED:trusted||demo?"false":process.env.OPENSHELL_ENABLED,
+ LAUN_LEGACY_API:"false",GATEWAY_PORT:port},stdin:"inherit",stdout:"inherit",stderr:"inherit"});
 for(const signal of ["SIGTERM","SIGINT"] as const)process.on(signal,()=>child.kill(signal));
 process.exitCode=await child.exited;
