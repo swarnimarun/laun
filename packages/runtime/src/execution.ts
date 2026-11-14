@@ -6,11 +6,15 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 export interface CommandResult { exitCode: number; stdout: string; stderr: string; truncated: boolean }
 export interface RuntimeExecution {
   readonly mode: "trusted-local" | "isolated";
+  /** A failed boundary stop leaves external effects requiring reconciliation. */
+  readonly uncertain?: boolean;
   prepare?(): Promise<void>;
   readFile(path: string, signal?: AbortSignal): Promise<string>;
   writeFile(path: string, content: string, signal?: AbortSignal): Promise<void>;
   listFiles(path: string, signal?: AbortSignal): Promise<string[]>;
   execute(command: string, timeoutMs: number, signal?: AbortSignal): Promise<CommandResult>;
+  /** Flush a quiesced guest workspace into its controller-owned host mirror. */
+  checkpoint?(): Promise<void>;
   close?(): Promise<void>;
 }
 export const MAX_FILE_BYTES = 1024 * 1024;
@@ -36,6 +40,7 @@ export async function executeProcess(
     try { child = spawn(argv[0]!, argv.slice(1), { cwd: options.cwd, env: options.env, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32" }); }
     catch (error) { reject(error); return; }
     let stdout = "", stderr = "", bytes = 0, truncated = false, timedOut = false;
+    let inputError: Error | undefined;
     const out = new TextDecoder(); const err = new TextDecoder();
     const kill = () => {
       if (child.pid && process.platform !== "win32") { try { process.kill(-child.pid, "SIGKILL"); return; } catch {} }
@@ -63,9 +68,14 @@ export async function executeProcess(
       stdout += out.decode(); stderr += err.decode();
       if (options.signal?.aborted) { reject(new Error("command cancelled")); return; }
       if (timedOut) { reject(new Error("command timed out")); return; }
+      if (inputError) { reject(new Error(`command stdin transfer failed: ${inputError.message}${stderr ? `; ${stderr.slice(-1000)}` : ""}`)); return; }
       resolveResult({ exitCode: code ?? 1, stdout, stderr, truncated });
     });
-    child.stdin?.on("error", () => { /* a command can exit before reading its supplied input */ });
+    child.stdin?.on("error", (error) => {
+      // File writes and workspace restore depend on receiving the complete
+      // input. A successful exit with lost stdin must never appear successful.
+      if (options.input?.length) { inputError = error; kill(); }
+    });
     child.stdin?.end(options.input);
   });
 }
