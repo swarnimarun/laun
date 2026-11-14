@@ -1,0 +1,16 @@
+{
+  "name": "laun-pi-durable-spike",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test probe.test.ts",
+    "typecheck": "bun x tsc --noEmit --strict --module NodeNext --moduleResolution NodeNext --target ES2022 --skipLibCheck --types bun-types probe.test.ts"
+  },
+  "devDependencies": {
+    "@earendil-works/chord": "1.5.2",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-durable": "1.5.2",
+    "bun-types": "1.4.2",
+    "typescript": "5.9.3"
+  }
+}
