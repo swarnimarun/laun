@@ -179,6 +179,7 @@ bun run build
 bun run test
 nix-shell --arg withBrowser true
 bun run test:ui
+bun run test:design
 bun run demo:capture
 ```
 

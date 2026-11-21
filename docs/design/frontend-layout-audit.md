@@ -1,6 +1,6 @@
 # Frontend layout audit
 
-Reviewed 2026-11-14 against `667d2c8a` following the first paper-and-ink rework. All findings below are **open**. This change documents the problems; it does not fix the interface.
+Reviewed 2026-11-14 against `667d2c8a` following the first paper-and-ink rework. The screenshots and measurements below record that baseline. See the [repair record](#repair-record) for the current implementation.
 
 The redesign changed the palette, type and imagery, but left substantial problems in space allocation, responsive behavior, form readability and action placement. The earlier statement that the design passed validation was too broad. Functional smoke tests passed; those results did not establish visual quality or usable layouts.
 
@@ -11,7 +11,7 @@ The review uses the actual app and disposable controller/Pi demo fixture, with s
 Captured 23 screenshots covering login, primary setup, a populated conversation, pending permission review, Gatekeeper advice and a delegated thread. Sizes include 1440×900, 1024×768, adjacent breakpoint widths 991/990 and 681/680, 768×768, 390×667 and 320×568. Permission screenshots explicitly open the inspector on phones. Ordinary workspace screenshots preserve the app's automatic inspector collapse when crossing 990px.
 
 - [Measurements](frontend-layout-audit/measurements.json) record bounding boxes, actual font sizes, control dimensions and selected-option text widths.
-- [Capture script](../../apps/gateway/test/capture-layout-review.ts) reproduces the evidence with `bun apps/gateway/test/capture-layout-review.ts`. Set `CHROMIUM_PATH` if Chromium is not detected automatically.
+- [Capture script](../../apps/gateway/test/capture-layout-review.ts) records the current layout with `bun apps/gateway/test/capture-layout-review.ts`. Output defaults to `/tmp/laun-layout-review`. Set `LAUN_LAYOUT_SHOTS` to choose another directory or `CHROMIUM_PATH` to select a browser.
 - Screenshots are viewport captures, not full-page captures, so content outside the visible area stays evident.
 
 P1 means a primary reading or decision task is materially impaired. P2 means a recurring usability or responsive-layout defect. P3 means visual quality or maintainability. These priorities do not imply a permission bypass or data-loss defect.
@@ -160,6 +160,17 @@ Acceptance: label the existing check according to its limited scope. Add checks 
 3. Rework pane collapse, inspector navigation, control sizing and login sizing: L05, L07, L09 and L11.
 4. Settle typography and component ownership: L10 and L13. Update the validation language and add defect-specific checks as each repair lands: L14.
 
-## Not established by this review
+## Repair record
 
-Real iOS/Android keyboard behavior, browser chrome/visual-viewport resizing, 200% zoom, screen-reader operation, long crew/thread lists, very long names, large code blocks, every error/recovery dialog and non-Chromium rendering still need review. The captures do not establish that scrolled-off actions are unreachable. Drawer keyboard focus containment also needs a dedicated interaction check; it is not claimed as a verified defect here.
+| Findings | Changes |
+| --- | --- |
+| L01–L02 | Shorter permission labels fit native selects. The setup title and actions stay in place while the fields scroll. |
+| L03, L12 | The permission card leads with the action, destination, and readable preview. Decision buttons are grouped together. Technical details retain the server-supplied argument preview and digest. |
+| L04–L06, L08 | The thread title gets its own space on phones. Readiness uses a compact line and the composer starts at one row. The latest-message control sits in the layout above the composer. Optional panes become drawers before they consume reading space. |
+| L07, L09–L10, L13 | The inspector uses a single tab row and compact heading. Workspace controls share a hit-area size and working text has a consistent type scale. Each pane has a single responsive layout. |
+| L11 | The login switches to a single column when the viewport gets narrow or short. The origin footer stays in the page flow. |
+| L14 | `bun run test:design` runs targeted Chromium layout checks in source and release CI. `bun run demo:capture` produces screenshots for review. |
+
+## Further device and accessibility checks
+
+Real iOS/Android keyboard behavior, mobile browser chrome, 200% zoom, screen-reader operation, long crew and thread lists, very long names, large code blocks, every error and recovery dialog, and non-Chromium rendering still need review.

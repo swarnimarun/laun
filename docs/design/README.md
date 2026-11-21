@@ -1,6 +1,6 @@
 # Laun: durable mower harness
 
-Frontend: [rework plan](frontend-rework.md) and [open layout audit with screenshot evidence](frontend-layout-audit.md).
+Frontend: [rework plan](frontend-rework.md) and [layout audit with screenshot evidence and repair record](frontend-layout-audit.md).
 
 Design and source audit dated **2026-11-14**, based on v1 commit `cff77fd8`.
 This is the independently reviewed original architecture and delivery plan.

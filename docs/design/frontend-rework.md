@@ -37,12 +37,12 @@ Built-in imagegen, `illustration-story`: an enclosed medieval garden with founta
 
 ## Validation
 
-**Visual review remains open.** The later [layout audit](frontend-layout-audit.md) documents 14 open layout, hierarchy and validation findings with 23 screenshots. The passing checks below establish only their stated functional and geometry checks; they do not establish visual quality or usable layouts. The initial completion report overstated what had been verified.
+The [layout audit](frontend-layout-audit.md) records 14 findings and preserves the baseline screenshots. Its [repair record](frontend-layout-audit.md#repair-record) tracks the follow-up layout changes and their checks. Visual hierarchy is reviewed with screenshots.
 
 Baseline: the full existing UI smoke passed before edits, including durable conversations, permission decisions, delegation, recovery, retention, workers and mobile navigation. Screenshots are in `/tmp/laun-before` for local comparison.
 
 The redesigned app passed the same full browser workflow suite with zero browser exceptions. Typecheck passed. All 23 controller-source and yard-setup tests passed outside the restricted sandbox, including a new byte-for-byte asset install check. Initial sandbox failures in setup tests did not reproduce outside the sandbox.
 
-All seven [workflow screenshots](../demos.md) were regenerated with `bun run demo:capture`, including setup, desktop, delegation, approvals, Gatekeeper, yards and mobile. [Welcome](../images/welcome.png) is also captured. The responsive audit checks login, font loading, image loading, workspace overflow and dialogs at 320, 390, 768, 1024 and 1440 pixels. It caught and resolved the login illustration's intrinsic-height and mobile visibility issues.
+The [workflow gallery](../demos.md) is regenerated with `bun run demo:capture`. The layout suite exercises login, setup, populated conversations, the inspector and permission decisions on desktop, tablet and short phone viewports.
 
 Final artwork: `apps/gateway/public/v2/assets/garden.webp` (210 KB), generated with built-in imagegen using the illustration prompt above. Concept board: `docs/design/frontend-concepts.webp` (299 KB). Fonts, icons and artwork are local; there are no added runtime dependencies or external asset requests. Component bases are native HTML adaptations of shadcn styling and state conventions, rather than React components. Licenses are in `apps/gateway/public/v2/THIRD_PARTY.md` and the font assets directory.
