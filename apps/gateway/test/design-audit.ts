@@ -246,8 +246,13 @@ try {
   await page.keyboard.press("Escape");
   assert.equal(await page.locator("#inspector-toggle").evaluate((node) => node === document.activeElement),
     true, "closing the detail drawer restores focus");
-  assert.equal(await page.locator("#main-content").evaluate((node: HTMLElement) => node.inert),
+  assert.equal(await page.locator("#main-content").evaluate((node) => node instanceof HTMLElement && node.inert),
     false, "closing the detail drawer restores the conversation");
+  const review = page.locator("#approval-strip").getByRole("button", { name: "Review request", exact: false });
+  await review.click();
+  await page.keyboard.press("Escape");
+  assert(await review.evaluate((node) => node === document.activeElement),
+    "closing the drawer restores the conversation's review button");
 
   assert.deepEqual(errors, [], "browser exceptions");
   console.log("Layout regressions passed for login, setup, populated threads and permission review in Chromium.");
