@@ -2224,6 +2224,7 @@ input:focus, textarea:focus, select:focus {
 }
 .workspace .text-button {
   padding-block: 4px;
+  font-size: 12px;
   text-align: start;
 }
 .workspace summary {
@@ -2652,7 +2653,7 @@ input:focus, textarea:focus, select:focus {
 .inspector :is(.detail-grid, .detail-grid dd.mono, .inspector-description, .inspector-empty,
   .item-card > p, .item-card .card-actions .button, .mower-detail p, .resource-rule,
   .resource-rule .mono, .id-line, .profile-rules summary, .task-result summary, .task-result pre,
-  .note-card, .note-card strong) {
+  .note-card, .note-card strong, .item-card .meta-row, .rule-effect) {
   font-size: 12px;
 }
 .inspector .item-card-top strong {
@@ -2692,6 +2693,10 @@ input:focus, textarea:focus, select:focus {
   .composer-mower,
   #composer-hint {
     display: none;
+  }
+  .sidebar .search-wrap input,
+  .delivery-select select {
+    font-size: 16px;
   }
 }
 @media (max-height: 480px) {

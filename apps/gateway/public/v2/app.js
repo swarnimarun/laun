@@ -1234,9 +1234,9 @@ function renderApprovalsStrip() {
   if (strip.firstElementChild?.textContent === label) return;
   strip.replaceChildren(
     element("p", "", label),
-    button("Review request ↗", "button", () => {
+    button("Review request ↗", "button", (event) => {
       selectInspector("permissions");
-      openInspector();
+      openInspector(event.currentTarget);
       const content = $("inspector-content");
       content.scrollTop = 0;
       content.focus({ preventScroll: true });
@@ -1701,12 +1701,14 @@ function selectInspector(tab) {
   renderInspector();
   if (changed) $("inspector-content").scrollTop = 0;
 }
-function openInspector() {
+function openInspector(returnFocus = document.activeElement) {
   setSidebarOpen(false);
   if (wideWorkspace.matches) desktopInspectorOpen = true;
   setInspectorOpen(true);
-  if (!wideWorkspace.matches)
+  if (!wideWorkspace.matches) {
+    inspectorReturnFocus = returnFocus;
     document.querySelector('.inspector-tabs [aria-selected="true"]')?.focus();
+  }
 }
 let permissionsSnapshot = "";
 
@@ -1758,10 +1760,10 @@ function renderOverview(content) {
   const mower = selectedMower();
   const thread = currentThread();
   if (mower) {
-    const detail = section(
-      "Your mower",
-      button("···", "icon-button", () => showMowerForm(mower)),
-    );
+    const settings = button("···", "icon-button", () => showMowerForm(mower));
+    settings.title = "Mower settings";
+    settings.setAttribute("aria-label", settings.title);
+    const detail = section("Your mower", settings);
     const heading = element("div", "mower-detail");
     const text = element("div");
     text.append(
@@ -1811,7 +1813,7 @@ function renderOverview(content) {
     content.append(detail);
   }
   const workspace = section(thread ? "This thread" : "Workspace at a glance");
-  workspace.append(detailsGrid([
+  const activity = [
     [
       "Active & queued runs",
       thread
@@ -1826,17 +1828,15 @@ function renderOverview(content) {
             .length
         : state.server.tasks.length,
     ],
-  ]));
+  ];
   if (thread) {
-    workspace.append(
-      detailsGrid([
-        ["Thread", shortId(thread.id)],
-        ["Started", timeAgo(thread.createdAt)],
-        ["Last activity", timeAgo(thread.updatedAt)],
-      ]),
+    activity.push(
+      ["Thread", shortId(thread.id)],
+      ["Started", timeAgo(thread.createdAt)],
+      ["Last activity", timeAgo(thread.updatedAt)],
     );
-    workspace.lastChild.style.marginTop = "17px";
   }
+  workspace.append(detailsGrid(activity));
   content.append(workspace);
   const queue = thread
     ? runsForThread(thread.id)
@@ -4583,6 +4583,7 @@ $("workspace-info").addEventListener("click", () =>
 const wideWorkspace = matchMedia("(min-width: 1200px)");
 const compactWorkspace = matchMedia("(max-width: 799px)");
 let desktopInspectorOpen = true;
+let inspectorReturnFocus;
 
 function activeDrawer() {
   const workspace = $("workspace");
@@ -4623,7 +4624,11 @@ function closeDrawer() {
     $("sidebar-toggle").focus();
   } else if (drawer === $("inspector")) {
     setInspectorOpen(false);
-    $("inspector-toggle").focus();
+    const target = inspectorReturnFocus?.getClientRects().length
+      ? inspectorReturnFocus
+      : $("inspector-toggle");
+    target.focus({ preventScroll: true });
+    inspectorReturnFocus = null;
   }
 }
 function applyWorkspaceLayout() {
@@ -4649,10 +4654,10 @@ $("sidebar-toggle").addEventListener("click", () => {
   setSidebarOpen(true);
   $("sidebar-close").focus();
 });
-$("inspector-toggle").addEventListener("click", () => {
+$("inspector-toggle").addEventListener("click", (event) => {
   const open = $("workspace").classList.contains("inspector-hidden");
   if (wideWorkspace.matches) desktopInspectorOpen = open;
-  if (open) openInspector();
+  if (open) openInspector(event.currentTarget);
   else setInspectorOpen(false);
 });
 $("sidebar-close").addEventListener("click", closeDrawer);
