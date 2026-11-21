@@ -2,7 +2,7 @@
 <html lang="en" data-type="software">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content" />
     <meta name="color-scheme" content="light" />
     <meta name="theme-color" content="#f8f4eb" />
     <meta name="description" content="Your agents, conversations, and permissions in one private workspace." />
@@ -23,25 +23,16 @@
     <a class="skip-link" href="#main-content">Skip to conversation</a>
     <main id="login-view" class="login-view">
       <div class="login-art" aria-hidden="true">
-        <div class="login-brand"><svg class="brand-emblem" aria-hidden="true" viewBox="0 0 32 40" fill="none"><path d="M4 35V17a12 12 0 0 1 24 0v18H4Z" stroke="currentColor" stroke-width="1.3"/><path d="M16 8v22M10 20l6 5 6-5M11 14l5 4 5-4M9 35h14" stroke="currentColor" stroke-width="1.3"/><path d="M16 2v3M2 11l3 2M30 11l-3 2" stroke="currentColor" stroke-width="1.2"/></svg><span class="wordmark">laun.</span><span class="brand-note">An agent<br>workshop</span></div>
-        <div class="login-art-copy">
-          <p class="eyebrow">A LITTLE ORDER. A LOT OF POSSIBILITY.</p>
-          <h1>A place for<br />your <em>next idea.</em></h1>
-          <p>
-            A quiet workshop for your agents. Bring a task, gather your crew,
-            and keep the work in your hands.
-          </p>
-        </div>
-        <img class="garden-frontispiece" src="/app/assets/garden.webp" alt="" width="1536" height="1024" />
-        <div class="art-caption">
-          <span class="tiny-star">✳</span> Your server. Your crew. Your call.<span class="edition">Made for considered work.</span>
+        <div class="login-brand"><svg class="brand-emblem" aria-hidden="true" viewBox="0 0 32 40" fill="none"><path d="M4 35V17a12 12 0 0 1 24 0v18H4Z" stroke="currentColor" stroke-width="1.3"/><path d="M16 8v22M10 20l6 5 6-5M11 14l5 4 5-4M9 35h14" stroke="currentColor" stroke-width="1.3"/><path d="M16 2v3M2 11l3 2M30 11l-3 2" stroke="currentColor" stroke-width="1.2"/></svg><span class="wordmark">laun.</span></div>
+        <div class="login-art-body">
+          <p class="login-art-title">A place for<br />your <em>next idea.</em></p>
+          <img class="garden-frontispiece" src="/app/assets/garden.webp" alt="" width="1536" height="1024" />
         </div>
       </div>
       <section class="login-content" aria-labelledby="login-title">
         <div class="mobile-brand"><svg class="brand-emblem" aria-hidden="true" viewBox="0 0 32 40" fill="none"><path d="M4 35V17a12 12 0 0 1 24 0v18H4Z" stroke="currentColor" stroke-width="1.3"/><path d="M16 8v22M10 20l6 5 6-5M11 14l5 4 5-4M9 35h14" stroke="currentColor" stroke-width="1.3"/><path d="M16 2v3M2 11l3 2M30 11l-3 2" stroke="currentColor" stroke-width="1.2"/></svg><span class="wordmark">laun.</span></div>
         <div class="login-card">
-          <p class="eyebrow">YOUR PRIVATE WORKSPACE</p>
-          <h2 id="login-title">Welcome to the yard.</h2>
+          <h1 id="login-title">Welcome to the yard.</h1>
           <p class="subtle login-intro">
             Connect to this installation with your agent key. Your conversations
             stay on your server.
@@ -97,8 +88,14 @@
     </main>
 
     <div id="workspace" class="workspace" hidden>
+      <div id="pane-backdrop" class="pane-backdrop" hidden></div>
       <aside class="sidebar" id="sidebar" aria-label="Mowers and threads">
         <a class="brand" href="/app" aria-label="Laun workspace"><svg class="brand-emblem" aria-hidden="true" viewBox="0 0 32 40" fill="none"><path d="M4 35V17a12 12 0 0 1 24 0v18H4Z" stroke="currentColor" stroke-width="1.3"/><path d="M16 8v22M10 20l6 5 6-5M11 14l5 4 5-4M9 35h14" stroke="currentColor" stroke-width="1.3"/><path d="M16 2v3M2 11l3 2M30 11l-3 2" stroke="currentColor" stroke-width="1.2"/></svg><span class="wordmark">laun.</span><span class="brand-note">An agent<br>workshop</span></a>
+        <button class="icon-button sidebar-close" id="sidebar-close" type="button" aria-label="Close navigation">
+          <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+        </button>
         <button class="workspace-switch" id="workspace-info" type="button">
           <span class="workspace-icon">Y</span
           ><span
@@ -253,6 +250,7 @@
               id="sidebar-toggle"
               type="button"
               aria-label="Show navigation"
+              aria-controls="sidebar"
               aria-expanded="false"
             ><svg class="ui-icon" aria-hidden="true" focusable="false"
   xmlns="http://www.w3.org/2000/svg"
@@ -274,7 +272,7 @@
               <div class="breadcrumb" id="thread-breadcrumb">
                 Your workspace <span>/</span> Threads
               </div>
-              <h1 id="thread-title">Your work, gathered.</h1>
+              <h1 id="thread-title" tabindex="-1">Your work, gathered.</h1>
             </div>
           </div>
           <div class="header-actions">
@@ -307,6 +305,7 @@
               id="inspector-toggle"
               type="button"
               aria-label="Toggle workspace details"
+              aria-controls="inspector"
               aria-expanded="true"
             ><svg class="ui-icon" aria-hidden="true" focusable="false"
   xmlns="http://www.w3.org/2000/svg"
@@ -328,10 +327,9 @@
         <div id="readiness-banner" class="readiness-banner" hidden></div>
         <div id="empty-state" class="empty-state">
           <div class="empty-art" aria-hidden="true"><img src="/app/assets/garden.webp" alt="" width="1536" height="1024" /></div>
-          <p class="eyebrow">THE WORKSHOP IS YOURS</p>
-          <h2>Every good idea<br />starts somewhere.</h2>
+          <h2>Start a conversation</h2>
           <p>
-            Give your crew a task. Conversations stay here,<br />ready whenever you return.
+            Give your crew a task. Conversations stay here whenever you return.
           </p>
           <button
             class="button button-primary"
@@ -354,20 +352,6 @@
 </svg>
 
           </button>
-          <div class="getting-started">
-            <div>
-              <span>01</span><strong>Name your mower</strong>
-              <p>Give an agent a purpose and a permission profile.</p>
-            </div>
-            <div>
-              <span>02</span><strong>Start a conversation</strong>
-              <p>Start a thread that stays with you between runs.</p>
-            </div>
-            <div>
-              <span>03</span><strong>Stay in control</strong>
-              <p>Follow work, review requests, and talk to any mower.</p>
-            </div>
-          </div>
         </div>
         <div id="thread-view" class="thread-view" hidden>
           <div id="thread-context" class="thread-context" hidden></div>
@@ -385,7 +369,7 @@
             aria-relevant="additions text"
           ></section>
           <button class="jump-latest" id="jump-latest" type="button" hidden>
-            ↓ Latest messages
+            <span aria-hidden="true">↓</span> Latest messages
           </button>
           <div
             id="approval-strip"
@@ -401,7 +385,7 @@
               <textarea
                 id="message-input"
                 name="text"
-                rows="2"
+                rows="1"
                 maxlength="32000"
                 placeholder="Give your mower something to work on…"
                 required
@@ -450,9 +434,8 @@
               </div>
             </form>
             <div class="composer-footnote">
-              <span id="composer-note" role="status"
-                >Enter to send · Shift + Enter for a new line</span
-              ><span id="thread-usage"></span>
+              <span id="composer-hint">Enter to send · Shift + Enter for a new line</span>
+              <span id="composer-note" role="status"></span><span id="thread-usage"></span>
             </div>
           </div>
         </div>
@@ -460,8 +443,7 @@
 
       <aside id="inspector" class="inspector" aria-label="Workspace details">
         <header class="inspector-header">
-          <h2>The working notes</h2>
-          <span class="live-label"><span class="status-dot"></span> Live</span>
+          <h2>Workspace details</h2>
           <button
             id="inspector-close"
             class="icon-button inspector-close"
@@ -535,19 +517,15 @@
           role="tabpanel"
           tabindex="0"
         ></section>
-        <footer class="inspector-footer">
-          <span class="tiny-star" aria-hidden="true">✳</span
-          ><span>Your crew. With clear boundaries.</span>
-        </footer>
       </aside>
     </div>
 
-    <dialog id="modal" class="modal">
+    <dialog id="modal" class="modal" aria-labelledby="modal-title">
       <form id="modal-form">
         <div class="modal-header">
           <div>
             <p class="eyebrow" id="modal-eyebrow">YOUR WORKSPACE</p>
-            <h2 id="modal-title"></h2>
+            <h2 id="modal-title" tabindex="-1"></h2>
           </div>
           <button
             class="icon-button"
@@ -571,17 +549,19 @@
 </button>
         </div>
         <div id="modal-fields" class="modal-fields"></div>
-        <p id="modal-error" class="form-error" role="alert"></p>
-        <div class="modal-actions">
-          <button class="button button-quiet" id="modal-cancel" type="button">
-            Cancel</button
-          ><button
-            class="button button-primary"
-            id="modal-submit"
-            type="submit"
-          >
-            Save
-          </button>
+        <div class="modal-footer">
+          <p id="modal-error" class="form-error" role="alert"></p>
+          <div class="modal-actions">
+            <button class="button button-quiet" id="modal-cancel" type="button">
+              Cancel</button
+            ><button
+              class="button button-primary"
+              id="modal-submit"
+              type="submit"
+            >
+              Save
+            </button>
+          </div>
         </div>
       </form>
     </dialog>

@@ -152,9 +152,6 @@ function setConnection(connected, text) {
   $("connection-dot").className = `status-dot${connected ? "" : " offline"}`;
   $("connection-label").textContent =
     text || (connected ? "Connected to your yard" : "Reconnecting…");
-  document.querySelector(".live-label").lastChild.textContent = connected
-    ? " Live"
-    : " Reconnecting";
 }
 function saveKey(key) {
   try {
@@ -276,6 +273,7 @@ function disconnect(
   state.key = "";
   clearKey();
   state.server = emptyServer();
+  permissionsSnapshot = "";
   state.onboarding = null;
   state.onboardingAt = 0;
   state.events.clear();
@@ -284,6 +282,9 @@ function disconnect(
   state.advice.clear();
   state.adviceLoading.clear();
   state.currentThreadId = null;
+  state.follow = true;
+  setSidebarOpen(false);
+  setInspectorOpen(wideWorkspace.matches && desktopInspectorOpen);
   closeModal();
   $("workspace").hidden = true;
   $("login-view").hidden = false;
@@ -630,12 +631,9 @@ async function showOwnerOnboarding() {
           field("setup-mode", "Permission mode", {
             value: draft.mode,
             options: [
-              { value: "manual", label: "Manual · review permission requests" },
-              { value: "auto", label: "Auto · Gatekeeper discusses requests" },
-              {
-                value: "isolated",
-                label: "Isolated profile · explicit minimal rules",
-              },
+              { value: "manual", label: "Manual review" },
+              { value: "auto", label: "Auto (Gatekeeper advice)" },
+              { value: "isolated", label: "Isolated profile" },
             ],
             required: true,
           }),
@@ -651,27 +649,23 @@ async function showOwnerOnboarding() {
             field("setup-process", "Execute commands", {
               value: draft.processExecute,
               options: [
-                { value: "ask", label: "Ask for the exact command" },
+                { value: "ask", label: "Review exact command" },
                 { value: "deny", label: "Deny commands" },
               ],
               required: true,
             }),
-            field(
-              "setup-delegation",
-              "Spawn, hand off and message child threads",
-              {
-                value: draft.delegation,
-                options: [
-                  { value: "ask", label: "Ask before delegation actions" },
-                  { value: "deny", label: "Deny delegation actions" },
-                ],
-                required: true,
-              },
-            ),
+            field("setup-delegation", "Delegation and child messages", {
+              value: draft.delegation,
+              options: [
+                { value: "ask", label: "Ask first" },
+                { value: "deny", label: "Deny" },
+              ],
+              required: true,
+            }),
           ),
           note(
-            "Permission and containment are separate",
-            "These rules control mediated actions. OpenShell isolation comes from the execution yard. Auto mode can queue Gatekeeper model advice for permission requests; it never approves an action or applies a profile revision.",
+            "How these choices apply",
+            "Delegation covers spawning mowers, handing off tasks, and messaging child threads. Auto mode can ask Gatekeeper for advice. You approve actions and apply profile changes. The execution yard determines OpenShell isolation.",
           ),
           button("Back to model and yard", "text-button", () => {
             captureRules();
@@ -970,10 +964,11 @@ async function openThread(id, updateHash = true) {
       "",
       `${location.pathname}#/threads/${encodeURIComponent(id)}`,
     );
-  $("workspace").classList.remove("sidebar-open");
-  $("sidebar-toggle").setAttribute("aria-expanded", "false");
+  setSidebarOpen(false);
+  if (!wideWorkspace.matches) setInspectorOpen(false);
   state.pendingRequest = null;
   $("message-input").value = "";
+  resizeComposer();
   composerNote();
   renderWorkspace();
   renderTranscript();
@@ -982,7 +977,8 @@ async function openThread(id, updateHash = true) {
   } catch (error) {
     toast(errorMessage(error), true);
   }
-  $("message-input").focus();
+  if (state.currentThreadId === id && !$("main-content").inert)
+    $("thread-title").focus({ preventScroll: true });
 }
 function threadFromHash() {
   return location.hash.match(/^#\/threads\/([A-Za-z0-9_-]+)$/)?.[1] || null;
@@ -1165,7 +1161,7 @@ function renderHeader() {
     state.announcedStatus = announcement;
   }
   $("cancel-run-button").hidden = !thread || !activeRun(thread.id);
-  $("composer-mower").textContent = mower ? `✳ ${mower.name}` : "Mower";
+  $("composer-mower").textContent = mower?.name || "";
   $("message-input").placeholder = mower
     ? `Message ${mower.name}…`
     : "Give your mower something to work on…";
@@ -1206,49 +1202,44 @@ function renderHeader() {
 function renderReadiness() {
   const readiness = state.server.readiness;
   const banner = $("readiness-banner");
+  const key = JSON.stringify([readiness.runtime, readiness.mode, readiness.message]);
+  if (banner.dataset.readiness === key) return;
+  banner.dataset.readiness = key;
   banner.replaceChildren();
   banner.hidden = readiness.runtime && readiness.mode === "isolated";
   if (banner.hidden) return;
-  const text = element("div");
-  text.append(
-    element(
-      "strong",
-      "",
-      readiness.runtime
-        ? "Trusted local mode. "
-        : "Finish setting up your runtime. ",
-    ),
-    document.createTextNode(
-      readiness.message ||
-        (readiness.runtime
-          ? "Work runs with your local user’s access. Configure OpenShell for isolated execution."
-          : "The server is connected, but no runtime is ready to accept work."),
-    ),
-  );
-  banner.append(element("span", "", readiness.runtime ? "◌" : "i"), text);
+  if (readiness.runtime) {
+    banner.textContent = "Trusted local · Tools can access your host";
+  } else {
+    banner.append(
+      element("strong", "", "Runtime setup needed"),
+      element(
+        "p",
+        "",
+        readiness.message ||
+          "The server is connected, but no runtime is ready to accept work.",
+      ),
+    );
+  }
 }
 function renderApprovalsStrip() {
-  const pending = pendingApprovals(state.currentThreadId);
+  const count = currentThread() ? pendingApprovals(state.currentThreadId).length : 0;
   const strip = $("approval-strip");
-  strip.replaceChildren();
-  strip.hidden = !currentThread() || !pending.length;
-  if (strip.hidden) return;
-  const p = element("p");
-  p.append(
-    element(
-      "strong",
-      "",
-      `${pending.length === 1 ? "A permission request needs you" : `${pending.length} permission requests need you`}`,
-    ),
-    document.createTextNode(
-      "Review the exact action before allowing it. Other work can continue.",
-    ),
-  );
-  strip.append(
-    p,
+  strip.hidden = !count;
+  if (!count) {
+    strip.replaceChildren();
+    return;
+  }
+  const label = `${count} permission request${count === 1 ? "" : "s"}`;
+  if (strip.firstElementChild?.textContent === label) return;
+  strip.replaceChildren(
+    element("p", "", label),
     button("Review request ↗", "button", () => {
       selectInspector("permissions");
       openInspector();
+      const content = $("inspector-content");
+      content.scrollTop = 0;
+      content.focus({ preventScroll: true });
     }),
   );
 }
@@ -1417,8 +1408,14 @@ function richText(text) {
 }
 function renderTranscript() {
   const viewport = $("messages");
-  const previousHeight = viewport.scrollHeight;
   const previousTop = viewport.scrollTop;
+  const viewportTop = viewport.getBoundingClientRect().top;
+  const anchor = state.follow
+    ? null
+    : [...viewport.children].find(
+        (node) => node.dataset.event && node.getBoundingClientRect().bottom > viewportTop,
+      );
+  const anchorOffset = anchor && anchor.getBoundingClientRect().top - viewportTop;
   const openTools = new Set(
     [...viewport.querySelectorAll("details[open][data-event]")].map(
       (d) => d.dataset.event,
@@ -1556,13 +1553,16 @@ function renderTranscript() {
     indicator.append(typing);
     viewport.append(indicator);
   }
-  if (state.follow) viewport.scrollTop = viewport.scrollHeight;
-  else
-    viewport.scrollTop = Math.max(
-      0,
-      previousTop + Math.min(0, viewport.scrollHeight - previousHeight),
-    );
   $("jump-latest").hidden = state.follow && !history?.viewingPast;
+  if (state.follow) viewport.scrollTop = viewport.scrollHeight;
+  else {
+    const restoredAnchor = anchor && viewport.querySelector(
+      `.message[data-event="${CSS.escape(anchor.dataset.event)}"]`,
+    );
+    viewport.scrollTop = restoredAnchor
+      ? viewport.scrollTop + restoredAnchor.getBoundingClientRect().top - viewportTop - anchorOffset
+      : previousTop;
+  }
   renderUsage();
 }
 function renderAdviceContent(content, group, openTools) {
@@ -1690,6 +1690,7 @@ function card(title, status, text) {
   return node;
 }
 function selectInspector(tab) {
+  const changed = state.inspectorTab !== tab;
   state.inspectorTab = tab;
   $("inspector-content").setAttribute("aria-labelledby", `details-tab-${tab}`);
   document.querySelectorAll("[data-tab]").forEach((b) => {
@@ -1698,13 +1699,41 @@ function selectInspector(tab) {
     b.tabIndex = selected ? 0 : -1;
   });
   renderInspector();
+  if (changed) $("inspector-content").scrollTop = 0;
 }
 function openInspector() {
-  $("workspace").classList.remove("inspector-hidden");
-  $("inspector-toggle").setAttribute("aria-expanded", "true");
+  setSidebarOpen(false);
+  if (wideWorkspace.matches) desktopInspectorOpen = true;
+  setInspectorOpen(true);
+  if (!wideWorkspace.matches)
+    document.querySelector('.inspector-tabs [aria-selected="true"]')?.focus();
 }
+let permissionsSnapshot = "";
+
 function renderInspector() {
   const content = $("inspector-content");
+  const pending = pendingApprovals();
+  $("approval-count").textContent = pending.length;
+  $("approval-count").hidden = !pending.length;
+  if (state.inspectorTab === "permissions") {
+    const thread = currentThread();
+    const snapshot = JSON.stringify([
+      state.generation,
+      thread?.id,
+      thread?.profileId,
+      thread?.profileVersion,
+      pending,
+      state.server.profiles,
+      state.server.mowers.map(({ id, name }) => [id, name]),
+      state.server.threads.map(({ id, title }) => [id, title]),
+      state.server.tasks.map(({ id, title }) => [id, title]),
+    ]);
+    // Keep focus and scroll position while polling an unchanged review.
+    if (snapshot === permissionsSnapshot) return;
+    permissionsSnapshot = snapshot;
+  } else {
+    permissionsSnapshot = "";
+  }
   const previousScroll = content.scrollTop;
   const openDetails = new Set(
     [...content.querySelectorAll("details[open][data-id]")].map(
@@ -1712,9 +1741,6 @@ function renderInspector() {
     ),
   );
   content.replaceChildren();
-  const pending = pendingApprovals();
-  $("approval-count").textContent = pending.length;
-  $("approval-count").hidden = !pending.length;
   const renderers = {
     overview: renderOverview,
     tasks: renderTasks,
@@ -1785,28 +1811,22 @@ function renderOverview(content) {
     content.append(detail);
   }
   const workspace = section(thread ? "This thread" : "Workspace at a glance");
-  const stats = element("div", "mini-stat-grid");
-  for (const [value, label] of [
+  workspace.append(detailsGrid([
     [
+      "Active & queued runs",
       thread
         ? runsForThread(thread.id).filter((r) => ACTIVE_RUNS.has(r.status))
             .length
         : state.server.runs.filter((r) => ACTIVE_RUNS.has(r.status)).length,
-      "Active & queued runs",
     ],
     [
+      "Delegated tasks",
       thread
         ? state.server.tasks.filter((t) => t.parentThreadId === thread.id)
             .length
         : state.server.tasks.length,
-      "Delegated tasks",
     ],
-  ]) {
-    const stat = element("div", "mini-stat");
-    stat.append(element("strong", "", value), element("span", "", label));
-    stats.append(stat);
-  }
-  workspace.append(stats);
+  ]));
   if (thread) {
     workspace.append(
       detailsGrid([
@@ -1984,10 +2004,84 @@ function renderTasks(content) {
   );
   content.append(guidance);
 }
+const approvalOperationLabels = {
+  "workspace.read": "Read workspace files",
+  "workspace.write": "Write a file",
+  "process.execute": "Run a command",
+  "network.connect": "Connect to an endpoint",
+  "mcp.invoke": "Call a connector tool",
+  "connector.send": "Send a message",
+  "mower.spawn": "Delegate a task",
+  "task.handoff": "Hand off a task",
+};
+
+function approvalPreview(approval) {
+  const { operation, resource } = approval.action;
+  const detail = approval.detail;
+  if (!detail) return { target: resource };
+  let args;
+  try {
+    args = JSON.parse(detail);
+  } catch {
+    // Existing requests can contain a plain-text preview.
+    return { target: resource, label: "Action preview", text: detail };
+  }
+  if (!args || typeof args !== "object")
+    return { target: resource, label: "Action preview", text: String(args) };
+  const str = (value) => (typeof value === "string" ? value : undefined);
+  switch (operation) {
+    case "workspace.read":
+      return { target: str(args.path) || resource };
+    case "workspace.write":
+      return {
+        target: str(args.path) || resource,
+        label: "Proposed file contents",
+        text: str(args.content),
+      };
+    case "process.execute":
+      return {
+        target: resource,
+        label: "Command",
+        text: str(args.command?.command) ?? str(args.command),
+        scope: "This command can read and modify the entire thread workspace.",
+      };
+    case "network.connect":
+      return { target: str(args.endpoint) || resource };
+    case "mcp.invoke":
+      return { target: str(args.tool) || resource };
+    case "connector.send":
+      return {
+        target: state.server.threads.find((thread) => thread.id === args.threadId)?.title ||
+          str(args.threadId) || resource,
+        label: "Message",
+        text: str(args.text),
+      };
+    case "mower.spawn":
+      return {
+        target: mowerById(args.mowerId)?.name || str(args.mowerId) ||
+          str(args.name) || "New mower",
+        label: "Task goal",
+        text: str(args.goal),
+      };
+    case "task.handoff":
+      return {
+        target: mowerById(args.mowerId)?.name || str(args.mowerId) || resource,
+        label: "Task",
+        text: state.server.tasks.find((task) => task.id === args.taskId)?.title || str(args.taskId),
+      };
+    default:
+      return { target: resource };
+  }
+}
+
 function renderPermissions(content) {
-  const pending = pendingApprovals();
+  const pending = pendingApprovals().sort(
+    (a, b) =>
+      Number(b.action.threadId === state.currentThreadId) -
+      Number(a.action.threadId === state.currentThreadId),
+  );
   const requests = section(
-    `Needs your review${pending.length ? ` · ${pending.length}` : ""}`,
+    `Permission requests${pending.length ? ` · ${pending.length}` : ""}`,
   );
   if (!pending.length)
     requests.append(
@@ -1999,33 +2093,34 @@ function renderPermissions(content) {
     );
   for (const approval of pending) {
     const mower = mowerById(approval.action.mowerId);
+    const thread = state.server.threads.find(
+      (t) => t.id === approval.action.threadId,
+    );
+    const profile = profileById(approval.profileId, approval.profileVersion);
+    const preview = approvalPreview(approval);
     const node = card(
-      approval.action.operation,
-      "pending",
-      `${mower?.name || "Mower"} is asking to use this exact resource.`,
+      approvalOperationLabels[approval.action.operation] || approval.action.operation,
+      null,
     );
-    node.append(element("pre", "", approval.action.resource));
-    if (approval.detail)
-      node.append(element("pre", "approval-detail", approval.detail));
+    node.classList.add("approval-card");
     node.append(
-      detailsGrid([
-        [
-          "Thread",
-          state.server.threads.find((t) => t.id === approval.action.threadId)
-            ?.title || shortId(approval.action.threadId),
-        ],
-        [
-          "Profile",
-          `${profileById(approval.profileId, approval.profileVersion)?.name || "Profile"} · v${approval.profileVersion}`,
-        ],
-        ["Expires", formatTime(approval.expiresAt)],
-        [
-          "Arguments digest",
-          element("span", "mono", approval.action.argumentsDigest),
-        ],
-      ]),
+      element("p", "approval-target mono", preview.target),
+      element(
+        "p",
+        "approval-context",
+        `${mower?.name || "Mower"} · ${thread?.title || shortId(approval.action.threadId)}`,
+      ),
     );
-    const actions = element("div", "card-actions");
+    if (preview.scope) node.append(element("p", "approval-scope", preview.scope));
+    if (preview.text !== undefined) {
+      const proposed = element("div", "approval-preview");
+      const body = element("pre", "", preview.text || "(Empty)");
+      body.tabIndex = 0;
+      body.setAttribute("aria-label", preview.label);
+      proposed.append(element("p", "", preview.label), body);
+      node.append(proposed);
+    }
+    const actions = element("div", "card-actions approval-decisions");
     const allow = button(
       "Allow once",
       "button button-primary",
@@ -2038,7 +2133,7 @@ function renderPermissions(content) {
       node.append(
         note(
           "Action context unavailable",
-          "This server did not provide an inspectable command or tool argument preview. You can deny the request; an approval requires the exact action details.",
+          "Action details are unavailable. You can deny this request or refresh for an inspectable preview.",
           true,
         ),
       );
@@ -2050,17 +2145,43 @@ function renderPermissions(content) {
         "button button-quiet",
         () => void decideApproval(approval, "deny"),
       ),
+      button(
+        "Discuss with Gatekeeper",
+        "button button-quiet approval-discuss",
+        () => showAdviceForm(approval),
+      ),
+    );
+    const otherActions = element("div", "card-actions approval-other-actions");
+    otherActions.append(
       button("Set guardrails", "button button-quiet", () =>
         showGuardrailForm(approval),
-      ),
-      button("Discuss with Gatekeeper", "button button-quiet", () =>
-        showAdviceForm(approval),
       ),
       button("Give direction", "button button-quiet", () =>
         showDenialDirectionForm(approval),
       ),
     );
-    node.append(actions);
+    const technical = element("details", "approval-technical");
+    technical.dataset.id = `approval:${approval.id}`;
+    technical.append(
+      element("summary", "", "Technical details"),
+      detailsGrid([
+        ["Operation", approval.action.operation],
+        ["Resource", element("span", "mono", approval.action.resource)],
+        ["Profile", `${profile?.name || "Profile"} · v${approval.profileVersion}`],
+        ["Expires", formatTime(approval.expiresAt)],
+        ["Arguments digest", element("span", "mono", approval.action.argumentsDigest)],
+      ]),
+    );
+    if (approval.detail) {
+      const argumentsPreview = element("pre", "approval-detail", approval.detail);
+      argumentsPreview.tabIndex = 0;
+      argumentsPreview.setAttribute("aria-label", "Arguments preview");
+      technical.append(
+        element("p", "", "Arguments preview"),
+        argumentsPreview,
+      );
+    }
+    node.append(actions, otherActions, technical);
     requests.append(node);
   }
   content.append(requests);
@@ -2381,14 +2502,16 @@ function showModal({
   $("modal-submit").textContent = submit;
   $("modal-submit").disabled = false;
   $("modal-error").textContent = "";
-  $("modal-fields").replaceChildren(
+  const fields = $("modal-fields");
+  fields.replaceChildren(
     ...(Array.isArray(content) ? content : [content]),
   );
   $("modal-actions")?.removeAttribute("hidden");
   $("modal-submit").hidden = !onSubmit;
   $("modal-cancel").textContent = onSubmit ? "Cancel" : "Done";
   if (!$("modal").open) $("modal").showModal();
-  $("modal-fields").querySelector("input,textarea,select,button")?.focus();
+  fields.scrollTop = 0;
+  (fields.querySelector("input, textarea, select") || $("modal-title")).focus();
 }
 function closeModal() {
   if ($("modal").open) $("modal").close();
@@ -4319,7 +4442,7 @@ async function decideApproval(approval, decision) {
   }
 }
 function composerNote(
-  text = "Enter to send · Shift + Enter for a new line",
+  text = "",
   error = false,
 ) {
   $("composer-note").textContent = text;
@@ -4391,8 +4514,9 @@ async function cancelRun() {
 }
 function resizeComposer() {
   const textarea = $("message-input");
-  textarea.style.height = "auto";
-  textarea.style.height = `${Math.min(textarea.scrollHeight, 180)}px`;
+  textarea.style.blockSize = "auto";
+  textarea.style.blockSize = `${textarea.scrollHeight}px`;
+  keepLatestInView();
 }
 
 $("login-form").addEventListener("submit", (event) => {
@@ -4456,19 +4580,84 @@ $("workspace-info").addEventListener("click", () =>
     onSubmit: null,
   }),
 );
-$("sidebar-toggle").addEventListener("click", () => {
-  const open = $("workspace").classList.toggle("sidebar-open");
+const wideWorkspace = matchMedia("(min-width: 1200px)");
+const compactWorkspace = matchMedia("(max-width: 799px)");
+let desktopInspectorOpen = true;
+
+function activeDrawer() {
+  const workspace = $("workspace");
+  if (workspace.classList.contains("sidebar-open")) return $("sidebar");
+  if (!wideWorkspace.matches && !workspace.classList.contains("inspector-hidden"))
+    return $("inspector");
+  return null;
+}
+function syncDrawer() {
+  const drawer = activeDrawer();
+  $("pane-backdrop").hidden = !drawer;
+  $("main-content").inert = !!drawer;
+  for (const pane of [$("sidebar"), $("inspector")]) {
+    pane.inert = !!drawer && pane !== drawer;
+    if (pane === drawer) {
+      pane.setAttribute("role", "dialog");
+      pane.setAttribute("aria-modal", "true");
+    } else {
+      pane.removeAttribute("role");
+      pane.removeAttribute("aria-modal");
+    }
+  }
+}
+function setSidebarOpen(open) {
+  $("workspace").classList.toggle("sidebar-open", open);
   $("sidebar-toggle").setAttribute("aria-expanded", String(open));
+  syncDrawer();
+}
+function setInspectorOpen(open) {
+  $("workspace").classList.toggle("inspector-hidden", !open);
+  $("inspector-toggle").setAttribute("aria-expanded", String(open));
+  syncDrawer();
+}
+function closeDrawer() {
+  const drawer = activeDrawer();
+  if (drawer === $("sidebar")) {
+    setSidebarOpen(false);
+    $("sidebar-toggle").focus();
+  } else if (drawer === $("inspector")) {
+    setInspectorOpen(false);
+    $("inspector-toggle").focus();
+  }
+}
+function applyWorkspaceLayout() {
+  const focused = document.activeElement;
+  $("workspace").dataset.layout = wideWorkspace.matches
+    ? "wide"
+    : compactWorkspace.matches
+      ? "compact"
+      : "medium";
+  if (!compactWorkspace.matches) setSidebarOpen(false);
+  if (focused === $("sidebar-close") || focused === $("sidebar-toggle"))
+    $("thread-title").focus();
+}
+wideWorkspace.addEventListener("change", () => {
+  const inspectorHadFocus = $("inspector").contains(document.activeElement);
+  setInspectorOpen(wideWorkspace.matches && desktopInspectorOpen);
+  applyWorkspaceLayout();
+  if (inspectorHadFocus) $("inspector-toggle").focus();
+});
+compactWorkspace.addEventListener("change", applyWorkspaceLayout);
+$("sidebar-toggle").addEventListener("click", () => {
+  setInspectorOpen(false);
+  setSidebarOpen(true);
+  $("sidebar-close").focus();
 });
 $("inspector-toggle").addEventListener("click", () => {
-  const hidden = $("workspace").classList.toggle("inspector-hidden");
-  $("inspector-toggle").setAttribute("aria-expanded", String(!hidden));
+  const open = $("workspace").classList.contains("inspector-hidden");
+  if (wideWorkspace.matches) desktopInspectorOpen = open;
+  if (open) openInspector();
+  else setInspectorOpen(false);
 });
-$("inspector-close").addEventListener("click", () => {
-  $("workspace").classList.add("inspector-hidden");
-  $("inspector-toggle").setAttribute("aria-expanded", "false");
-  $("inspector-toggle").focus();
-});
+$("sidebar-close").addEventListener("click", closeDrawer);
+$("inspector-close").addEventListener("click", closeDrawer);
+$("pane-backdrop").addEventListener("click", closeDrawer);
 $("composer").addEventListener("submit", (event) => {
   event.preventDefault();
   void sendMessage();
@@ -4486,10 +4675,35 @@ $("message-input").addEventListener("keydown", (event) => {
 $("cancel-run-button").addEventListener("click", () => void cancelRun());
 $("messages").addEventListener("scroll", () => {
   const view = $("messages");
-  state.follow = view.scrollHeight - view.scrollTop - view.clientHeight < 100;
+  state.follow = view.scrollHeight - view.scrollTop - view.clientHeight < 56;
   $("jump-latest").hidden =
     state.follow && !state.history.get(state.currentThreadId)?.viewingPast;
 });
+let composerWidth;
+function keepLatestInView() {
+  const messages = $("messages");
+  if (state.follow && !state.history.get(state.currentThreadId)?.viewingPast)
+    messages.scrollTop = messages.scrollHeight;
+}
+new ResizeObserver(() => {
+  const width = $("message-input").clientWidth;
+  if (width !== composerWidth) {
+    composerWidth = width;
+    resizeComposer();
+  }
+  keepLatestInView();
+}).observe($("messages"));
+function resizeForKeyboard() {
+  const viewport = window.visualViewport;
+  const inset = viewport?.scale === 1
+    ? document.documentElement.clientHeight - viewport.height
+    : 0;
+  const workspace = $("workspace");
+  if (inset > 100)
+    workspace.style.setProperty("--workspace-height", `${Math.round(viewport.height)}px`);
+  else workspace.style.removeProperty("--workspace-height");
+}
+window.visualViewport?.addEventListener("resize", resizeForKeyboard);
 $("jump-latest").addEventListener("click", () => void jumpToLatest());
 for (const tab of document.querySelectorAll("[data-tab]")) {
   tab.id = `details-tab-${tab.dataset.tab}`;
@@ -4556,14 +4770,35 @@ window.addEventListener("hashchange", () => {
     void openThread(id, false);
 });
 window.addEventListener("keydown", (event) => {
+  if ($("modal").open) return;
+  const drawer = activeDrawer();
+  if (event.key === "Escape" && drawer) {
+    closeDrawer();
+    return;
+  }
+  if (event.key === "Tab" && drawer) {
+    const stops = [...drawer.querySelectorAll(
+      "a[href], button, input, select, textarea, summary, [tabindex]",
+    )].filter((node) =>
+      !node.disabled && node.tabIndex >= 0 && node.getClientRects().length,
+    );
+    const first = stops[0];
+    const last = stops.at(-1);
+    if (!stops.includes(document.activeElement) ||
+        (event.shiftKey ? document.activeElement === first : document.activeElement === last)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first)?.focus();
+    }
+  }
   if (
     (event.metaKey || event.ctrlKey) &&
     event.key.toLowerCase() === "k" &&
     state.key
   ) {
     event.preventDefault();
-    if (innerWidth <= 680) $("workspace").classList.add("sidebar-open");
-    $("thread-search").focus();
+    if (drawer === $("inspector")) closeDrawer();
+    if (compactWorkspace.matches) setSidebarOpen(true);
+    $("thread-search").focus({ preventScroll: true });
   }
   if (
     (event.metaKey || event.ctrlKey) &&
@@ -4574,41 +4809,17 @@ window.addEventListener("keydown", (event) => {
     event.preventDefault();
     showThreadForm();
   }
-  if (event.key === "Escape") {
-    $("workspace").classList.remove("sidebar-open");
-    if (innerWidth <= 990) {
-      $("workspace").classList.add("inspector-hidden");
-      $("inspector-toggle").setAttribute("aria-expanded", "false");
-    }
-  }
-});
-document.addEventListener("pointerdown", (event) => {
-  if (
-    innerWidth <= 680 &&
-    $("workspace").classList.contains("sidebar-open") &&
-    !$("sidebar").contains(event.target) &&
-    !$("sidebar-toggle").contains(event.target)
-  )
-    $("workspace").classList.remove("sidebar-open");
 });
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && state.key) schedulePoll(100);
-});
-matchMedia("(max-width: 990px)").addEventListener("change", (event) => {
-  if (event.matches) {
-    $("workspace").classList.add("inspector-hidden");
-    $("inspector-toggle").setAttribute("aria-expanded", "false");
-  }
 });
 window.addEventListener("beforeunload", () => {
   clearTimeout(state.pollTimer);
   state.generation++;
 });
 $("login-origin").textContent = location.origin;
-if (innerWidth <= 990) {
-  $("workspace").classList.add("inspector-hidden");
-  $("inspector-toggle").setAttribute("aria-expanded", "false");
-}
+setInspectorOpen(wideWorkspace.matches);
+applyWorkspaceLayout();
 selectInspector("overview");
 const key = loadKey();
 if (key) void connect(key);
