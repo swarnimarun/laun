@@ -8,7 +8,8 @@ your environment.
 
 | I want to… | Read |
 | --- | --- |
-| Try Laun locally | [Quickstart](../README.md), then [local development](local-development.md) for NixOS/WSL, credentials and state paths |
+| Try Laun locally | [Local demo](../README.md#run-the-app-locally), then [local development](local-development.md) for NixOS/WSL, credentials and state paths |
+| Install the released CLI and send a task | [CLI install](../README.md#install-the-cli) and [first task](../README.md#send-your-first-task) |
 | Understand mowers, threads, yards and permissions | [How it works](how-it-works.md), then [permission boundaries](permissions-boundaries.md) |
 | See the interface and reproduce the demonstration | [Screenshot tour and demos](demos.md) |
 | Control the same work from a terminal | [Durable control CLI](cli.md) |

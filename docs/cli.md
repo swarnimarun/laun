@@ -1,9 +1,9 @@
 # Durable control CLI
 
-Run from the checkout with `bun run laun <command>`, or use a packaged `laun`
-binary built with `bun run cli:build`. Portable packaging is locally qualified;
-no release was published during that qualification. The v2 commands use the same
-configured controller, owner identity and records as `/app`. `laun agent ...`
+Use the [published CLI installation instructions](../README.md#install-the-cli)
+for a standalone binary, or run from the checkout with `bun run laun <command>`.
+The v2 commands use the same configured controller, owner identity and records
+as `/app`. `laun agent ...`
 and the old top-level `run`, `ls`, `stop`, `approve` aliases still use the v1
 session API. Use `laun thread ...` and `laun approval ...` for durable v2 work.
 

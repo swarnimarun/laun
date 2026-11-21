@@ -5,6 +5,9 @@ conversations in server-owned **threads**, delegate through a **groundskeeper**,
 and run workers in local or VPS **yards**. The app brings tasks, permissions,
 MCP tools, and execution hosts into one interface.
 
+[Try the local demo](#run-the-app-locally) · [Install the CLI](#install-the-cli) ·
+[Deploy a controller](#deploy-a-controller) · [Send your first task](#send-your-first-task)
+
 The core app is implemented and qualified for local testing on NixOS/WSL.
 [How it works](docs/how-it-works.md) explains the architecture and permission
 boundaries. [Demos and screenshots](docs/demos.md) walk through conversations,
@@ -19,22 +22,47 @@ separately in [core status](docs/core-status.md).*
 Use the [documentation index](docs/README.md) for operator guides, API/CLI
 commands, recovery procedures and the independently reviewed design.
 
+## Install the CLI
+
+Download the archive for your OS and CPU from
+[v0.2.0-rc.1](https://github.com/swarnimarun/laun/releases/tag/v0.2.0-rc.1).
+The prerelease includes Linux and macOS builds for AMD64 and ARM64, and a
+Windows AMD64 build. The binary runs without a separate Bun installation and
+connects to a running controller.
+
+On Linux AMD64, run these commands in a download directory:
+
+```sh
+base=https://github.com/swarnimarun/laun/releases/download/v0.2.0-rc.1
+archive=laun_0.2.0-rc.1_linux_amd64.tar.gz
+curl -fLO "$base/$archive" &&
+  curl -fLO "$base/checksums.txt" &&
+  awk -v name="$archive" '$2 == name' checksums.txt | sha256sum -c - &&
+  tar -xzf "$archive" &&
+  mkdir -p "$HOME/.local/bin" &&
+  install -m 755 laun "$HOME/.local/bin/laun" &&
+  "$HOME/.local/bin/laun" --version
+```
+
+Add `~/.local/bin` to your `PATH` to use `laun` directly. For macOS, choose the
+matching `darwin` archive and verify it with `shasum -a 256`. On Windows, verify
+the ZIP with PowerShell's `Get-FileHash -Algorithm SHA256`, then extract
+`laun.exe` to a directory on your `PATH`. Compare the hash against the row for
+your archive in `checksums.txt` before extracting.
+
 ## Run the app locally
 
-Use Bun >= 1.2 from a Linux checkout. On NixOS/WSL, the checked-in development
-shell supplies Bun, Git, JJ, Bash, and other tools:
+For a local demo, use Git and Bun 1.4.4 on Linux or WSL. In a new terminal:
 
 ```sh
-nix-shell
-bun install --frozen-lockfile
+git clone --branch v0.2.0-rc.1 --single-branch https://github.com/swarnimarun/laun.git
+cd laun
+bun install --frozen-lockfile --ignore-scripts
 bun run build
-```
-
-For an explicit demonstration without provider credentials:
-
-```sh
 bun run dev:app --demo
 ```
+
+On NixOS, you can run `nix-shell` after cloning to get the development tools.
 
 Open the printed `/app` URL, normally `http://127.0.0.1:8080/app`, and enter the
 agent key printed by the helper. The setup wizard creates your primary
@@ -68,6 +96,58 @@ GATEWAY_PORT=18880 bun run dev:app --demo
 Chromium, Docker/OpenShell prerequisites, and state locations. The v2 app embeds
 the Pi Durable adapter; it does not need a separate legacy executor or a global
 Pi CLI for local operation.
+
+## Deploy a controller
+
+Provision Docker Compose, an OpenShell gateway with mTLS, and a private Pi
+provider credentials directory on a Debian or Ubuntu VPS. Prepare the private
+controller environment file with the host paths and release image references.
+Follow the prerequisites and configuration example in the
+[SSH installation guide](deploy/remote-setup.md).
+
+```sh
+laun setup ssh -i ~/.ssh/laun_vps root@vps.example \
+  --remote-dir /opt/laun/controller --env-file ~/.config/laun/controller.env
+ssh -i ~/.ssh/laun_vps -N -L 18080:127.0.0.1:8080 root@vps.example
+```
+
+Leave the tunnel running and open [http://127.0.0.1:18080/app](http://127.0.0.1:18080/app)
+with the human key from setup. Run `laun doctor` against the tunneled controller
+and qualify execution on that VPS before leaving it unattended. For public
+HTTPS and Telegram setup, use the [TLS guide](deploy/tls.md) and
+[Telegram setup](deploy/remote-setup.md#telegram).
+
+## Send your first task
+
+1. Sign in to `/app` with your human key. Choose **Set up your Groundskeeper**.
+2. Pick a model and an online yard, review starter permissions, then open the
+   primary thread. In demo mode, choose `faux/faux-1` and the local yard.
+3. Send a task such as “Draft a short plan for reviewing a release.” Use
+   **Permissions** to inspect any requested effects before deciding.
+
+From Bash, you can use the same account in the CLI. Paste the key at the
+hidden prompt. Use port `18080` for the tunnel above:
+
+```bash
+(
+  export LAUN_HOST=127.0.0.1 LAUN_PORT=8080 LAUN_SCHEME=http
+  read -r -s -p 'Laun human key: ' LAUN_KEY
+  printf '\n'
+  export LAUN_KEY
+  laun whoami --json
+  laun doctor
+  laun thread ls --json
+  read -r -p 'Thread ID (Enter to skip): ' THREAD_ID
+  if [ -n "$THREAD_ID" ]; then
+    laun thread say "$THREAD_ID" 'Summarize the next step.' --json &&
+      laun thread watch "$THREAD_ID" --timeout 5m --json
+  fi
+)
+```
+
+Use `bun run laun` in the checkout if you're using the source CLI. See the
+[CLI guide](docs/cli.md#connect-and-identify) for saved targets and
+the [demo walkthrough](docs/demos.md) for approvals and delegation.
 
 ## What the current app does
 

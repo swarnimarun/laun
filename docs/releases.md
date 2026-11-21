@@ -4,6 +4,10 @@ The tagged artifact pipeline exists. V2 release qualification is tracked in
 [core status](core-status.md); a published image or liveness check alone does
 not establish production readiness.
 
+For the current prerelease, see [v0.2.0-rc.1](https://github.com/swarnimarun/laun/releases/tag/v0.2.0-rc.1)
+and the [CLI install instructions](../README.md#install-the-cli). Both GHCR
+images use the version tag `0.2.0-rc.1`.
+
 Pushing a `vX.Y.Z` tag, or explicitly rerunning an existing tag through
 `workflow_dispatch`, starts the release pipeline. It publishes, in one run:
 

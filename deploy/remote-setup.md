@@ -37,19 +37,20 @@ Prepare a private local dotenv file from deploy/.env.example. It contains instal
     OPENSHELL_GATEWAY_NAME=openshell
     OPENSHELL_SDK_GATEWAY=https://host.openshell.internal:17670
     OPENSHELL_GATEWAY_CONFIG_ID=https___host.openshell.internal_17670
-    OPENSHELL_SANDBOX_IMAGE=registry.example/laun-pi-agent@sha256:REVIEWED_DIGEST
-    LAUN_SERVICE_IMAGE=registry.example/laun@sha256:REVIEWED_DIGEST
+    LAUN_TAG=0.2.0-rc.1
+    OPENSHELL_SANDBOX_IMAGE=ghcr.io/swarnimarun/laun-pi-agent@sha256:d509ecd85ac171e774e99ad50c0305f39f4920d50a243fb9daacf80327798
+    LAUN_SERVICE_IMAGE=ghcr.io/swarnimarun/laun@sha256:6500bdf8bd770a7f411554d3bd4d33546655e31137f78cc46e5a4a15be4e6e74
     LAUN_LEGACY_API=false
     LAUN_DEMO=false
     MODEL=provider/model-id
 
-Use real matching image references. An unpublished development version is not a fetchable release. Source setup can build the current checkout; portable setup pulls a published artifact. See [CLI packaging](../docs/cli.md#portable-cli-and-controller-templates).
+The image digests above pin both images from [v0.2.0-rc.1](https://github.com/swarnimarun/laun/releases/tag/v0.2.0-rc.1). Update both references together when changing releases. Source setup can build the checkout when no service image override is set. See [CLI packaging](../docs/cli.md#portable-cli-and-controller-templates).
 
-From a source checkout:
+With the [installed release CLI](../README.md#install-the-cli):
 
-    bun run laun setup ssh -i /private/ssh_identity root@vps.example --remote-dir /opt/laun/controller --env-file /private/laun-controller.env
+    laun setup ssh -i /private/ssh_identity root@vps.example --remote-dir /opt/laun/controller --env-file /private/laun-controller.env
 
-An installed portable binary uses the same setup command without the Bun prefix. Supply --no-start to prepare files without claiming runtime readiness. An explicit published repository/revision selects a different source installation.
+For a controller built from your checkout, run the same command with `bun run laun` in place of `laun`. Supply `--no-start` to prepare the installation and leave the stack stopped. An explicit published repository/revision selects a different source installation.
 
 Source setup carries the current JJ checkout, including unpublished changes, in a curated checksummed archive. It includes the exact Docker ignore boundary and a fixed list of public build scripts. A trusted receiver verifies the complete manifest before publishing without clobbering existing files; changed or unrecognized source needs an explicit upgrade. Identical interrupted transfers can resume through private source markers.
 
