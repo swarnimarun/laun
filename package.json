@@ -1,6 +1,6 @@
 {
   "name": "laun",
-  "version": "0.1.0",
+  "version": "0.2.0-rc.1",
   "private": true,
   "description": "Self-hosted remote agent executor: Pi-first, OpenShell policy sandbox, Telegram bridge. Single VPS, 24/7.",
   "type": "module",
