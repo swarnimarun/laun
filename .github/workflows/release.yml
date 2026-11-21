@@ -34,6 +34,7 @@ jobs:
       minor: ${{ steps.meta.outputs.minor }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
       image_prefix: ${{ steps.meta.outputs.image_prefix }}
+      revision: ${{ steps.meta.outputs.revision }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -65,6 +66,7 @@ jobs:
             printf 'minor=%s\n' "${stable%.*}"
             printf 'prerelease=%s\n' "$prerelease"
             printf 'image_prefix=%s\n' "$REGISTRY/${GITHUB_REPOSITORY_OWNER,,}"
+            printf 'revision=%s\n' "$(git rev-parse HEAD)"
           } >>"$GITHUB_OUTPUT"
       - uses: oven-sh/setup-bun@v2
         with:
@@ -120,7 +122,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ needs.verify.outputs.revision }}
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -133,6 +135,7 @@ jobs:
           images: ${{ needs.verify.outputs.image_prefix }}/${{ matrix.image.name }}
           flavor: latest=false
           tags: type=raw,value=${{ needs.verify.outputs.version }}-${{ matrix.arch }}
+          labels: org.opencontainers.image.revision=${{ needs.verify.outputs.revision }}
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -190,7 +193,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ needs.verify.outputs.revision }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.4"
@@ -224,10 +227,11 @@ jobs:
           - { target: bun-windows-x64,  os: windows, arch: amd64, ext: .exe }
     env:
       LAUN_VERSION: ${{ needs.verify.outputs.version }}
+      LAUN_SOURCE_REVISION: ${{ needs.verify.outputs.revision }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ needs.verify.outputs.revision }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.4"
@@ -284,19 +288,27 @@ jobs:
           # No checkout in this job, so gh cannot infer the repo from a git remote.
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.verify.outputs.tag }}
+          REVISION: ${{ needs.verify.outputs.revision }}
           PRERELEASE: ${{ needs.verify.outputs.prerelease }}
         run: |
           set -euo pipefail
-          flags=(--title "laun $TAG" --generate-notes)
+          tag_revision="$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq .object.sha)"
+          tag_type="$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq .object.type)"
+          if [ "$tag_type" = "tag" ]; then
+            tag_revision="$(gh api "repos/$GH_REPO/git/tags/$tag_revision" --jq .object.sha)"
+          fi
+          test "$tag_revision" = "$REVISION"
+          flags=(--title "laun $TAG" --target "$REVISION" --verify-tag)
           if [ "$PRERELEASE" = "true" ]; then
             flags+=(--prerelease)
           else
             flags+=(--latest)
           fi
           if gh release view "$TAG" >/dev/null 2>&1; then
-            # Re-run: refresh assets and regenerate the changelog.
+            gh api --method POST "repos/$GH_REPO/releases/generate-notes" \
+              -f tag_name="$TAG" -f target_commitish="$REVISION" --jq .body > "$RUNNER_TEMP/release-notes.md"
             gh release upload "$TAG" artifacts/* --clobber
-            gh release edit "$TAG" "${flags[@]}"
+            gh release edit "$TAG" "${flags[@]}" --notes-file "$RUNNER_TEMP/release-notes.md"
           else
-            gh release create "$TAG" artifacts/* "${flags[@]}"
+            gh release create "$TAG" artifacts/* "${flags[@]}" --generate-notes
           fi
