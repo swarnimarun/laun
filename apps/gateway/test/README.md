@@ -68,9 +68,11 @@ need their own integration checks.
 
 ## Documentation demonstrations
 
-`bun run test:design` checks login, local fonts/artwork, workspace overflow and
-dialog bounds at 320, 390, 768, 1024 and 1440 pixels. It also captures the welcome
-screen. It uses the same disposable demo fixture and Chromium setup below.
+`bun run test:design` checks layout geometry and reachable controls in Chromium
+using the disposable demo fixture. It covers login, setup, populated
+conversations, the inspector and pending permission review at short phone,
+landscape, tablet and desktop sizes. It also checks both sides of the workspace
+breakpoints. Use screenshots for visual review.
 
 For a readable scripted story instead of regression-test markers:
 

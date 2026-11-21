@@ -9,7 +9,7 @@ import { DEMO_PROMPTS } from "../../../packages/runtime/test/demo-fixture.js";
 import { startDemoFixture } from "./demo-fixture.js";
 
 const root=resolve(import.meta.dir,"../../..");
-const output=resolve(root,"docs/design/frontend-layout-audit");
+const output=resolve(process.env.LAUN_LAYOUT_SHOTS || "/tmp/laun-layout-review");
 const measurements:unknown[]=[];
 await mkdir(output,{recursive:true});
 const fixture=await startDemoFixture();
@@ -49,7 +49,7 @@ const capture=async(name:string)=>{
   const cases:Record<string,number[][]>={
     'welcome.png':[[1440,900],[768,768],[390,667]],
     'setup.png':[[1440,900],[1024,768],[390,667],[320,568]],
-    'workspace-desktop.png':[[1440,900],[1024,768],[991,768],[990,768],[681,768],[680,768],[390,667],[320,568]],
+    'workspace-desktop.png':[[1440,900],[1200,768],[1199,768],[1024,768],[800,768],[799,768],[667,375],[390,667],[320,568]],
     'approval.png':[[1440,900],[1024,768],[390,667],[320,568]],
     'gatekeeper.png':[[1440,900],[390,667]],
     'workspace-mobile.png':[[390,667],[320,568]],
@@ -163,7 +163,8 @@ try {
   await capture("yards.png");
   await openThread(child.id,child.title);
   await page.setViewportSize({width:430,height:932});
-  await page.waitForFunction(()=>document.getElementById("workspace")?.classList.contains("inspector-hidden"));
+  await page.locator('#workspace[data-layout="compact"]').waitFor();
+  if(await page.locator("#inspector").isVisible())await page.locator("#inspector-close").click();
   assert.equal(await page.locator("#inspector-toggle").getAttribute("aria-expanded"),"false");
   await page.locator("#composer").waitFor({state:"visible"});
   await capture("workspace-mobile.png");

@@ -301,12 +301,21 @@ try {
       has: page.locator(".approval-detail").filter({ hasText: "approved.txt" }),
     });
     await approvedCard.waitFor({ state: "visible", timeout: 20_000 });
-    assert(
-      (await approvedCard.locator(".approval-detail").textContent())?.includes(
-        "approved.txt",
-      ),
-      "exact file action is visible before approval",
+    assert.equal(await approvedCard.locator(".approval-target").innerText(), "approved.txt");
+    assert.equal(
+      await approvedCard.locator(".approval-preview pre").innerText(),
+      "approved by browser",
     );
+    const exactArguments = approvedCard.locator(".approval-detail");
+    const technicalDetails = approvedCard.locator(".approval-technical summary");
+    assert.equal(await exactArguments.isVisible(), false, "technical details start collapsed");
+    await technicalDetails.click();
+    await exactArguments.waitFor({ state: "visible" });
+    assert(
+      (await exactArguments.textContent())?.includes("approved.txt"),
+      "the technical disclosure exposes the exact file action before approval",
+    );
+    await technicalDetails.click();
     await page.screenshot({
       path: `${screenshotDir}/approval-context.png`,
       fullPage: true,

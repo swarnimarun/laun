@@ -137,7 +137,8 @@ try {
   await capture("yards.png");
   await openThread(child.id,child.title);
   await page.setViewportSize({width:430,height:932});
-  await page.waitForFunction(()=>document.getElementById("workspace")?.classList.contains("inspector-hidden"));
+  await page.locator('#workspace[data-layout="compact"]').waitFor();
+  if(await page.locator("#inspector").isVisible())await page.locator("#inspector-close").click();
   assert.equal(await page.locator("#inspector-toggle").getAttribute("aria-expanded"),"false");
   await page.locator("#composer").waitFor({state:"visible"});
   await capture("workspace-mobile.png");

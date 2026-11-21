@@ -73,10 +73,12 @@ Jobs in `.github/workflows/release.yml`:
 | `release` | ubuntu-24.04 | Downloads binaries, writes `checksums.txt`, creates (or re-runs) the GitHub Release with `--generate-notes` |
 
 Source and browser checks finish before image publication. Both source and
-release CI use the workspace-pinned Playwright1.56.1 Chromium installer through
-Bun. The synthetic context proof uses actual Docker matching with synthetic
-private sentinels, including credential/state filenames, while retaining code
-such as `auth.ts` and required vendor files.
+release CI run the Chromium workflows and layout regressions with the
+workspace-pinned Playwright installer. Branch and pull request CI also builds
+the controller and runs the packaged durability and restart qualifier without
+publishing artifacts. The synthetic context proof uses actual Docker matching
+with synthetic private sentinels, including credential and state filenames,
+while retaining code such as `auth.ts` and required vendor files.
 
 `scripts/qualify-packaged-control.ts` uses unique labelled disposable containers
 and a private data volume. It binds the gateway inside the container explicitly
@@ -166,8 +168,6 @@ are regenerated.
 * Provenance/SBOM attestations (`provenance: true`, `sbom: true`) and image
   signing; deliberately off for the first release so `imagetools` merging stays
   simple.
-* Build the image on PRs (no push) so a Dockerfile regression fails before
-  tag day, not during a release.
 * `git-cliff` or a committed `CHANGELOG.md` if auto-generated notes prove too
   noisy.
 * Slim per-service images once the comprehensive image's size hurts a real
